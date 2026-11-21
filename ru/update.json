@@ -1,7 +1,7 @@
 {
-  "version": "0.6.2",
-  "notes": "Убрана вкладка «Выбрано» (плашки Alt+Q и Alt+1…4 сохранены)",
-  "updated_at": "2026-11-21T17:22:28Z",
+  "version": "0.6.3",
+  "notes": "Тест OTA: маркер 0.6.3 поверх 0.6.2",
+  "updated_at": "2026-11-21T17:31:24Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -127,7 +127,7 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "65e308c39ca83b3739da83b73f6e8f8f7eb3a77b5550ccd4dc3c11ac7a2c1b9b",
+      "sha256": "390eb1200d7c8799a562d701e8c3b7deae2efd53dc0200389550bc5719740fe9",
       "size": 302432
     }
   ]
