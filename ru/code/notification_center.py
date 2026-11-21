@@ -215,7 +215,8 @@ def action_for_kind(kind):
 def badge_state(cfg, records):
     """``(count, color)`` для колокольчика: цвет самого важного непрочитанного."""
     unread = [record for record in (records or [])
-              if isinstance(record, dict) and not record.get("read")]
+              if isinstance(record, dict) and not record.get("read")
+              and canonical_kind(record.get("kind")) != "pick"]
     if not unread:
         return 0, palette_color("muted", DEFAULT_SYSTEM_COLOR)
     best = max(unread, key=lambda record: kind_style(
@@ -373,7 +374,9 @@ class HistoryStore:
         return dict(normalized)
 
     def records(self):
-        return [dict(record) for record in self._records]
+        """Записи для центра; лут (pick) живёт в «Дропе», не здесь."""
+        return [dict(record) for record in self._records
+                if canonical_kind(record.get("kind")) != "pick"]
 
     def grouped(self, now=None):
         return group_records(self.records(), now=now)
@@ -411,14 +414,17 @@ class HistoryStore:
         return had
 
     def unread_count(self):
-        return sum(1 for record in self._records if not record.get("read"))
+        return sum(1 for record in self._records
+                   if not record.get("read")
+                   and canonical_kind(record.get("kind")) != "pick")
 
     def unread_records(self):
         return [dict(record) for record in self._records
-                if not record.get("read")]
+                if not record.get("read")
+                and canonical_kind(record.get("kind")) != "pick"]
 
     def badge(self, cfg=None):
-        return badge_state(cfg or {}, self._records)
+        return badge_state(cfg or {}, self.records())
 
 
 #: Поля предмета/ордера, которые храним в записи (t15: правка в один клик).
