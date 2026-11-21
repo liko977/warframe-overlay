@@ -221,7 +221,8 @@ class FarmStatsCollector:
                 if "ducats" in drop:
                     drops[-1]["ducats"] = drop.get("ducats")
                 # «взято: …» — отметка Alt+1…4 (может отсутствовать)
-                for key in ("picked_name", "picked_price", "picked_index"):
+                for key in ("picked_name", "picked_price", "picked_index",
+                            "picked_utc"):
                     if key in drop:
                         drops[-1][key] = drop.get(key)
             bd = s.get("best_drop")
@@ -480,9 +481,102 @@ class FarmStatsCollector:
                                         if index is not None else None)
             except Exception:
                 drop["picked_index"] = None
+            drop["picked_utc"] = float(self.clock())
             self._recompute_session_locked(sess)
         self.save()
         return True
+
+    def record_pick(self, name, price=None, index=None, slug=None,
+                    ts=None):
+        """Записать взятый лут, даже если EE.log ещё не дал дроп."""
+        name = str(name or "").strip()
+        if not name:
+            return False
+        now = float(ts if ts is not None else self.clock())
+        with self._lock:
+            sess = self._current_session_locked()
+            if sess is None:
+                sess = self._new_session_locked(now)
+            drop = {
+                "rel_time": 0.0, "utc": now, "path": "",
+                "slug": slug, "name": name,
+                "price": (int(price) if price is not None else None),
+                "priced": price is not None,
+                "picked_name": name,
+                "picked_price": (int(price) if price is not None else None),
+                "picked_index": (int(index) if index is not None else None),
+                "picked_utc": now,
+            }
+            sess.setdefault("drops", []).append(drop)
+            self._recompute_session_locked(sess)
+        self.save()
+        return True
+
+    def picked_loot(self, limit=200):
+        """Взятые предметы (Alt+1…4), новые сверху."""
+        out = []
+        with self._lock:
+            for sess in self.data.get("sessions") or []:
+                started = sess.get("started_utc")
+                for drop in sess.get("drops") or []:
+                    name = str(drop.get("picked_name") or "").strip()
+                    if not name:
+                        continue
+                    item = copy.deepcopy(drop)
+                    item["picked_name"] = name
+                    item["picked_price"] = _to_int(drop.get("picked_price"))
+                    item["picked_utc"] = (_to_float(drop.get("picked_utc"))
+                                          or _to_float(drop.get("utc"))
+                                          or started or 0.0)
+                    item["session_started_utc"] = started
+                    out.append(item)
+        out.sort(key=lambda d: d.get("picked_utc") or 0.0, reverse=True)
+        return out[:max(1, int(limit))]
+
+    def picked_stats(self):
+        """Агрегаты «Дропа» по взятому луту (не по всем EE.log дропам)."""
+        loot = self.picked_loot(100000)
+        total_value = sum(d.get("picked_price") or 0 for d in loot)
+        best = None
+        for d in loot:
+            price = d.get("picked_price")
+            if price is None:
+                continue
+            if best is None or price > (best.get("price") or 0):
+                best = {"name": d.get("picked_name"), "price": price,
+                        "utc": d.get("picked_utc"),
+                        "picked_utc": d.get("picked_utc"),
+                        "slug": d.get("slug")}
+        base = self.stats()
+        with self._lock:
+            sessions = self.data.get("sessions") or []
+            current_id = (sessions[-1].get("id") if sessions
+                          and sessions[-1].get("ended_utc") is None else None)
+        current = [d for d in loot
+                   if self._session_id_for_started(
+                       d.get("session_started_utc")) == current_id]
+        return {
+            "relics_opened": len(loot), "total_value": int(total_value),
+            "best_drop": best,
+            "avg_per_hour": (total_value / base.get("hours", 0.0)
+                             if base.get("hours", 0.0) > 0 else 0.0),
+            "hours": base.get("hours", 0.0),
+            "sessions": base.get("sessions", 0),
+            "current_relics": len(current),
+            "current_active": base.get("current_active", False),
+            "priced_drops": sum(1 for d in loot
+                                if d.get("picked_price") is not None),
+            "loot": loot,
+        }
+
+    def _session_id_for_started(self, started):
+        try:
+            for sess in self.data.get("sessions") or []:
+                if sess.get("started_utc") == started:
+                    return sess.get("id")
+        except Exception:
+            pass
+        return None
 
     # ── сессии ──────────────────────────────────────────────────────────
     def _current_session_locked(self):
@@ -877,7 +971,7 @@ class FarmStatsCollector:
                 if best is None or bd["price"] > best["price"]:
                     best = bd
             hours += self._hours(s, now)
-        avg_per_hour = total_value / max(hours, 1.0 / 3600.0)
+        avg_per_hour = total_value / hours if hours > 0 else 0.0
         current = sessions[-1] if sessions else None
         return {
             "relics_opened": total_relics,
