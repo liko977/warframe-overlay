@@ -73,7 +73,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.6.6"
+APP_VERSION = "0.7.0"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -224,6 +224,7 @@ DEFAULT_CONFIG = {
     "currency_ducats_color": "#C9A66B",    # цвет дукатов в UI
     "show_summary": True,            # показывать блок «Итого» над плашками
     "show_item_icons": True,         # иконки предметов WFCD в UI
+    "overlay_show_set_price": True,   # «компл. N p» на карточке части
 
     # ── игровой лог EE.log (только чтение, см. LOG_SPEC.md) ─────────────
     "log_enabled": True,             # читать EE.log «хвостом» как доп. источник
@@ -451,6 +452,17 @@ def load_config(path=CONFIG_PATH):
         cfg["hotkey_editor"] = "f8"
     if isinstance(raw, dict) and "auto_detect" not in raw:
         cfg["auto_detect"] = False
+    # горячие клавиши: RU→EN уже при чтении конфига
+    for key in _OTHER_HOTKEY_KEYS:
+        if cfg.get(key):
+            cfg[key] = _hotkey_canon(cfg.get(key))
+    raw_picks = cfg.get("pick_hotkeys")
+    if isinstance(raw_picks, (list, tuple)):
+        cfg["pick_hotkeys"] = [_hotkey_canon(value) for value in raw_picks]
+    elif isinstance(raw_picks, str):
+        cfg["pick_hotkeys"] = [_hotkey_canon(part)
+                               for part in raw_picks.split(",")
+                               if part.strip()]
     cfg["debug_dir"] = os.path.join(DATA_DIR, cfg.get("debug_dir") or "ocr_debug")
     return cfg
 
@@ -590,6 +602,25 @@ def word_coverage(query, candidate):
         if best >= threshold:
             hits += 1
     return hits / len(qw)
+
+
+def set_slug_for_part(slug, name=""):
+    """slug части → slug полного комплекта (``*_prime_set``)."""
+    try:
+        mod = item_icons_module()
+        if mod is None:
+            return ""
+        is_part, _badge, parent = mod.part_info(slug, name)
+        parent = str(parent or "")
+        if not is_part or not parent:
+            return ""
+        if str(slug or "").lower().endswith("_set"):
+            return ""
+        if parent.endswith("_set"):
+            return parent
+        return parent + "_set"
+    except Exception:
+        return ""
 
 
 class MarketAPI:
@@ -1602,7 +1633,14 @@ def build_overlays():
             self.lbl_sold = QLabel("")
             self.lbl_sold.setStyleSheet("color:#8b97a8; font-size:10px;")
             self.lbl_sold.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.lbl_set = QLabel("")
+            self.lbl_set.setStyleSheet(
+                f"color:{theme.currency_platinum()}; font-size:9px; "
+                "font-weight:600;")
+            self.lbl_set.setToolTip("Полный комплект")
+            self.lbl_set.setVisible(False)
             bot.addWidget(self.lbl_owned)
+            bot.addWidget(self.lbl_set)
             bot.addStretch(1)
             bot.addWidget(self.lbl_sold)
 
@@ -1714,6 +1752,29 @@ def build_overlays():
             elif self._last_data:
                 self._request_icon(self._last_data)
 
+        def _update_set_label(self, data):
+            show = bool(self.cfg.get("overlay_show_set_price", True))
+            price = (data or {}).get("set_price") if show else None
+            if price is None:
+                self.lbl_set.clear()
+                self.lbl_set.setVisible(False)
+                return
+            name = ((data or {}).get("set_name")
+                    or (data or {}).get("set_slug") or "комплект")
+            self.lbl_set.setText(f"компл. {int(price)} p")
+            self.lbl_set.setToolTip(f"Полный комплект: {name}")
+            self.lbl_set.setStyleSheet(
+                f"color:{theme.currency_platinum()}; font-size:9px; "
+                "font-weight:600;")
+            self.lbl_set.setVisible(True)
+
+        def apply_set_setting(self):
+            if self._last_data:
+                self._update_set_label(self._last_data)
+            else:
+                self.lbl_set.clear()
+                self.lbl_set.setVisible(False)
+
         def set_data(self, d):
             self._last_data = dict(d) if d else None
             if not d:
@@ -1730,6 +1791,7 @@ def build_overlays():
                 self._request_icon(d)
             except Exception:
                 self._set_placeholder_icon()
+            self._update_set_label(d)
 
             owned_txt = d.get("owned") or ""
             self.lbl_owned.setVisible(bool(owned_txt))
@@ -3158,49 +3220,68 @@ class EventsPanelController:
             self.show()
 
 
+def _hotkey_canon(value):
+    try:
+        mod = settings_ui_module()
+        if mod is not None:
+            return mod.canon_hotkey(value)
+    except Exception:
+        pass
+    return str(value or "").strip().lower()
+
+
+def _hotkey_variants(value):
+    try:
+        mod = settings_ui_module()
+        if mod is not None:
+            return mod.hotkey_variants(value)
+    except Exception:
+        pass
+    key = _hotkey_canon(value)
+    return [key] if key else []
+
+
+def register_hotkey(keyboard_module, key, action, suppress=True):
+    """Зарегистрировать клавишу в латинской и русской раскладках."""
+    key = _hotkey_canon(key)
+    if not key or action is None:
+        return False
+    ok = False
+    for variant in _hotkey_variants(key):
+        try:
+            try:
+                keyboard_module.add_hotkey(variant, action,
+                                           suppress=suppress)
+            except TypeError:
+                # старые/упрощённые заглушки keyboard без suppress
+                keyboard_module.add_hotkey(variant, action)
+            ok = True
+        except Exception as exc:
+            log(f"Хоткей {variant} не зарегистрирован "
+                f"({type(exc).__name__}: {exc})")
+    return ok
+
+
 def add_hotkey_events(cfg, keyboard_module, action):
     """Регистрирует новый хоткей панели событий (``hotkey_events``, Alt+E).
 
-    Вынесено отдельной функцией, чтобы тесты могли проверить привязку,
-    подменив модуль ``keyboard``. Старые хоткеи (Alt+Q / F8 / F9)
-    регистрируются в ``run_gui`` ровно как раньше — их не трогаем.
-    Возвращает ``True``, если клавиша зарегистрирована.
+    Регистрируются оба варианта раскладки; при ошибке одного второй остаётся.
+    Возвращает ``True``, если зарегистрирован хотя бы один вариант.
     """
-    key = cfg.get("hotkey_events", "alt+e")
-    if not key or action is None:
-        return False
-    try:
-        keyboard_module.add_hotkey(key, action)
-        return True
-    except Exception as e:
-        log(f"Хоткей {key} не зарегистрирован ({type(e).__name__}: {e})")
-        return False
+    return register_hotkey(keyboard_module,
+                           cfg.get("hotkey_events", "alt+e"), action)
 
 
 def add_hotkey_market(cfg, keyboard_module, action):
     """Регистрирует хоткей окна «Маркет» (``hotkey_market``, Alt+M)."""
-    key = cfg.get("hotkey_market", "alt+m")
-    if not key or action is None:
-        return False
-    try:
-        keyboard_module.add_hotkey(key, action)
-        return True
-    except Exception as e:
-        log(f"Хоткей {key} не зарегистрирован ({type(e).__name__}: {e})")
-        return False
+    return register_hotkey(keyboard_module,
+                           cfg.get("hotkey_market", "alt+m"), action)
 
 
 def add_hotkey_window(cfg, keyboard_module, action):
     """Регистрирует главный хоткей единого окна (``hotkey_window``, F8)."""
     key = cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")
-    if not key or action is None:
-        return False
-    try:
-        keyboard_module.add_hotkey(key, action)
-        return True
-    except Exception as e:
-        log(f"Хоткей {key} не зарегистрирован ({type(e).__name__}: {e})")
-        return False
+    return register_hotkey(keyboard_module, key, action)
 
 
 #: Alt+1…Alt+4 — «взята награда №N из последнего скана» (по умолчанию).
@@ -3228,12 +3309,12 @@ def pick_hotkeys(cfg):
         raw = list(PICK_HOTKEYS_DEFAULT)
     busy = set()
     for key in _OTHER_HOTKEY_KEYS:
-        value = str(cfg.get(key) or "").strip().lower()
+        value = _hotkey_canon(cfg.get(key) or "")
         if value:
             busy.add(value)
     out = []
     for index, key in enumerate(list(raw)[:4]):
-        name = str(key or "").strip().lower()
+        name = _hotkey_canon(key)
         if not name or name in busy:
             continue
         if any(name == existing for existing, _idx in out):
@@ -3251,13 +3332,10 @@ def add_hotkeys_pick(cfg, keyboard_module, emit):
     pairs = pick_hotkeys(cfg)
     registered = []
     for key, index in pairs:
-        try:
-            keyboard_module.add_hotkey(
-                key, lambda i=index: emit(i), suppress=False)
+        if register_hotkey(
+                keyboard_module, key,
+                lambda i=index: emit(i), suppress=False):
             registered.append((key, index))
-        except Exception as e:
-            log(f"Хоткей {key} (награда Alt+{index + 1}) не зарегистрирован "
-                f"({type(e).__name__}: {e})")
     return registered
 
 
@@ -4306,6 +4384,7 @@ def append_relic_block(cfg, results, title="Награды"):
         tail = ("  |  " + "  |  ".join(extra)) if extra else ""
         lines.append(f"  {i}. {name} — {fmt_plat(price)}{tail}")
     lines.append(f"  Итого: {int(total)}p")
+    lines.append("  Выбран: ?")
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -5467,6 +5546,30 @@ class Scanner:
             if gen != self.generation:
                 return
 
+            # цена комплекта для карточек-частей (в «Итого» не входит)
+            for d in final:
+                if not self.cfg.get("overlay_show_set_price", True):
+                    continue
+                slug = str(d.get("slug") or "")
+                set_slug = set_slug_for_part(slug, d.get("name") or "")
+                d["set_slug"] = set_slug
+                d["set_price"] = None
+                if not set_slug:
+                    continue
+                lookup_set = getattr(self.api, "lookup_slug", None)
+                if not callable(lookup_set):
+                    continue
+                try:
+                    info = lookup_set(set_slug)
+                except Exception as exc:
+                    log(f"  API комплект {set_slug}: "
+                        f"{type(exc).__name__}")
+                    continue
+                if isinstance(info, dict) and info.get("price") is not None:
+                    d["set_price"] = info.get("price")
+                    d["set_name"] = (info.get("market_name")
+                                     or info.get("name") or set_slug)
+
             started = time.time()
             self.mgr.updated.emit(final)
             perf["render"] += time.time() - started
@@ -6491,17 +6594,24 @@ def run_gui(cfg):
                 marked = collector.mark_picked(
                     result.get("name") or manager._reward_name(item),
                     price=item.get("price"), index=index)
+                if not marked:
+                    collector.record_pick(
+                        result.get("name") or manager._reward_name(item),
+                        price=item.get("price"), index=index,
+                        slug=item.get("slug"))
+                    marked = True
                 if marked and drops_panel is not None:
                     drops_panel.refresh()
             except Exception as e:
                 log(f"  Дроп: «взято» не записано ({type(e).__name__}: {e})")
-        # тост — когда окно скрыто (иначе достаточно статуса в шапке)
-        if notifier is not None and (unified is None or not unified.isVisible()):
             try:
-                notifier.notify("pick", "Взята награда", message,
-                                force=bool(result.get("ok")))
-            except Exception:
-                pass
+                mark_relic_selection(
+                    cfg, index,
+                    manager.last_results if manager is not None else [])
+            except Exception as e:
+                log(f"  Журнал: «выбрано» не записано "
+                    f"({type(e).__name__}: {e})")
+        # тост/звук для «взято» не нужны: выбор уже подтверждён в «Дропе»
         return bool(result.get("ok"))
 
     def hide_all():
@@ -6534,11 +6644,14 @@ def run_gui(cfg):
     ui.screen_closed.connect(manager.hide_all)
     ui.pick_reward.connect(pick_reward)
 
-    # старые хоткеи — ровно как раньше; новые — только если окна есть
+    # старые хоткеи — ровно как раньше, но в обеих раскладках
     if unified is None:
-        keyboard.add_hotkey(cfg.get("hotkey_editor", "f8"), ui.toggle_selected.emit)
-    keyboard.add_hotkey(cfg.get("hotkey_scan", "alt+q"), ui.scan.emit)
-    keyboard.add_hotkey(cfg.get("hotkey_hide", "f9"), ui.hide_all.emit)
+        register_hotkey(keyboard, cfg.get("hotkey_editor", "f8"),
+                        ui.toggle_selected.emit)
+    register_hotkey(keyboard, cfg.get("hotkey_scan", "alt+q"),
+                    ui.scan.emit)
+    register_hotkey(keyboard, cfg.get("hotkey_hide", "f9"),
+                    ui.hide_all.emit)
     if unified is not None:
         add_hotkey_window(cfg, keyboard, ui.window_toggle.emit)
     if events_ctl is not None:
@@ -6599,9 +6712,19 @@ def run_gui(cfg):
                 provider.enabled = bool(settings_cfg.get("show_item_icons",
                                                          True))
             for card in list(getattr(manager, "cards", []) or []):
+                try:
+                    card.cfg["overlay_show_set_price"] = bool(
+                        settings_cfg.get("overlay_show_set_price", True))
+                    card.cfg["show_item_icons"] = bool(
+                        settings_cfg.get("show_item_icons", True))
+                except Exception:
+                    pass
                 apply_icon = getattr(card, "apply_icon_setting", None)
                 if callable(apply_icon):
                     apply_icon()
+                apply_set = getattr(card, "apply_set_setting", None)
+                if callable(apply_set):
+                    apply_set()
         except Exception as e:
             log(f"Настройки: иконки не переключены "
                 f"({type(e).__name__}: {e})")
