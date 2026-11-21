@@ -12,15 +12,13 @@
 Особенности:
 * кастомная шапка: тянуть можно за любое свободное место шапки
   (openHand/closedHand), кнопки и поля внутри шапки перетаскивание не
-  начинают; двойной клик — развернуть/восстановить; после разворота
-  перетаскивание сначала возвращает нормальный размер, потом двигает окно;
+  начинают; двойной клик по шапке больше не разворачивает окно;
   окно не выходит за пределы рабочего стола текущего монитора;
-* режимы окна: normal ↔ maximized (кнопка «□», двойной клик по шапке) и
-  fullscreen (кнопка «⛶», F11). Esc в полноэкранном режиме выходит из него,
-  в обычном — скрывает окно. Кнопки «—» (скрыть, как F9) и «×» (закрыть и
-  вернуть фокус игре) — справа, в стиле ui_theme, с подсказками;
+* режимы окна: normal и fullscreen (кнопка «⛶», F11). Esc в полноэкранном
+  режиме выходит из него, в обычном — скрывает окно. Кнопки «—» (скрыть, как
+  F9) и «×» (закрыть и вернуть фокус игре) — справа, в стиле ui_theme;
 * ресайз за невидимый грип 12×12 в правом нижнем углу, минимум 900×600,
-  максимум — availableGeometry; в max/fullscreen ресайз заблокирован;
+  максимум — availableGeometry; в fullscreen ресайз заблокирован;
 * позиция/размер/последняя вкладка сохраняются в config.json
   (``window_geometry``, ``window_size``, ``last_tab``) — только для
   нормального состояния; при старте окно открывается нормальным с
@@ -161,7 +159,7 @@ def build_overlay_window():
             return self._full_text
 
     class _DragHeader(QFrame):
-        """Шапка окна: перетаскивание и двойной клик (развернуть/восстановить).
+        """Шапка окна: только перетаскивание (без двойного клика).
 
         Тянуть можно за любое свободное место шапки. Кнопки и поля ввода
         внутри шапки перетаскивание не начинают — они обрабатывают мышь сами.
@@ -224,14 +222,8 @@ def build_overlay_window():
             super().mouseReleaseEvent(event)
 
         def mouseDoubleClickEvent(self, event):
-            if event.button() == Qt.LeftButton:
-                if self._interactive_at(event.pos()):
-                    event.ignore()
-                    return
-                self.window.toggle_maximized()
-                event.accept()
-                return
-            super().mouseDoubleClickEvent(event)
+            # Скрытая функция «развернуть» убрана вместе с кнопкой.
+            event.ignore()
 
     class _ResizeGrip(QWidget):
         """Невидимый грип 12×12 в правом нижнем углу: ресайз нормального окна."""
@@ -441,12 +433,6 @@ def build_overlay_window():
             self.btn_minimize.setCursor(Qt.PointingHandCursor)
             self.btn_minimize.setToolTip("Скрыть (F9)")
             self.btn_minimize.clicked.connect(self.hide_window)
-            self.btn_maximize = QPushButton("□")
-            self.btn_maximize.setFont(make_font(13))
-            self.btn_maximize.setFixedSize(24, 24)
-            self.btn_maximize.setStyleSheet(theme.button_qss(small=True))
-            self.btn_maximize.setCursor(Qt.PointingHandCursor)
-            self.btn_maximize.clicked.connect(self.toggle_maximized)
             self.btn_fullscreen = QPushButton("⛶")
             self.btn_fullscreen.setFont(QFont("Segoe UI Symbol", 12))
             self.btn_fullscreen.setFixedSize(24, 24)
@@ -486,8 +472,7 @@ def build_overlay_window():
             header_lay.addStretch(1)
             for widget in (self.lbl_status, self.btn_bell, self.btn_settings,
                            self.btn_refresh, self.btn_minimize,
-                           self.btn_maximize, self.btn_fullscreen,
-                           self.btn_close):
+                           self.btn_fullscreen, self.btn_close):
                 add_header(widget)
 
             self.tabs = QButtonGroup(self)
@@ -1259,7 +1244,7 @@ def build_overlay_window():
             self._update_resize_grip()
 
         def toggle_maximized(self):
-            """«□»/двойной клик: normal ↔ maximized в пределах рабочего стола."""
+            """Совместимость: развернуть/восстановить без кнопки в шапке."""
             if self._mode != "normal":
                 # из fullscreen/max — вернуть нормальный размер
                 self._leave_special_mode()
@@ -1294,15 +1279,6 @@ def build_overlay_window():
                 grip.raise_()
 
         def _update_window_buttons(self):
-            if self.btn_maximize is None:
-                return
-            if self._mode == "maximized":
-                self.btn_maximize.setToolTip(
-                    "Восстановить окно (двойной клик по шапке)")
-            else:
-                self.btn_maximize.setToolTip(
-                    "Развернуть в пределах рабочего стола "
-                    "(двойной клик по шапке)")
             if self._mode == "fullscreen":
                 self.btn_fullscreen.setToolTip(
                     "Выйти из полноэкранного режима (F11, Esc)")
