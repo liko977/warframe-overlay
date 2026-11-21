@@ -92,8 +92,12 @@ def price_text(value):
         return "—"
 
 
-def item_icon_label(item, size=24, cfg=None):
-    """QLabel с иконкой предмета (лениво); None, если Qt/модуль недоступны."""
+def item_icon_label(item, size=24, cfg=None, force=False):
+    """QLabel с иконкой предмета (лениво); None, если Qt/модуль недоступны.
+
+    ``force=True`` — показать иконку/плейсхолдер даже при выключенных
+    «Иконках предметов» (тост лута).
+    """
     try:
         from PyQt5.QtCore import Qt
         from PyQt5.QtWidgets import QLabel
@@ -101,11 +105,11 @@ def item_icon_label(item, size=24, cfg=None):
         cfg = cfg or {}
         base = cfg.get("data_dir") or os.environ.get("WF_DATA_DIR")
         provider = item_icons.get_provider(
-            base, enabled=bool(cfg.get("show_item_icons", True)))
+            base, enabled=bool(force or cfg.get("show_item_icons", True)))
         label = QLabel()
         label.setFixedSize(int(size), int(size))
         label.setStyleSheet("background: transparent;")
-        if not cfg.get("show_item_icons", True):
+        if not force and not cfg.get("show_item_icons", True):
             label.hide()
             return label
         name = item.get("en_name") or item.get("name") or ""
@@ -1234,8 +1238,17 @@ def build_market_browser():
             super().hide()
 
         def _open_order_dialog(self, order_type="sell", order=None,
-                               prefill_price=None, price_note=""):
-            if order is not None:
+                               prefill_price=None, price_note="", item=None):
+            if item is None and order is None:
+                # создание из «Поиска»: прежняя логика (регресс-контракт)
+                if not self._details or not self._selected_slug:
+                    return False
+                item = dict(self._items_by_slug.get(self._selected_slug) or {})
+                meta = (self._details or {}).get("meta") or {}
+                item.setdefault("slug", self._selected_slug)
+                item.setdefault("market_name", meta.get("name"))
+                item.setdefault("name", meta.get("name"))
+            elif order is not None:
                 # правка существующего ордера: предмет — строго из ордера,
                 # выбор в «Поиске» больше не влияет
                 item = self._order_dialog_item(order)
@@ -1244,20 +1257,12 @@ def build_market_browser():
                         "не удалось определить предмет ордера — "
                         "обновите каталог (⟳) и повторите",
                         stale=True, sticky=True)
-                    return
-            else:
-                # создание из «Поиска»: прежняя логика (регресс-контракт)
-                if not self._details or not self._selected_slug:
-                    return
-                item = dict(self._items_by_slug.get(self._selected_slug) or {})
-                meta = (self._details or {}).get("meta") or {}
-                item.setdefault("slug", self._selected_slug)
-                item.setdefault("market_name", meta.get("name"))
-                item.setdefault("name", meta.get("name"))
+                    return False
+            item = dict(item or {})
             if self.dialog_factory is None:
                 self._show_message(
                     "Форма ордера недоступна (нет модуля диалогов).")
-                return
+                return False
             accepted = False
             dialog = None
             try:
@@ -1281,6 +1286,37 @@ def build_market_browser():
                 self._load_orders(force=True)
                 if order is not None and accepted:
                     self._set_status("ордер обновлён — список перезагружен")
+            return bool(accepted)
+
+        def find_my_sell_order(self, slug):
+            """Мой sell-ордер на предмет (без сети; по загруженному списку)."""
+            slug = str(slug or "").strip()
+            if not slug:
+                return None
+            for order in getattr(self, "_orders", []) or []:
+                if order_type_of(order) != "sell":
+                    continue
+                embedded = (order.get("item")
+                            if isinstance(order.get("item"), dict) else {})
+                oslug = (embedded.get("slug") or order.get("itemSlug")
+                         or order.get("item_slug") or "")
+                if not oslug:
+                    item = self._order_dialog_item(order)
+                    oslug = item.get("slug") or ""
+                if str(oslug) == slug:
+                    return dict(order)
+            return None
+
+        def open_loot_order(self, item, prefill_price=None, price_note="",
+                            order=None):
+            """Открыть форму продажи/правки предмета из строки «Лута»."""
+            if order is not None:
+                return self._open_order_dialog(
+                    "sell", order=order, prefill_price=prefill_price,
+                    price_note=price_note)
+            return self._open_order_dialog(
+                "sell", item=dict(item or {}), prefill_price=prefill_price,
+                price_note=price_note)
 
         # ── мои ордера ─────────────────────────────────────────────────
         def _load_orders(self, force=False):
