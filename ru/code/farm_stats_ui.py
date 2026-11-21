@@ -15,6 +15,7 @@
 Модуль не импортирует warframe/market_client: ``collector`` и ``pool``
 передаются извне (см. ``build_drops_panel``).
 """
+import datetime
 import os
 import time
 
@@ -197,7 +198,7 @@ def build_drops_panel():
             # живой пересчёт «доход в час» раз в секунду (без перестроения UI)
             self._tick_timer = QTimer(self)
             self._tick_timer.setInterval(1000)
-            self._tick_timer.timeout.connect(self._update_stats_labels)
+            self._tick_timer.timeout.connect(self._update_avg_label)
             self._tick_timer.start()
 
             self.switch_tab(self._active)
@@ -244,6 +245,20 @@ def build_drops_panel():
                          self.card_best, self.card_avg):
                 cards.addWidget(card["frame"], 1)
             lay.addLayout(cards)
+
+            lay.addWidget(self._make_section("Лут"))
+            self.loot_host = QWidget()
+            self.loot_lay = QVBoxLayout(self.loot_host)
+            self.loot_lay.setContentsMargins(0, 0, 0, 0)
+            self.loot_lay.setSpacing(3)
+            self.loot_scroll = QScrollArea()
+            self.loot_scroll.setWidgetResizable(True)
+            self.loot_scroll.setFrameShape(QFrame.NoFrame)
+            self.loot_scroll.setMaximumHeight(210)
+            self.loot_scroll.setStyleSheet(
+                "QScrollArea { background: transparent; }")
+            self.loot_scroll.setWidget(self.loot_host)
+            lay.addWidget(self.loot_scroll)
 
             lay.addWidget(self._make_section("Последние дропы"))
             self.recent_host = QWidget()
@@ -309,17 +324,48 @@ def build_drops_panel():
                     f"color:{_color_for_price(best.get('price'))};"
                     " background: transparent;")
                 self.card_best["sub"].setText(
-                    f"цена: {_fmt_price(best.get('price'))} · {_fmt_rel(best.get('rel_time'))}")
+                    f"цена: {_fmt_price(best.get('price'))} · "
+                    f"{self._time_label(best.get('picked_utc') or best.get('utc'))}")
             else:
                 self.card_best["value"].setText("—")
                 self.card_best["value"].setStyleSheet(
                     f"color:{theme.PALETTE['text']}; background: transparent;")
                 self.card_best["sub"].setText("цена: —")
-            self.card_avg["value"].setText(f"{stats['avg_per_hour']:.1f} p/ч")
-            self.card_avg["sub"].setText(f"за {stats['hours']:.1f} ч игры")
+            if stats.get("hours", 0.0) <= 0 or stats.get("avg_per_hour", 0) <= 0:
+                self.card_avg["value"].setText("—")
+                self.card_avg["sub"].setText("нет данных")
+            else:
+                self.card_avg["value"].setText(
+                    f"{stats['avg_per_hour']:.1f} p/ч")
+                self.card_avg["sub"].setText(
+                    f"за {stats['hours']:.1f} ч игры")
+
+        def _update_avg_label(self):
+            stats = self._stats()
+            if stats:
+                self._update_avg_only(stats)
+
+        def _update_avg_only(self, stats):
+            if stats.get("hours", 0.0) <= 0 or stats.get("avg_per_hour", 0) <= 0:
+                self.card_avg["value"].setText("—")
+                self.card_avg["sub"].setText("нет данных")
+            else:
+                self.card_avg["value"].setText(
+                    f"{stats['avg_per_hour']:.1f} p/ч")
+                self.card_avg["sub"].setText(
+                    f"за {stats['hours']:.1f} ч игры")
+
+        @staticmethod
+        def _time_label(ts):
+            try:
+                return datetime.datetime.fromtimestamp(
+                    float(ts)).strftime("%H:%M")
+            except Exception:
+                return "—"
 
         def _render_stats(self):
             self._update_stats_labels()
+            self._render_loot()
             # список последних дропов
             while self.recent_lay.count():
                 item = self.recent_lay.takeAt(0)
@@ -342,6 +388,84 @@ def build_drops_panel():
             self.recent_lay.addStretch(1)
             self.lbl_stats_status.setText(
                 "обновлено" if drops else "нет данных")
+
+        @staticmethod
+        def _day_label(ts):
+            try:
+                dt = datetime.datetime.fromtimestamp(float(ts)).date()
+            except Exception:
+                dt = datetime.date.today()
+            today = datetime.date.today()
+            if dt == today:
+                return "Сегодня"
+            if dt == today - datetime.timedelta(days=1):
+                return "Вчера"
+            return dt.strftime("%d.%m.%Y")
+
+        def _render_loot(self):
+            while self.loot_lay.count():
+                item = self.loot_lay.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            loot = []
+            if self.collector is not None:
+                try:
+                    loot = self.collector.picked_loot(60)
+                except Exception:
+                    loot = []
+            if not loot:
+                empty = QLabel(
+                    "Лут появится, когда отметите награду Alt+1…4")
+                empty.setFont(self._f_detail)
+                empty.setStyleSheet(theme.muted_qss(11))
+                self.loot_lay.addWidget(empty)
+                return
+            current_day = None
+            for drop in loot:
+                day = self._day_label(drop.get("picked_utc"))
+                if day != current_day:
+                    current_day = day
+                    head = QLabel(day)
+                    head.setFont(self._f_detail)
+                    head.setStyleSheet(theme.section_qss())
+                    self.loot_lay.addWidget(head)
+                row = QFrame()
+                row.setObjectName("lootRow")
+                row.setStyleSheet(theme.row_qss(name="lootRow", radius=4))
+                line = QHBoxLayout(row)
+                line.setContentsMargins(8, 3, 8, 3)
+                line.setSpacing(7)
+                try:
+                    when = datetime.datetime.fromtimestamp(
+                        float(drop.get("picked_utc"))).strftime("%H:%M")
+                except Exception:
+                    when = "--:--"
+                t = QLabel(when)
+                t.setFont(self._f_detail)
+                t.setFixedWidth(42)
+                t.setStyleSheet(theme.muted_qss(10))
+                icon = _item_icon_label(self.cfg, drop, 24)
+                name = QLabel(str(drop.get("picked_name") or "?"))
+                name.setFont(self._f_text)
+                name.setStyleSheet(
+                    f"color:{theme.PALETTE['text']}; background: transparent;")
+                price = QLabel(f"{int(drop.get('picked_price') or 0)} p")
+                price.setFont(make_font(11, True))
+                price.setStyleSheet(
+                    f"color:{theme.PALETTE['platinum']};"
+                    " background: transparent;")
+                price.setToolTip(theme.currency_tooltip("platinum"))
+                qty = QLabel("×1")
+                qty.setFont(self._f_detail)
+                qty.setStyleSheet(theme.muted_qss(10))
+                line.addWidget(t)
+                if icon is not None:
+                    line.addWidget(icon, 0, Qt.AlignVCenter)
+                line.addWidget(name, 1)
+                line.addWidget(price)
+                line.addWidget(qty)
+                self.loot_lay.addWidget(row)
 
         def _make_drop_row(self, d):
             row = QFrame()
@@ -701,6 +825,9 @@ def build_drops_panel():
             if self.collector is None:
                 return {}
             try:
+                picked = getattr(self.collector, "picked_stats", None)
+                if callable(picked):
+                    return picked()
                 return self.collector.stats()
             except Exception:
                 return {}
