@@ -902,6 +902,22 @@ def build_notification_center():
             text.setFont(font(10))
             text.setStyleSheet(f"color:{color('text')}; background:transparent;")
             text.setWordWrap(True)
+            if theme is not None:
+                try:
+                    import re as _re
+                    platinum = theme.currency_platinum()
+                    raw = str(record.get("text") or "")
+                    html = _re.sub(
+                        r"(\d+)\s*p\b",
+                        lambda m: (
+                            f"<span style='color:{platinum}; "
+                            f"font-weight:700;'>{m.group(1)}p</span>"),
+                        raw)
+                    if html != raw:
+                        text.setText(html)
+                        text.setToolTip(theme.currency_tooltip("platinum"))
+                except Exception:
+                    pass
             self.lbl_text = text
             body.addWidget(text)
             layout.addLayout(body, 1)
