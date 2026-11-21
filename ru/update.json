@@ -1,7 +1,7 @@
 {
-  "version": "0.7.0",
-  "notes": "Лут-фид в «Дроп», подсчёты по взятому, без лута в уведомлениях, мастер-выключатель звука, цена комплекта на плашках, шапка без кнопки «Развернуть»",
-  "updated_at": "2026-11-21T22:26:17Z",
+  "version": "0.7.1",
+  "notes": "Тест OTA: маркер 0.7.1 поверх 0.7.0",
+  "updated_at": "2026-11-21T22:41:02Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -139,7 +139,7 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "069a34bba63225a3f9e108948a5c95e03b5d0377ec666e1cd7bb4b06a22a18bc",
+      "sha256": "10f091e534bc847d8bc3442b954c9087cc4b5d23f0a7a711b1d0d46a1bfb7e5b",
       "size": 334385
     }
   ]
