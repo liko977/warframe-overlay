@@ -2,7 +2,7 @@
 """Единое окно «Warframe Overlay» с вкладками (стиль AlecaFrame).
 
 Одна кнопка (F8) открывает одно окно; внутри — вкладки «Маркет»,
-«Мои ордера», «События», «Дроп», «Уведомления», «Чат». Редактор «Выбрано»
+«Мои ордера», «События», «Дроп», «Чат». Редактор «Выбрано»
 из окна убран (плашки Alt+Q и Alt+1…4 остаются отдельными). Содержимое — уже
 существующие панели:
 редактор списка (F8-редактор), маркет-браузер (t6) и панель событий (t5);
@@ -23,7 +23,7 @@
   (``window_geometry``, ``window_size``, ``last_tab``) — только для
   нормального состояния; при старте окно открывается нормальным с
   сохранённой геометрией, невалидная позиция центрируется;
-* Ctrl+1..6 и клик переключают вкладки; статус маркета (чип токена) и
+* Ctrl+1..5 и клик переключают вкладки; статус маркета (чип токена) и
   «обновлено N с назад» + ⟳ для активной вкладки;
 * чип «🔑» открывает окно входа на warframe.market (встроенный браузер,
   см. AUTH_SPEC.md и market_auth.py); если окно входа недоступно — прежний
@@ -95,8 +95,8 @@ def build_overlay_window():
     from PyQt5.QtGui import QFont, QGuiApplication, QKeySequence, QPainter
     from PyQt5.QtWidgets import (QAbstractButton, QAbstractSlider,
                                  QAbstractSpinBox, QButtonGroup, QComboBox,
-                                 QFrame, QHBoxLayout, QLabel, QLineEdit,
-                                 QMenu, QPushButton, QShortcut,
+                                 QDialog, QFrame, QHBoxLayout, QLabel,
+                                 QLineEdit, QMenu, QPushButton, QShortcut,
                                  QSizePolicy, QStackedWidget, QVBoxLayout,
                                  QWidget)
 
@@ -289,10 +289,9 @@ def build_overlay_window():
             self.titles = list(TAB_TITLES)
             if drops_widget is not None:
                 self.titles.append("Дроп")
+            # «Уведомления» больше не вкладка: центр открывается колокольчиком
             self._notifications_index = None
-            if notifications_widget is not None:
-                self._notifications_index = len(self.titles)
-                self.titles.append("Уведомления")
+            self._notifications_dialog = None
             self._chat_index = None
             if chat_widget is not None:
                 self._chat_index = len(self.titles)
@@ -314,11 +313,11 @@ def build_overlay_window():
             self.status_providers = list(status_providers or [])
             self.refresh_actions = list(refresh_actions or [])
             if notifications_widget is not None:
-                # индекс провайдера/действия совпадает с индексом вкладки
-                self.status_providers.append(
-                    lambda: f"уведомления: "
-                            f"{self.notifications_widget.unread_count()}")
-                self.refresh_actions.append(self.notifications_widget.refresh)
+                try:
+                    notifications_widget.unread_changed.connect(
+                        self.set_unread_badge)
+                except Exception:
+                    pass
             if chat_widget is not None:
                 self.status_providers.append(
                     lambda: str(getattr(self.chat_widget, "lbl_status").text()
@@ -499,8 +498,6 @@ def build_overlay_window():
             self.stack.addWidget(self.events_widget)
             if self.drops_widget is not None:
                 self.stack.addWidget(self.drops_widget)
-            if self.notifications_widget is not None:
-                self.stack.addWidget(self.notifications_widget)
             if self.chat_widget is not None:
                 self.stack.addWidget(self.chat_widget)
             self.stack.setStyleSheet("background: transparent;")
@@ -546,23 +543,35 @@ def build_overlay_window():
 
         # ── состояние ──────────────────────────────────────────────────
         def _initial_tab(self):
-            """last_tab: одноразовая миграция старого индекса «Выбрано» → «Маркет»."""
+            """last_tab с миграцией на 5 вкладок (без «Уведомлений»)."""
             try:
                 raw = int(self.cfg.get("last_tab", 0) or 0)
             except Exception:
                 raw = 0
-            migrate = self.cfg.get("tabs_schema") != 2
-            # старый 0..6: Выбрано/Маркет/Ордера/События/Дроп/Увед./Чат.
-            # новый 0..5: Маркет/Ордера/События/Дроп/Увед./Чат.
-            if migrate:
-                index = (raw - 1 if raw > 0 else 0) if 0 <= raw <= 6 else 0
-            else:
+            try:
+                schema = int(self.cfg.get("tabs_schema", 0) or 0)
+            except Exception:
+                schema = 0
+            if schema >= 3:
                 index = raw if 0 <= raw < len(self.titles) else 0
-            if migrate:
-                self.cfg["tabs_schema"] = 2
+            elif schema == 2:
+                # schema2: 0..3 те же; 4/5 были Уведомления/Чат — на Маркет
+                index = raw if 0 <= raw <= 3 else 0
+            else:
+                # legacy 0..6: Выбрано/Маркет/Ордера/События/Дроп/Увед./Чат
+                if raw == 5:
+                    index = 0
+                elif raw == 6:
+                    index = len(self.titles) - 1
+                elif raw <= 0:
+                    index = 0
+                else:
+                    index = min(raw - 1, len(self.titles) - 1)
+            if schema != 3 or raw != index:
+                self.cfg["tabs_schema"] = 3
                 self.cfg["last_tab"] = index
                 try:
-                    self.save_values({"tabs_schema": 2, "last_tab": index})
+                    self.save_values({"tabs_schema": 3, "last_tab": index})
                 except Exception:
                     pass
             return index
@@ -739,9 +748,6 @@ def build_overlay_window():
                 self.stack.setCurrentWidget(self.events_widget)
             elif self.drops_widget is not None and index == 3:
                 self.stack.setCurrentWidget(self.drops_widget)
-            elif (self.notifications_widget is not None
-                  and index == self._notifications_index):
-                self.stack.setCurrentWidget(self.notifications_widget)
             elif self.chat_widget is not None and index == self._chat_index:
                 self.stack.setCurrentWidget(self.chat_widget)
             else:
@@ -764,20 +770,46 @@ def build_overlay_window():
                 return False
 
         def open_notifications(self, record_id=None):
-            """Колокольчик/клик по тосту: вкладка «Уведомления» (+ запись)."""
+            """Колокольчик/клик по тосту: отдельное окно центра уведомлений."""
             if self.notifications_widget is None:
                 self.lbl_status.setText("центр уведомлений недоступен")
                 return False
             try:
-                self.show_tab(self._notifications_index)
-            except Exception:
-                pass
-            if record_id:
+                if self._notifications_dialog is None:
+                    dialog = QDialog(self)
+                    dialog.setWindowTitle("Уведомления")
+                    dialog.setModal(False)
+                    dialog.resize(620, 520)
+                    lay = QVBoxLayout(dialog)
+                    lay.setContentsMargins(0, 0, 0, 0)
+                    lay.addWidget(self.notifications_widget)
+                    dialog.finished.connect(self._notifications_closed)
+                    self._notifications_dialog = dialog
                 try:
-                    self.notifications_widget.select_record(record_id)
+                    self.notifications_widget.refresh()
                 except Exception:
                     pass
-            return True
+                self._notifications_dialog.show()
+                self._notifications_dialog.raise_()
+                self._notifications_dialog.activateWindow()
+                if record_id:
+                    try:
+                        self.notifications_widget.select_record(record_id)
+                    except Exception:
+                        pass
+                return True
+            except Exception as exc:
+                self.lbl_status.setText(f"уведомления: {exc}")
+                return False
+
+        def _notifications_closed(self, _result=None):
+            """Закрыли центр — возвращаем фокус главному окну."""
+            try:
+                if self.isVisible():
+                    self.raise_()
+                    self.activateWindow()
+            except Exception:
+                pass
 
         def set_unread_badge(self, count, color=None):
             """Бейдж непрочитанных: отдельная накладка, не расширяет кнопку."""
@@ -1101,6 +1133,11 @@ def build_overlay_window():
         def hide_window(self, save=True):
             # B2: скрытие оверлея не должно оставлять на экране ни одного окна
             # приложения — закрываем подтверждения, формы, окно входа.
+            if self._notifications_dialog is not None:
+                try:
+                    self._notifications_dialog.hide()
+                except Exception:
+                    pass
             if login_mode is not None:
                 try:
                     if not login_mode.in_progress():
