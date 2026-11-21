@@ -73,7 +73,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.6.6"
+APP_VERSION = "0.6.5"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
