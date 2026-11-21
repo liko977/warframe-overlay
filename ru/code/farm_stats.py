@@ -559,7 +559,7 @@ class FarmStatsCollector:
             "relics_opened": len(loot), "total_value": int(total_value),
             "best_drop": best,
             "avg_per_hour": (total_value / base.get("hours", 0.0)
-                             if base.get("hours", 0.0) > 0 else 0.0),
+                             if base.get("hours", 0.0) >= 0.05 else 0.0),
             "hours": base.get("hours", 0.0),
             "sessions": base.get("sessions", 0),
             "current_relics": len(current),
@@ -971,7 +971,7 @@ class FarmStatsCollector:
                 if best is None or bd["price"] > best["price"]:
                     best = bd
             hours += self._hours(s, now)
-        avg_per_hour = total_value / hours if hours > 0 else 0.0
+        avg_per_hour = total_value / hours if hours >= 0.05 else 0.0
         current = sessions[-1] if sessions else None
         return {
             "relics_opened": total_relics,
