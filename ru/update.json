@@ -1,7 +1,7 @@
 {
-  "version": "0.5.1",
-  "notes": "Тест автообновления: маркер 0.5.1 (обновление поверх 0.5.0)",
-  "updated_at": "2026-11-21T12:29:55Z",
+  "version": "0.5.0",
+  "notes": "События с официального API, уведомления, настройки, Alt+1-4, центр уведомлений",
+  "updated_at": "2026-11-21T12:32:00Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -97,7 +97,7 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "c8620ce89bb2102b9f24c114977230d85e6a06c847e9104a0be54accf8f88a69",
+      "sha256": "00e2860c88ce8cbed51cf0f89a958b5511df94f3c301d5c3aeb36cac72ac5ade",
       "size": 279230
     }
   ]
