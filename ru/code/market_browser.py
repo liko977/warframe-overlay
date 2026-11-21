@@ -14,6 +14,7 @@
 ``chart_stats``, ``matches``) тестируются без GUI.
 """
 
+import os
 import time
 
 import market_client as mc
@@ -84,11 +85,63 @@ def matches(item, query):
 
 
 def price_text(value):
-    """Цена с глифом платины: ``12 ⛁`` (⛁ — платина по дизайн-системе)."""
+    """Цена платины с суффиксом: ``12 p`` (p — платина warframe.market)."""
     try:
-        return f"{int(value)} ⛁"
+        return f"{int(value)} p"
     except Exception:
         return "—"
+
+
+def item_icon_label(item, size=24, cfg=None):
+    """QLabel с иконкой предмета (лениво); None, если Qt/модуль недоступны."""
+    try:
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import QLabel
+        import item_icons
+        cfg = cfg or {}
+        base = cfg.get("data_dir") or os.environ.get("WF_DATA_DIR")
+        provider = item_icons.get_provider(
+            base, enabled=bool(cfg.get("show_item_icons", True)))
+        label = QLabel()
+        label.setFixedSize(int(size), int(size))
+        label.setStyleSheet("background: transparent;")
+        if not cfg.get("show_item_icons", True):
+            label.hide()
+            return label
+        name = item.get("en_name") or item.get("name") or ""
+        slug = str(item.get("slug") or "")
+        image = provider.resolve(name=name, slug=slug,
+                                 en_name=item.get("en_name") or "",
+                                 game_ref=str(item.get("gameRef") or ""))
+        pix = provider.placeholder(size)
+        if pix is not None:
+            label.setPixmap(pix)
+        if item_icons.is_blueprint(name, slug):
+            badge = QLabel("Ч", label)
+            badge.setFixedSize(11, 11)
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setStyleSheet(
+                "background:#f5c451; color:#17212e; font-size:7px;"
+                " font-weight:700; border-radius:2px;")
+            badge.move(int(size) - 12, 0)
+            badge.show()
+        if not image:
+            return label
+
+        def done(_key, pixmap):
+            try:
+                if pixmap is not None and not pixmap.isNull():
+                    label.setPixmap(pixmap.scaled(
+                        int(size), int(size), Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation))
+            except Exception:
+                pass
+
+        provider.request(slug or name or image, image, callback=done,
+                         size=size)
+        return label
+    except Exception:
+        return None
 
 
 def order_type_of(order):
@@ -381,11 +434,11 @@ def build_market_browser():
 
     # ── строка результата поиска ───────────────────────────────────────
     class _ResultRow(QFrame):
-        def __init__(self, item, parent=None):
+        def __init__(self, item, parent=None, cfg=None):
             super().__init__(parent)
             self.item_data = dict(item)
             self.setObjectName("mRow")
-            self.setFixedHeight(26)
+            self.setFixedHeight(44)
             self.set_style(selected=False, zebra=False)
             lay = QHBoxLayout(self)
             lay.setContentsMargins(8, 0, 8, 0)
@@ -393,12 +446,17 @@ def build_market_browser():
             self.lbl_name = QLabel(str(item.get("name") or item.get("slug") or "?"))
             self.lbl_name.setFont(make_font(12))
             self.lbl_name.setStyleSheet(f"color:{theme.PALETTE['text']};")
+            self.icon = item_icon_label(item, 40, cfg)
+            if self.icon is not None:
+                lay.addWidget(self.icon)
             self.lbl_sell = QLabel("")
             self.lbl_sell.setFont(make_font(11, True))
-            self.lbl_sell.setStyleSheet(f"color:{theme.PALETTE['success']};")
+            self.lbl_sell.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
+            self.lbl_sell.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_buy = QLabel("")
             self.lbl_buy.setFont(make_font(11, True))
-            self.lbl_buy.setStyleSheet(f"color:{theme.PALETTE['danger']};")
+            self.lbl_buy.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
+            self.lbl_buy.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_online = QLabel("")
             self.lbl_online.setFont(make_font(10))
             self.lbl_online.setStyleSheet(f"color:{theme.PALETTE['muted']};")
@@ -902,7 +960,7 @@ def build_market_browser():
                 list_item = QListWidgetItem()
                 list_item.setSizeHint(QSize(10, 26))
                 self.list_results.addItem(list_item)
-                row = _ResultRow(item, self)
+                row = _ResultRow(item, self, self.cfg)
                 row.set_style(zebra=(index % 2 == 1))
                 self.list_results.setItemWidget(list_item, row)
                 self._result_rows.append(row)
@@ -1039,7 +1097,8 @@ def build_market_browser():
             ducats = meta.get("ducats")
             if ducats is not None:
                 self.badges_box.addWidget(
-                    badge_label(f"◆ {int(ducats)}", palette["ducats"], "#1a1400"))
+                    badge_label(f"◆ {int(ducats)} дк", palette["ducats"],
+                                "#1a1400"))
             tax = meta.get("trading_tax")
             if tax is not None:
                 self.badges_box.addWidget(
@@ -1074,7 +1133,9 @@ def build_market_browser():
                 line.setSpacing(6)
                 price = QLabel(price_text(order.get("platinum")))
                 price.setFont(make_font(12, True))
-                price.setStyleSheet(f"color:{color};")
+                price.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
+                price.setToolTip(theme.currency_tooltip("platinum"))
+                price.setToolTip(theme.currency_tooltip("platinum"))
                 quantity = QLabel(f"×{order.get('quantity', '?')}")
                 quantity.setFont(make_font(10))
                 quantity.setStyleSheet(f"color:{theme.PALETTE['muted']};")
@@ -1316,13 +1377,18 @@ def build_market_browser():
             card.setObjectName("mRow")
             card.setProperty("order_id", order.get("id"))
             card.setProperty("order_kind", kind)
-            card.setFixedHeight(30)
+            card.setFixedHeight(44)
             card.setStyleSheet(theme.row_qss(zebra=(index % 2 == 1)))
             lay = QHBoxLayout(card)
             lay.setContentsMargins(8, 0, 8, 0)
             lay.setSpacing(8)
             lay.addWidget(badge_label("SELL" if kind == "sell" else "BUY",
-                                      color, "#0d131c"))
+                                      color, "#0d141c"))
+            icon_item = {"name": self._order_item_name(order),
+                         "slug": order.get("itemId") or ""}
+            icon = item_icon_label(icon_item, 40, self.cfg)
+            if icon is not None:
+                lay.addWidget(icon)
             name = QLabel(str(self._order_item_name(order)))
             name.setFont(make_font(11))
             name.setStyleSheet(f"color:{theme.PALETTE['text']};")
