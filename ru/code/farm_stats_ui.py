@@ -49,9 +49,6 @@ def _item_icon_label(cfg, item, size=24):
             # в пулах бывает только подпись без slug — не создаём пустой слот
             label.deleteLater()
             return None
-        if not provider.has_index():
-            # первый запуск: индекс ещё не готов — без сетевых запросов
-            return label
         image = provider.resolve(name=name, slug=slug,
                                  en_name=item.get("en_name") or "",
                                  game_ref=game_ref)
@@ -59,16 +56,19 @@ def _item_icon_label(cfg, item, size=24):
         pix = provider.placeholder(size)
         if pix is not None:
             label.setPixmap(pix)
-        if blueprint:
-            badge = QLabel("Ч", label)
-            badge.setFixedSize(11, 11)
+        badge_text = item_icons.part_badge(slug, name)
+        if badge_text:
+            badge = QLabel(badge_text, label)
+            badge.setFixedSize(16, 11)
             badge.setAlignment(Qt.AlignCenter)
             badge.setStyleSheet(
-                "background:#f5c451; color:#17212e; font-size:7px;"
+                "background:#f5c451; color:#17212e; font-size:6px;"
                 " font-weight:700; border-radius:2px;")
-            badge.move(int(size) - 12, 0)
+            badge.move(int(size) - 17, 0)
             badge.show()
-        if not image:
+        if not image and not slug:
+            return label
+        if not (item.get("thumb") or item.get("icon")) and not provider.has_index():
             return label
 
         def done(_key, pixmap):
@@ -80,8 +80,8 @@ def _item_icon_label(cfg, item, size=24):
             except Exception:
                 pass
 
-        provider.request(slug or name or image, image, callback=done,
-                         size=size)
+        provider.request_item(slug or name or image, item, callback=done,
+                              size=size)
         return label
     except Exception:
         return None
