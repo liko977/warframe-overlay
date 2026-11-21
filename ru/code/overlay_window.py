@@ -93,12 +93,13 @@ TOKEN_CHIP_TOOLTIP = {
 def build_overlay_window():
     """Фабрика класса единого окна (PyQt5 импортируется лениво)."""
     from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
-    from PyQt5.QtGui import QFont, QGuiApplication, QKeySequence
+    from PyQt5.QtGui import QFont, QGuiApplication, QKeySequence, QPainter
     from PyQt5.QtWidgets import (QAbstractButton, QAbstractSlider,
                                  QAbstractSpinBox, QButtonGroup, QComboBox,
                                  QFrame, QHBoxLayout, QLabel, QLineEdit,
                                  QMenu, QPushButton, QShortcut,
-                                 QStackedWidget, QVBoxLayout, QWidget)
+                                 QSizePolicy, QStackedWidget, QVBoxLayout,
+                                 QWidget)
 
     #: Виджеты в шапке, которые сами обрабатывают мышь: с них drag не стартует.
     INTERACTIVE = (QAbstractButton, QLineEdit, QComboBox, QAbstractSpinBox,
@@ -126,6 +127,37 @@ def build_overlay_window():
         except Exception:
             pass
         return None
+
+    class _ElidedTitle(QLabel):
+        """Заголовок, который сокращается с «…», а не обрезается краем."""
+
+        def __init__(self, text="", parent=None):
+            super().__init__(text, parent)
+            self._full_text = str(text)
+            self.setMinimumWidth(120)
+
+        def set_title(self, text):
+            self._full_text = str(text)
+            self._update_elide()
+
+        def _update_elide(self):
+            width = max(0, self.contentsRect().width())
+            metrics = self.fontMetrics()
+            text = metrics.elidedText(self._full_text, Qt.ElideRight, width)
+            if text != self.text():
+                super().setText(text)
+            self.setToolTip(self._full_text)
+
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            self._update_elide()
+
+        def showEvent(self, event):
+            super().showEvent(event)
+            self._update_elide()
+
+        def text(self):
+            return self._full_text
 
     class _DragHeader(QFrame):
         """Шапка окна: перетаскивание и двойной клик (развернуть/восстановить).
@@ -340,21 +372,27 @@ def build_overlay_window():
             lay.setSpacing(0)
 
             self.header = _DragHeader(self)
+            self.header.setFixedHeight(44)
             header_lay = QHBoxLayout(self.header)
-            header_lay.setContentsMargins(14, 8, 10, 6)
-            header_lay.setSpacing(8)
-            self.lbl_title = QLabel("Warframe Overlay")
+            header_lay.setContentsMargins(12, 7, 10, 7)
+            header_lay.setSpacing(7)
+            self.lbl_title = _ElidedTitle("Warframe Overlay")
             self.lbl_title.setFont(make_font(theme.size("window"), True))
             self.lbl_title.setStyleSheet(f"color:{theme.PALETTE['text']};")
             self.lbl_title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.lbl_title.setMinimumHeight(24)
+            self.lbl_title.setSizePolicy(QSizePolicy.Preferred,
+                                         QSizePolicy.Fixed)
             self.btn_token = QPushButton("🔑 нет токена")
             self.btn_token.setFont(make_font(10, True))
+            self.btn_token.setFixedHeight(24)
             self.btn_token.setCursor(Qt.PointingHandCursor)
             self.btn_token.setStyleSheet(theme.button_qss(small=True))
             self.btn_token.clicked.connect(self.open_token)
             # чип статуса warframe.market (t20): ● Онлайн / В игре / …
             self.btn_status = QPushButton("● —")
             self.btn_status.setFont(make_font(10, True))
+            self.btn_status.setFixedHeight(24)
             self.btn_status.setCursor(Qt.PointingHandCursor)
             self.btn_status.setStyleSheet(theme.button_qss(small=True))
             self.btn_status.setToolTip("Статус warframe.market")
@@ -362,11 +400,16 @@ def build_overlay_window():
             self._status = ""
             self.lbl_status = QLabel("—")
             self.lbl_status.setFont(make_font(10))
+            self.lbl_status.setFixedHeight(24)
             self.lbl_status.setStyleSheet(theme.status_qss())
             self.lbl_status.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.lbl_status.setMinimumWidth(24)
+            self.lbl_status.setMaximumWidth(220)
+            self.lbl_status.setSizePolicy(QSizePolicy.Preferred,
+                                          QSizePolicy.Fixed)
             self.btn_refresh = QPushButton("⟳")
             self.btn_refresh.setFont(QFont("Segoe UI Symbol", 13))
-            self.btn_refresh.setFixedSize(24, 22)
+            self.btn_refresh.setFixedSize(24, 24)
             self.btn_refresh.setStyleSheet(theme.button_qss(small=True))
             self.btn_refresh.setCursor(Qt.PointingHandCursor)
             self.btn_refresh.setToolTip("Обновить активную вкладку")
@@ -374,49 +417,76 @@ def build_overlay_window():
             # 🔔 центр уведомлений: бейдж непрочитанных в шапке
             self.btn_bell = QPushButton("🔔")
             self.btn_bell.setFont(make_font(12))
-            self.btn_bell.setFixedSize(32, 22)
+            self.btn_bell.setFixedSize(28, 28)
             self.btn_bell.setStyleSheet(theme.button_qss(small=True))
             self.btn_bell.setCursor(Qt.PointingHandCursor)
             self.btn_bell.setToolTip("Уведомления")
             self.btn_bell.clicked.connect(self.open_notifications)
             self._unread = 0
+            self.badge_bell = QLabel("", self.btn_bell)
+            self.badge_bell.setObjectName("bellBadge")
+            self.badge_bell.setAlignment(Qt.AlignCenter)
+            self.badge_bell.setFont(make_font(9, True))
+            self.badge_bell.setFixedHeight(14)
+            self.badge_bell.setStyleSheet(
+                "QLabel#bellBadge { background-color:#f5c451; color:#0d131c;"
+                " border-radius:7px; padding:0 3px; }")
+            self.badge_bell.hide()
             self.btn_minimize = QPushButton("—")
             self.btn_minimize.setFont(make_font(12))
-            self.btn_minimize.setFixedSize(24, 22)
+            self.btn_minimize.setFixedSize(24, 24)
             self.btn_minimize.setStyleSheet(theme.button_qss(small=True))
             self.btn_minimize.setCursor(Qt.PointingHandCursor)
             self.btn_minimize.setToolTip("Скрыть (F9)")
             self.btn_minimize.clicked.connect(self.hide_window)
             self.btn_maximize = QPushButton("□")
             self.btn_maximize.setFont(make_font(13))
-            self.btn_maximize.setFixedSize(24, 22)
+            self.btn_maximize.setFixedSize(24, 24)
             self.btn_maximize.setStyleSheet(theme.button_qss(small=True))
             self.btn_maximize.setCursor(Qt.PointingHandCursor)
             self.btn_maximize.clicked.connect(self.toggle_maximized)
             self.btn_fullscreen = QPushButton("⛶")
             self.btn_fullscreen.setFont(QFont("Segoe UI Symbol", 12))
-            self.btn_fullscreen.setFixedSize(24, 22)
+            self.btn_fullscreen.setFixedSize(24, 24)
             self.btn_fullscreen.setStyleSheet(theme.button_qss(small=True))
             self.btn_fullscreen.setCursor(Qt.PointingHandCursor)
             self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
             self.btn_close = QPushButton("×")
             self.btn_close.setFont(make_font(13))
-            self.btn_close.setFixedSize(24, 22)
+            self.btn_close.setFixedSize(24, 24)
             self.btn_close.setStyleSheet(theme.button_qss(small=True))
             self.btn_close.setCursor(Qt.PointingHandCursor)
             self.btn_close.setToolTip("Закрыть и вернуть фокус игре")
             self.btn_close.clicked.connect(self.hide_window)
-            header_lay.addWidget(self.lbl_title)
-            header_lay.addWidget(self.btn_token)
-            header_lay.addWidget(self.btn_status)
+            # Настройки — в шапке, чтобы не занимать место в строке вкладок.
+            self.btn_settings = QPushButton("")
+            self.btn_settings.setFont(make_font(12))
+            self.btn_settings.setFixedSize(26, 24)
+            try:
+                import ui_icons
+                self.btn_settings.setIcon(ui_icons.gear_icon(22))
+                self.btn_settings.setIconSize(QSize(22, 22))
+            except Exception:
+                self.btn_settings.setText("⋯")
+            self.btn_settings.setStyleSheet(theme.button_qss(small=True))
+            self.btn_settings.setCursor(Qt.PointingHandCursor)
+            self.btn_settings.setToolTip("Настройки (Ctrl+,)")
+            self.btn_settings.clicked.connect(self.open_settings)
+            self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+            self._settings_shortcut.activated.connect(self.open_settings)
+
+            def add_header(widget):
+                header_lay.addWidget(widget, 0, Qt.AlignVCenter)
+
+            add_header(self.lbl_title)
+            add_header(self.btn_token)
+            add_header(self.btn_status)
             header_lay.addStretch(1)
-            header_lay.addWidget(self.lbl_status)
-            header_lay.addWidget(self.btn_bell)
-            header_lay.addWidget(self.btn_refresh)
-            header_lay.addWidget(self.btn_minimize)
-            header_lay.addWidget(self.btn_maximize)
-            header_lay.addWidget(self.btn_fullscreen)
-            header_lay.addWidget(self.btn_close)
+            for widget in (self.lbl_status, self.btn_bell, self.btn_settings,
+                           self.btn_refresh, self.btn_minimize,
+                           self.btn_maximize, self.btn_fullscreen,
+                           self.btn_close):
+                add_header(widget)
 
             self.tabs = QButtonGroup(self)
             self.tabs.setExclusive(True)
@@ -436,24 +506,6 @@ def build_overlay_window():
                 self.tab_buttons.append(button)
                 tabs_lay.addWidget(button)
             tabs_lay.addStretch(1)
-            # Настройки: шестерёнка (обновления — внутри вкладки «Обновления»)
-            self.btn_settings = QPushButton("")
-            self.btn_settings.setFont(make_font(12))
-            self.btn_settings.setFixedSize(26, 22)
-            try:
-                import ui_icons
-                self.btn_settings.setIcon(ui_icons.gear_icon(22))
-                self.btn_settings.setIconSize(QSize(22, 22))
-            except Exception:
-                self.btn_settings.setText("⋯")
-            self.btn_settings.setStyleSheet(theme.button_qss(small=True))
-            self.btn_settings.setCursor(Qt.PointingHandCursor)
-            self.btn_settings.setToolTip("Настройки (Ctrl+,)")
-            self.btn_settings.clicked.connect(self.open_settings)
-            tabs_lay.addWidget(self.btn_settings)
-            # Ctrl+, — тот же диалог, доступен и в полноэкранном режиме
-            self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
-            self._settings_shortcut.activated.connect(self.open_settings)
 
             self.stack = QStackedWidget()
             self.stack.addWidget(self.editor_widget)
@@ -727,21 +779,38 @@ def build_overlay_window():
             return True
 
         def set_unread_badge(self, count, color=None):
-            """Бейдж непрочитанных: счётчик и цвет важного типа."""
+            """Бейдж непрочитанных: отдельная накладка, не расширяет кнопку."""
             try:
                 count = max(0, int(count or 0))
             except Exception:
                 count = 0
             self._unread = count
-            self.btn_bell.setText("🔔" if not count else f"🔔 {count}")
-            style = theme.button_qss(small=True)
-            if count and color:
-                style += (f"QPushButton {{ color:{color};"
-                          f" border:1px solid {color}; }}")
-            self.btn_bell.setStyleSheet(style)
+            self.btn_bell.setText("🔔")
             self.btn_bell.setToolTip(
                 f"Уведомления: {count} непрочитанных" if count
                 else "Уведомления")
+            badge = getattr(self, "badge_bell", None)
+            if badge is None:
+                return count
+            if count <= 0:
+                badge.clear()
+                badge.hide()
+                self.btn_bell.setStyleSheet(theme.button_qss(small=True))
+                return count
+            text = "99+" if count > 99 else str(count)
+            badge.setText(text)
+            metrics = badge.fontMetrics()
+            width = max(16, min(26, metrics.horizontalAdvance(text) + 8))
+            badge.setFixedSize(width, 14)
+            # Внутри header: на 2 px правее кнопки, у верхнего края.
+            badge.move(max(0, self.btn_bell.width() - width + 2), 0)
+            badge.raise_()
+            badge.show()
+            color = str(color or theme.PALETTE["warning"])
+            badge.setStyleSheet(
+                "QLabel#bellBadge { background-color:%s; color:#0d131c;"
+                " border-radius:7px; padding:0 3px; }" % color)
+            self.btn_bell.setStyleSheet(theme.button_qss(small=True))
             return count
 
         def open_chat(self):
@@ -1369,6 +1438,14 @@ def build_overlay_window():
             except Exception:
                 pass
             try:
+                # t30: токен из личного профиля браузера — зелёный чип сразу,
+                # не дожидаясь закрытия окна входа.
+                signal = getattr(dialog, "auth_changed", None)
+                if signal is not None:
+                    signal.connect(self._on_auth_changed_live)
+            except Exception:
+                pass
+            try:
                 dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
@@ -1390,6 +1467,18 @@ def build_overlay_window():
                 except Exception:
                     pass
             self._after_login_dialog()
+
+        def _on_auth_changed_live(self):
+            """Токен изменился, окно входа ещё открыто: обновить чип/ордера."""
+            try:
+                self.refresh_token_status(force=True)
+            except Exception:
+                pass
+            if self._has_token():
+                try:
+                    self._reload_orders()
+                except Exception:
+                    pass
 
         def _after_login_dialog(self):
             """Обновляет чип токена и данные после закрытия окна входа."""
