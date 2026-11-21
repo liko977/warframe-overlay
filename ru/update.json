@@ -1,7 +1,7 @@
 {
-  "version": "0.6.5",
-  "notes": "Иконки: исправлена загрузка, нейтральный плейсхолдер, перекрытия в Маркете",
-  "updated_at": "2026-11-21T20:16:03Z",
+  "version": "0.6.6",
+  "notes": "Иконки предметов с warframe.market (thumb), бейджи частей (Ч/К/Н/С/Км/Ст/Пр/…)",
+  "updated_at": "2026-11-21T20:39:59Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -31,14 +31,14 @@
     {
       "path": "farm_stats_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/farm_stats_ui.py",
-      "sha256": "306936b7f711f7a389be01946f48b8c1b39060848a4cac85f06a8f55272ebd33",
-      "size": 31559
+      "sha256": "577f6f73452bd56867578b277c136f129f223a01038ac40724159d1bbddeee41",
+      "size": 31571
     },
     {
       "path": "item_icons.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/item_icons.py",
-      "sha256": "bfe3357b131a40e582a982c068fa28b799b5a18f19685c05a8e0b9424cbf6071",
-      "size": 20098
+      "sha256": "354a50500118147912219bc82140ffa3c0d32e98af35706d6dd67d55975a5e37",
+      "size": 25296
     },
     {
       "path": "log_parser.py",
@@ -61,8 +61,8 @@
     {
       "path": "market_browser.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_browser.py",
-      "sha256": "938bb7c92d0bb2695a74592c8cf7be0e11458035d35225c0483a53ef6bc6932e",
-      "size": 80374
+      "sha256": "53bbd1f7e9ef9a07bbd4ecb160cafc8c46668588acc388392963f8b5b539e3d9",
+      "size": 80660
     },
     {
       "path": "market_browser_login.py",
@@ -73,8 +73,8 @@
     {
       "path": "market_client.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_client.py",
-      "sha256": "a9b58563ba5fddc25db1d96188b4b8dad2beb04d4f47c01b93b990db923731e8",
-      "size": 49581
+      "sha256": "94d940a12580904191ccbd1edc9a1f10b335737eafb192a61aeb7a9d23c92c20",
+      "size": 49752
     },
     {
       "path": "market_status.py",
@@ -139,8 +139,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "e723658bb2b9b669a35d7419bd4973175670bb250643b01276a1ddd22fa81dd6",
-      "size": 328716
+      "sha256": "7972988a8388b8357ecad7d0d07db8f33c25b540f40061b0a0ce5030fac6aa7f",
+      "size": 329360
     }
   ]
 }
