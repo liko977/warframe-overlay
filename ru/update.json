@@ -1,7 +1,7 @@
 {
-  "version": "0.6.2",
-  "notes": "Тест OTA: маркер 0.6.2 поверх 0.6.1",
-  "updated_at": "2026-11-21T16:47:03Z",
+  "version": "0.6.1",
+  "notes": "Вход из любого браузера (Chrome/Edge/Yandex/Opera/Opera GX/Firefox); исправлены шапка и уведомления; инструкция по токену; автопроверка обновлений",
+  "updated_at": "2026-11-21T16:52:41Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -127,7 +127,7 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "e29e676152fc424e9ba69dae24faec67bd762a26dec1b4f2acadc0d02fc845af",
+      "sha256": "85fb7a6c84e42c1de454347d6d26f16351899883e55e9659bd883d86df96f508",
       "size": 302444
     }
   ]
