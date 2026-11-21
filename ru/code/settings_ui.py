@@ -81,6 +81,7 @@ DEFAULT_VALUES = {
     "show_summary": True,
     "update_check": True,
     "update_url": "",
+    "update_check_interval_min": 180,
 }
 
 MODIFIERS = ("ctrl", "alt", "shift", "win")
@@ -895,7 +896,8 @@ def build_settings_dialog():
             self.lbl_update_current.setStyleSheet(
                 f"color:{color('text')}; background:transparent;")
             outer.addWidget(self.lbl_update_current)
-            self.chk_update_check = QCheckBox("Проверять обновления при старте")
+            self.chk_update_check = QCheckBox(
+                "Проверять автоматически (в фоне)")
             self.chk_update_check.setFont(font(11))
             outer.addWidget(self.chk_update_check)
             form = QFormLayout()
@@ -905,6 +907,14 @@ def build_settings_dialog():
             self.edit_update_url.setPlaceholderText(
                 "https://raw.githubusercontent.com/.../ru/update.json")
             form.addRow(QLabel("URL манифеста обновлений"), self.edit_update_url)
+            self.spin_update_interval = QSpinBox()
+            self.spin_update_interval.setRange(15, 1440)
+            self.spin_update_interval.setSuffix(" мин")
+            self.spin_update_interval.setFont(font(11))
+            self.spin_update_interval.setToolTip(
+                "Как часто проверять обновления, пока приложение запущено")
+            form.addRow(QLabel("Интервал автопроверки"),
+                        self.spin_update_interval)
             outer.addLayout(form)
             row = QHBoxLayout()
             self.btn_check_updates = QPushButton("Проверить обновление")
@@ -1029,6 +1039,8 @@ def build_settings_dialog():
             self.chk_update_check.setChecked(
                 bool(values.get("update_check", True)))
             self.edit_update_url.setText(str(values.get("update_url") or ""))
+            self.spin_update_interval.setValue(
+                int(values.get("update_check_interval_min", 180) or 180))
             self._clear_errors()
 
         def hotkey_values(self):
@@ -1066,6 +1078,8 @@ def build_settings_dialog():
                 "show_summary": self.chk_show_summary.isChecked(),
                 "update_check": self.chk_update_check.isChecked(),
                 "update_url": self.edit_update_url.text().strip(),
+                "update_check_interval_min":
+                    int(self.spin_update_interval.value()),
                 "hotkeys": mapping,
             })
             return config
