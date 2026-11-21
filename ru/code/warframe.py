@@ -71,7 +71,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -265,6 +265,10 @@ DEFAULT_CONFIG = {
     "notify_sound_choice": "auto",   # auto | market | chat | system
     "notify_sound_file": "",         # свой .wav (файл не копируем)
     "chat_url": "https://warframe.market/",  # пока чата в приложении нет
+    "chat_enabled": True,             # вкладка «Чат» warframe.market
+    "status_auto": False,             # авто ingame/online по фокусу игры
+    "status_restore_online": True,    # при выходе вернуть «Онлайн»
+    "status_poll_ms": 5000,           # период проверки фокуса в авто-режиме
 
     # ── продажа на warframe.market (только по кнопке, см. спеку) ────────
     "market_token": "",              # JWT из браузера; пусто — продажа выключена
@@ -3780,6 +3784,8 @@ _NOTIFICATIONS_MODULE = {"mod": None, "tried": False}
 _LAUNCHER_MODULE = {"mod": None, "tried": False}
 _SETTINGS_UI_MODULE = {"mod": None, "tried": False}
 _NOTIFICATION_CENTER_MODULE = {"mod": None, "tried": False}
+_CHAT_CLIENT_MODULE = {"mod": None, "tried": False}
+_MARKET_STATUS_MODULE = {"mod": None, "tried": False}
 
 #: Страховка, если login_mode.py нет рядом (старая сборка): флаг всё равно
 #: нужен guard-ам окон/хоткеев, чтобы не всплывать во время входа.
@@ -3917,7 +3923,7 @@ def launcher_module():
 def settings_ui_module():
     """Окно «Настройки» (settings_ui.py): клавиши, уведомления, оверлей.
 
-    Модуль опционален: без него кнопка «⚙» сообщит, что настройки в этой
+    Модуль опционален: без него кнопка-шестерёнка сообщит, что настройки в этой
     сборке недоступны, остальное работает как раньше.
     """
     return _load_local_module("settings_ui.py", "settings_ui",
@@ -3928,6 +3934,18 @@ def notification_center_module():
     """Центр уведомлений (notification_center.py): история, тосты, звук."""
     return _load_local_module("notification_center.py", "notification_center",
                               _NOTIFICATION_CENTER_MODULE)
+
+
+def chat_client_module():
+    """Чат warframe.market (chat_client.py): HTTP/WS/вкладка."""
+    return _load_local_module("chat_client.py", "chat_client",
+                              _CHAT_CLIENT_MODULE)
+
+
+def market_status_module():
+    """Статус warframe.market (market_status.py): WS A/чип/авто."""
+    return _load_local_module("market_status.py", "market_status",
+                              _MARKET_STATUS_MODULE)
 
 
 def login_in_progress():
@@ -4711,6 +4729,10 @@ def run_gui(cfg):
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
     geom = make_geometry(cfg)
+    # чат создаётся позже; _on_login_state должен видеть это имя
+    chat_service = None
+    chat_widget = None
+    status_service = None
     api = MarketAPI(cfg)
     api.load_items()
     ui = _UiBridge()
@@ -4836,6 +4858,28 @@ def run_gui(cfg):
         """
         entering = bool(entering)
         set_login_in_progress(entering)
+        if entering:
+            # во время входа чат не держит соединение и не показывает тосты
+            if chat_service is not None:
+                try:
+                    chat_service.stop()
+                except Exception:
+                    pass
+            if status_service is not None:
+                try:
+                    status_service.stop(restore=False)
+                except Exception:
+                    pass
+        elif not entering and chat_service is not None:
+            try:
+                chat_service.start()
+            except Exception:
+                pass
+        if not entering and status_service is not None:
+            try:
+                status_service.start()
+            except Exception:
+                pass
         if unified is None:
             if entering:
                 manager.hide_overlays()
@@ -4976,44 +5020,6 @@ def run_gui(cfg):
         except Exception:
             pass
 
-    def _updates_dialog_class():
-        if unified_mod is None:
-            return None
-        builder = getattr(unified_mod, "build_updates_dialog", None)
-        return builder() if callable(builder) else None
-
-    def _open_updates():
-        """Пункт «Обновления»: окно проверки версии (F8) или запасной тост."""
-        if login_in_progress():
-            return False
-        Dialog = _updates_dialog_class()
-        if Dialog is not None:
-            try:
-                dialog = Dialog(cfg, APP_VERSION, check_fn=_updates_check,
-                                apply_fn=_updates_apply,
-                                restart_fn=_updates_restart,
-                                parent=unified if unified is not None else None)
-                dialog.exec_()
-                return True
-            except Exception as e:
-                log(f"Обновления: окно не открылось ({type(e).__name__}: {e})")
-
-        def worker():
-            info = _updates_check()
-            if notifier is None:
-                return
-            if info.get("available"):
-                text = f"Доступна версия {info.get('version')}"
-            elif info.get("error"):
-                text = f"Проверка не удалась: {info['error']}"
-            else:
-                text = "У вас последняя версия."
-            notifier.notify("updates", "Обновления", text, force=True)
-
-        threading.Thread(target=worker, daemon=True,
-                         name="wf-updates").start()
-        return False
-
     # ── центр уведомлений: история/цвета/тосты/свой звук (t15) ──────────
     center_mod = notification_center_module()
     notification_store = None
@@ -5038,6 +5044,82 @@ def run_gui(cfg):
             sound_player = None
     else:
         log("Центр уведомлений: модуль notification_center.py не найден.")
+
+    # ── чат warframe.market (t19): вкладка, HTTP/WS, фолбэк опроса ──────
+    chat_mod = chat_client_module()
+    if chat_mod is not None and cfg.get("chat_enabled", True):
+        try:
+            def _chat_token():
+                if market is not None:
+                    try:
+                        token = market.token()
+                        if token:
+                            return token
+                    except Exception:
+                        pass
+                return cfg.get("market_token") or ""
+
+            ChatWidget = chat_mod.build_chat_widget()
+            chat_widget = ChatWidget(cfg)
+            ChatService = chat_mod.build_chat_service()
+            chat_service = ChatService(
+                cfg, token_fn=_chat_token,
+                login_check=login_in_progress)
+        except Exception as e:
+            log(f"Чат: вкладка не создана ({type(e).__name__}: {e})")
+            chat_service = None
+            chat_widget = None
+    elif chat_mod is None:
+        log("Чат: модуль chat_client.py не найден — вкладка недоступна.")
+
+    # ── статус warframe.market (t20): WS A, чип, авто-режим ────────────
+    status_mod = market_status_module()
+
+    def _status_game_focused():
+        if sys.platform != "win32":
+            return False
+        hwnd = game_window_handle()
+        if not hwnd:
+            return False
+        try:
+            return int(ctypes.windll.user32.GetForegroundWindow()) == int(hwnd)
+        except Exception:
+            return False
+
+    if status_mod is not None:
+        try:
+            def _status_token():
+                if market is not None:
+                    try:
+                        return market.token() or ""
+                    except Exception:
+                        return ""
+                return cfg.get("market_token") or ""
+
+            def _status_log(message):
+                """Диагностика WS статуса: консоль + status_diag.log (без токена)."""
+                text = str(message or "")
+                log(f"Статус: {text}")
+                try:
+                    when = datetime.datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S")
+                    with open(os.path.join(DATA_DIR, "status_diag.log"),
+                              "a", encoding="utf-8") as handle:
+                        handle.write(f"{when} {text}\n")
+                except Exception:
+                    pass
+
+            StatusService = status_mod.build_status_service()
+            status_service = StatusService(
+                cfg, token_fn=_status_token,
+                focus_fn=_status_game_focused,
+                login_check=login_in_progress,
+                logger=_status_log)
+        except Exception as e:
+            log(f"Статус: сервис не создан ({type(e).__name__}: {e})")
+            status_service = None
+    else:
+        log("Статус: модуль market_status.py не найден.")
 
     # ── единое окно с вкладками (F8) ───────────────────────────────────
     unified = None
@@ -5088,14 +5170,24 @@ def run_gui(cfg):
                 refresh_actions=refresh_actions,
                 drops_widget=drops_widget,
                 notifications_widget=notification_center,
+                chat_widget=chat_widget,
                 token_factory=lambda: (*build_market_dialogs(),
                                        save_market_token),
                 auth_factory=make_auth_dialog,
                 save_values=lambda mapping: save_config_keys(cfg, mapping),
                 market_client=market,
                 on_open=_on_window_open,
-                on_updates=_open_updates,
                 on_settings=lambda: _open_settings(),
+                on_status_set=(lambda state, duration=None:
+                               status_service.set_status(state, duration)
+                               if status_service is not None else None),
+                on_status_auto=(lambda enabled:
+                                status_service.set_auto(enabled)
+                                if status_service is not None else None),
+                on_status_profile=(lambda:
+                                   center_mod.open_url(
+                                       "https://warframe.market/")
+                                   if center_mod is not None else None),
                 on_close=(restore_game_focus
                           if cfg.get("restore_game_focus", True) else None),
                 hotkey_aliases=cfg.get("hotkey_aliases", True))
@@ -5185,8 +5277,8 @@ def run_gui(cfg):
             pass
 
     def _tray_updates():
-        """«Обновления»: окно проверки версии (F8) или запасной тост."""
-        _open_updates()
+        """«Проверить обновление»: настройки на вкладке «Обновления» + проверка."""
+        _open_settings(auto_updates=True)
 
     def _show_notification(kind, title, text, sound):
         """GUI-поток: показать тост через трей (сигнал из фонового потока)."""
@@ -5241,7 +5333,8 @@ def run_gui(cfg):
         if center_mod is not None:
             result = center_mod.perform_action(
                 record, unified=unified, browser=browser,
-                events_panel=events_panel, open_updates=_open_updates,
+                events_panel=events_panel,
+        open_updates=lambda: _open_settings(auto_updates=True),
                 cfg=cfg)
         else:
             result = {"action": "center", "ok": False}
@@ -5261,6 +5354,7 @@ def run_gui(cfg):
         try:
             notify_tray = notify_mod.build_tray()(
                 cfg, on_open=_tray_open, on_updates=_tray_updates,
+                on_settings=lambda: _open_settings(),
                 on_exit=_tray_exit)
         except Exception as e:
             log(f"Уведомления: трей не создан ({type(e).__name__}: {e})")
@@ -5409,6 +5503,49 @@ def run_gui(cfg):
     else:
         log("Уведомления: модуль notifications.py не найден — без трея и тостов.")
 
+    # ── чат: сигналы сервиса → вкладка/бейдж; NEW_MESSAGE → центр ───────
+    if chat_service is not None and chat_widget is not None:
+        chat_service.chats_ready.connect(chat_widget.set_chats)
+        chat_service.messages_ready.connect(chat_widget.set_messages)
+        chat_service.message_received.connect(chat_widget.append_message)
+        chat_service.message_sent.connect(chat_widget.append_message)
+        chat_service.status_changed.connect(chat_widget.set_status)
+        if unified is not None:
+            chat_service.unread_changed.connect(unified.set_chat_badge)
+        chat_widget.chat_selected.connect(chat_service.load_messages)
+        chat_widget.send_requested.connect(chat_service.send)
+        chat_widget.open_site_requested.connect(
+            lambda: chat_mod.open_chat_site())
+
+        def _chat_notify(record):
+            if notifier is None:
+                return False
+            payload = (record.get("payload")
+                       if isinstance(record.get("payload"), dict) else {})
+            return notifier.notify(
+                record.get("kind", "chat"), record.get("title", ""),
+                record.get("text", ""),
+                subject=payload.get("chat_id", ""),
+                action="chat", payload=payload)
+
+        chat_service.notify_fn = _chat_notify
+        chat_service.start()
+
+    # ── статус: сигналы → чип; старт после входа/с токеном ─────────────
+    if status_service is not None:
+        if unified is not None:
+            status_service.status_changed.connect(unified.set_market_status)
+            status_service.auto_changed.connect(unified.set_status_auto)
+            status_service.error.connect(
+                lambda text: unified.lbl_status.setText(str(text)))
+            status_service.confirmed.connect(
+                lambda label: unified.lbl_status.setText(f"статус: {label}"))
+        else:
+            status_service.error.connect(log)
+        status_service.start()
+        if unified is not None:
+            unified.set_status_auto(status_service.auto)
+
     def toggle_selected():
         """F8: единое окно (вкладка «Выбрано») или старый редактор."""
         if login_in_progress():
@@ -5543,7 +5680,7 @@ def run_gui(cfg):
             log("Награда Alt+1…4: все клавиши заняты/выключены — "
                 "см. pick_hotkeys в config.json.")
 
-    # ── настройки (⚙): клавиши и параметры применяются без перезапуска ──
+    # ── настройки (шестерёнка): клавиши и параметры без перезапуска ──────
     settings_mod = settings_ui_module()
     hotkey_binder = None
     if settings_mod is not None:
@@ -5636,8 +5773,21 @@ def run_gui(cfg):
                    if result.get("backup") else "") + ".")
         return result
 
-    def _open_settings():
-        """Кнопка «⚙»: окно настроек (горячие клавиши и параметры)."""
+    def _test_notification(kind="market"):
+        """Кнопка «Проверить уведомление»: ТЕСТ мимо notify_enabled/кулдаунов."""
+        if center_mod is None or notification_store is None:
+            return {"ok": False, "error": "центр уведомлений недоступен"}
+        badge_cb = None
+        if unified is not None:
+            badge_cb = lambda count, color: unified.set_unread_badge(count, color)
+        return center_mod.dispatch_test_notification(
+            kind, cfg=cfg, store=notification_store,
+            center=notification_center, sound_player=sound_player,
+            toast_stack=toast_stack, tray=notify_tray,
+            login_check=login_in_progress, badge_cb=badge_cb)
+
+    def _open_settings(auto_updates=False):
+        """Настройки: клавиши/уведомления/обновления/прочее."""
         if settings_mod is None:
             log("Настройки: модуль settings_ui.py не найден.")
             return False
@@ -5648,9 +5798,18 @@ def run_gui(cfg):
             Dialog = settings_mod.build_settings_dialog()
             dialog = Dialog(
                 cfg, apply_fn=_apply_settings,
-                on_updates=_open_updates,
+                on_test_notification=_test_notification,
+                check_update_fn=_updates_check,
+                apply_update_fn=_updates_apply,
+                restart_fn=_updates_restart,
+                auto_check=bool(auto_updates),
                 data_dir=DATA_DIR, version=APP_VERSION,
                 parent=unified if unified is not None else None)
+            if auto_updates:
+                try:
+                    dialog.tabs.setCurrentWidget(dialog.updates_page)
+                except Exception:
+                    pass
             dialog.exec_()
             return True
         except Exception as e:
@@ -5721,9 +5880,8 @@ def run_gui(cfg):
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
     if unified is not None:
         hotkey = (cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")).upper()
-        tabs_desc = "Выбрано · Маркет · Мои ордера · События"
-        if drops_panel is not None:
-            tabs_desc += " · Дроп"
+        tabs_desc = ("Выбрано · Маркет · Мои ордера · События · Дроп · "
+                     "Уведомления · Чат")
         log(f"{hotkey} — единое окно: {tabs_desc}.")
         if cfg.get("hotkey_aliases", True):
             log(f"{cfg.get('hotkey_events', 'alt+e').upper()} / "
@@ -5788,6 +5946,16 @@ def run_gui(cfg):
         if toast_stack is not None:
             try:
                 toast_stack.hide_all()
+            except Exception:
+                pass
+        if chat_service is not None:
+            try:
+                chat_service.stop()
+            except Exception:
+                pass
+        if status_service is not None:
+            try:
+                status_service.stop(restore=True)
             except Exception:
                 pass
 
