@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Единое окно «Warframe Overlay» с вкладками (стиль AlecaFrame).
 
-Одна кнопка (F8) открывает одно окно; внутри — вкладки «Выбрано», «Маркет»,
-«Мои ордера», «События», «Дроп», «Уведомления», «Чат». Содержимое — уже
+Одна кнопка (F8) открывает одно окно; внутри — вкладки «Маркет»,
+«Мои ордера», «События», «Дроп», «Уведомления», «Чат». Редактор «Выбрано»
+из окна убран (плашки Alt+Q и Alt+1…4 остаются отдельными). Содержимое — уже
 существующие панели:
 редактор списка (F8-редактор), маркет-браузер (t6) и панель событий (t5);
 они создаются один раз и не пересоздаются ни при переключении вкладок,
@@ -24,7 +25,7 @@
   (``window_geometry``, ``window_size``, ``last_tab``) — только для
   нормального состояния; при старте окно открывается нормальным с
   сохранённой геометрией, невалидная позиция центрируется;
-* Ctrl+1..4 и клик переключают вкладки; статус маркета (чип токена) и
+* Ctrl+1..6 и клик переключают вкладки; статус маркета (чип токена) и
   «обновлено N с назад» + ⟳ для активной вкладки;
 * чип «🔑» открывает окно входа на warframe.market (встроенный браузер,
   см. AUTH_SPEC.md и market_auth.py); если окно входа недоступно — прежний
@@ -51,7 +52,7 @@ except Exception:         # pragma: no cover - без него прячем то
 
 import ui_theme as theme
 
-TAB_TITLES = ("Выбрано", "Маркет", "Мои ордера", "События")
+TAB_TITLES = ("Маркет", "Мои ордера", "События")
 DEFAULT_WIDTH = 1180
 DEFAULT_HEIGHT = 780
 MIN_WIDTH = 900          # минимальный размер окна (требование пользователя)
@@ -285,13 +286,14 @@ def build_overlay_window():
             super().__init__(None, Qt.Window | Qt.FramelessWindowHint |
                              Qt.WindowStaysOnTopHint)
             self.cfg = cfg
-            self.editor_widget = editor
+            # editor оставлен параметром для старого API, но вкладки/стека
+            # «Выбрано» больше нет.
             self.market_widget = market
             self.events_widget = events
             self.drops_widget = drops_widget
             self.notifications_widget = notifications_widget
             self.chat_widget = chat_widget
-            #: названия вкладок: 4 старые + «Дроп» + «Уведомления» + «Чат»
+            #: названия вкладок: Маркет · Мои ордера · События + опциональные
             self.titles = list(TAB_TITLES)
             if drops_widget is not None:
                 self.titles.append("Дроп")
@@ -508,7 +510,6 @@ def build_overlay_window():
             tabs_lay.addStretch(1)
 
             self.stack = QStackedWidget()
-            self.stack.addWidget(self.editor_widget)
             self.stack.addWidget(self.market_widget)
             self.stack.addWidget(self.events_widget)
             if self.drops_widget is not None:
@@ -560,11 +561,26 @@ def build_overlay_window():
 
         # ── состояние ──────────────────────────────────────────────────
         def _initial_tab(self):
+            """last_tab: одноразовая миграция старого индекса «Выбрано» → «Маркет»."""
             try:
-                index = int(self.cfg.get("last_tab", 0) or 0)
+                raw = int(self.cfg.get("last_tab", 0) or 0)
             except Exception:
-                index = 0
-            return max(0, min(len(self.titles) - 1, index))
+                raw = 0
+            migrate = self.cfg.get("tabs_schema") != 2
+            # старый 0..6: Выбрано/Маркет/Ордера/События/Дроп/Увед./Чат.
+            # новый 0..5: Маркет/Ордера/События/Дроп/Увед./Чат.
+            if migrate:
+                index = (raw - 1 if raw > 0 else 0) if 0 <= raw <= 6 else 0
+            else:
+                index = raw if 0 <= raw < len(self.titles) else 0
+            if migrate:
+                self.cfg["tabs_schema"] = 2
+                self.cfg["last_tab"] = index
+                try:
+                    self.save_values({"tabs_schema": 2, "last_tab": index})
+                except Exception:
+                    pass
+            return index
 
         def current_tab(self):
             return int(self._active_tab)
@@ -728,15 +744,15 @@ def build_overlay_window():
             self._active_tab = index
             for i, button in enumerate(self.tab_buttons):
                 button.setChecked(i == index)
-            if index in (1, 2):
+            if index in (0, 1):
                 self.stack.setCurrentWidget(self.market_widget)
                 try:
-                    self.market_widget.switch_tab(index - 1)
+                    self.market_widget.switch_tab(index)
                 except Exception:
                     pass
-            elif index == 3:
+            elif index == 2:
                 self.stack.setCurrentWidget(self.events_widget)
-            elif self.drops_widget is not None and index == 4:
+            elif self.drops_widget is not None and index == 3:
                 self.stack.setCurrentWidget(self.drops_widget)
             elif (self.notifications_widget is not None
                   and index == self._notifications_index):
@@ -744,7 +760,7 @@ def build_overlay_window():
             elif self.chat_widget is not None and index == self._chat_index:
                 self.stack.setCurrentWidget(self.chat_widget)
             else:
-                self.stack.setCurrentWidget(self.editor_widget)
+                self.stack.setCurrentWidget(self.market_widget)
             self.lbl_status.setText(self._provider(index))
             if save:
                 self.save_values({"last_tab": index})
