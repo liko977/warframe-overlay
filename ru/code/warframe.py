@@ -65,13 +65,14 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -173,6 +174,8 @@ DEFAULT_CONFIG = {
     # ── обновления ──────────────────────────────────────────────────────
     "update_url": "",                # загрузки обновлений нет
     "update_check": False,           # не обращаемся к GitHub
+    "update_check_interval_min": 180,  # автопроверка раз в 3 часа
+    "last_update_notified": "",      # одна нотификация на версию
 
     # ── экран / геометрия (координаты для 1920x1080) ────────────────────
     "monitor": 1,                    # 1 = основной монитор (mss)
@@ -2783,76 +2786,323 @@ def build_market_dialogs():
     from PyQt5.QtCore import Qt, pyqtSignal
     from PyQt5.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog,
                                  QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                                 QMessageBox, QPushButton, QSpinBox,
-                                 QVBoxLayout)
+                                 QMessageBox, QPushButton, QScrollArea,
+                                 QSpinBox, QToolButton, QVBoxLayout)
     theme = ui_theme()
     dialog_style = theme.dialog_qss()
 
-    class _TokenDialog(QDialog):
-        """Инструкция «как взять JWT из браузера» + поле ввода.
+    def _verify_token_http(token, http_get=None):
+        """GET /v2/me с Bearer для кнопки «Проверить токен» (без лога токена)."""
+        token = str(token or "").strip()
+        if not token:
+            return {"ok": False, "state": "empty", "code": 0,
+                    "message": "токен не введён"}
+        headers = {"Authorization": f"Bearer {token}",
+                   "Accept": "application/json",
+                   "User-Agent": "WarframePriceOverlayRU/0.6.1"}
+        url = "https://api.warframe.market/v2/me"
+        if not callable(http_get):
+            import urllib.error
+            import urllib.request
+            def http_get(address, request_headers, timeout=10):
+                request = urllib.request.Request(address,
+                                                 headers=request_headers)
+                try:
+                    with urllib.request.urlopen(request,
+                                                timeout=timeout) as resp:
+                        body = resp.read().decode("utf-8", "replace")
+                        return resp.getcode(), body
+                except urllib.error.HTTPError as exc:
+                    return exc.code, ""
+        try:
+            try:
+                raw = http_get(url, headers, 10)
+            except TypeError:
+                raw = http_get(url, headers)
+        except Exception as exc:
+            return {"ok": False, "state": "no_network", "code": 0,
+                    "message": f"нет сети ({type(exc).__name__})"}
+        code, body = (raw if isinstance(raw, tuple)
+                      else (raw, ""))
+        try:
+            code = int(code)
+        except Exception:
+            code = 0
+        if code == 200:
+            nickname = ""
+            try:
+                data = json.loads(body) if body else {}
+                payload = data.get("data") if isinstance(data, dict) else {}
+                payload = payload if isinstance(payload, dict) else data
+                nickname = str((payload or {}).get("ingameName")
+                               or (payload or {}).get("slug")
+                               or (payload or {}).get("name") or "")
+            except Exception:
+                nickname = ""
+            return {"ok": True, "state": "ok", "code": 200,
+                    "message": "токен принят", "nickname": nickname}
+        if code == 401:
+            return {"ok": False, "state": "unauthorized", "code": 401,
+                    "message": "401 — гостевой или просрочен"}
+        return {"ok": False, "state": "error", "code": code,
+                "message": f"HTTP {code}"}
 
-        Сохраняет токен в config.json (через ``save_fn``) и в память клиента.
-        Сам токен нигде не печатается и не логируется.
-        """
+    class _TokenDialog(QDialog):
+        """Ручной ввод JWT + общая инструкция для Chromium/Firefox."""
 
         INSTRUCTION = (
-            "1. Откройте warframe.market в браузере и войдите в аккаунт.\n"
-            "2. DevTools (F12) → вкладка Network → обновите страницу.\n"
-            "3. Выберите любой запрос к api.warframe.market → Headers →\n"
-            "   Request Headers → Authorization: Bearer eyJ…\n"
-            "4. Скопируйте значение после «Bearer » и вставьте в поле ниже.\n\n"
-            "Проще: нажмите «🔑» в шапке окна — там вход через встроенное\n"
-            "окно браузера, токен заберётся и проверится автоматически.\n"
-            "Пароль оверлей не спрашивает и не хранит.\n\n"
-            "Токен даёт полный доступ к вашему аккаунту (ордера, профиль).\n"
-            "Он хранится только в config.json на этом компьютере и уходит\n"
-            "только на api.warframe.market. Пароль оверлей не спрашивает."
+            "Как получить токен warframe.market\n\n"
+            "Chromium (Chrome, Edge, Яндекс, Opera, Opera GX):\n"
+            "1. Войдите на https://warframe.market/ в этом браузере.\n"
+            "2. F12 или Ctrl+Shift+I → вкладка Application (в Opera GX: "
+            "Storage → Cookies).\n"
+            "3. Cookies → https://warframe.market → строка JWT → скопируйте "
+            "Value.\n\n"
+            "Firefox:\n"
+            "1. Войдите на https://warframe.market/ в Firefox.\n"
+            "2. F12 → Хранилище/Storage → Cookies → "
+            "https://warframe.market → JWT → скопируйте значение.\n\n"
+            "Важно: cookie JWT помечена HttpOnly, поэтому document.cookie "
+            "в консоли её НЕ покажет — только Application → Cookies.\n\n"
+            "«Гостевой» токен (до входа на сайт) выглядит так же, но "
+            "/v2/me отвечает 401 — сначала войдите в аккаунт.\n\n"
+            "Старый способ: DevTools (F12) → Network → Headers → "
+            "Authorization: Bearer eyJ…; вставьте значение после Bearer.\n"
+            "Быстрее: нажмите «🔑» в шапке F8 — вход через браузер, токен "
+            "заберётся автоматически. Пароль оверлей не спрашивает.\n"
+            "Токен хранится только в config.json на этом компьютере."
         )
+        CHECK_COMMAND = (
+            "Invoke-RestMethod -Uri "
+            "https://api.warframe.market/v2/me -Headers "
+            "@{Authorization='Bearer <JWT>'}"
+        )
+        check_done = pyqtSignal(dict)
 
-        def __init__(self, cfg, client, parent=None, save_fn=None):
+        def __init__(self, cfg, client, parent=None, save_fn=None,
+                     verify_fn=None, open_url=None, clipboard=None,
+                     http_get=None, logger=None):
             super().__init__(parent)
             register_app_dialog(self)     # B2: скрытие приложения закроет окно
             self.cfg = cfg
             self.client = client
             self.save_fn = save_fn or (lambda cfg, token: False)
+            self.verify_fn = verify_fn
+            self.open_url = open_url
+            self.clipboard = clipboard
+            self.http_get = http_get
+            self.logger = logger
+            self._checked_token = ""
+            self._checking = False
             self.setWindowTitle("Токен warframe.market")
             self.setModal(True)
-            self.setMinimumWidth(560)
+            self.setMinimumWidth(600)
+            self.setMaximumHeight(560)
             self.setStyleSheet(dialog_style)
             layout = QVBoxLayout(self)
-            title = QLabel("<b>Токен warframe.market</b>")
+            layout.setContentsMargins(16, 14, 16, 12)
+            layout.setSpacing(8)
+            title = QLabel("<b>Как получить токен warframe.market</b>")
             title.setStyleSheet(
                 f"font-size:{theme.size('window')}px; font-weight:700;"
                 f" color:{theme.PALETTE['text']};")
+            self.btn_instruction = QToolButton()
+            self.btn_instruction.setText("Как получить токен ▸")
+            self.btn_instruction.setCheckable(True)
+            self.btn_instruction.setChecked(False)
+            self.btn_instruction.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            self.btn_instruction.setStyleSheet(theme.button_qss(small=True))
+            self.btn_instruction.setCursor(Qt.PointingHandCursor)
             self.lbl_info = QLabel(self.INSTRUCTION)
             self.lbl_info.setWordWrap(True)
             self.lbl_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self.lbl_info.setStyleSheet(theme.muted_qss(11))
+            self.instruction_scroll = QScrollArea()
+            self.instruction_scroll.setWidgetResizable(True)
+            self.instruction_scroll.setMaximumHeight(250)
+            self.instruction_scroll.setWidget(self.lbl_info)
+            self.instruction_scroll.setVisible(False)
+
+            def toggle_instruction(checked):
+                self.instruction_scroll.setVisible(bool(checked))
+                self.btn_instruction.setText(
+                    "Как получить токен ▾" if checked
+                    else "Как получить токен ▸")
+            self.btn_instruction.toggled.connect(toggle_instruction)
             self.lbl_status = QLabel("сейчас: " + _token_status(client))
             self.lbl_status.setStyleSheet(theme.status_qss())
+            self.lbl_status.setWordWrap(True)
             self.edit_token = QLineEdit()
-            self.edit_token.setEchoMode(QLineEdit.Normal if cfg.get("market_token_visible")
-                                        else QLineEdit.Password)
-            self.edit_token.setPlaceholderText("eyJhbGciOi… (без слова Bearer)")
+            self.edit_token.setEchoMode(
+                QLineEdit.Normal if cfg.get("market_token_visible")
+                else QLineEdit.Password)
+            self.edit_token.setPlaceholderText(
+                "eyJhbGciOi… (без слова Bearer)")
             self.chk_show = QCheckBox("показать токен")
             self.chk_show.toggled.connect(
                 lambda on: self.edit_token.setEchoMode(
                     QLineEdit.Normal if on else QLineEdit.Password))
+
+            action_row = QHBoxLayout()
+            self.btn_open_site = QPushButton("Открыть warframe.market")
+            self.btn_open_site.clicked.connect(self._open_site)
+            self.btn_check = QPushButton("Проверить токен")
+            self.btn_check.clicked.connect(self._check)
+            self.btn_copy = QPushButton("Скопировать инструкцию")
+            self.btn_copy.clicked.connect(self._copy_instruction)
+            self.btn_copy_command = QPushButton("Скопировать команду проверки")
+            self.btn_copy_command.clicked.connect(self._copy_command)
+            for button in (self.btn_open_site, self.btn_check, self.btn_copy,
+                           self.btn_copy_command):
+                button.setStyleSheet(theme.button_qss(small=True))
+                button.setCursor(Qt.PointingHandCursor)
+                action_row.addWidget(button)
+            action_row.addStretch(1)
+
             buttons = QHBoxLayout()
             self.btn_save = QPushButton("Сохранить")
             self.btn_save.setDefault(True)
             self.btn_cancel = QPushButton("Отмена")
-            self.btn_save.clicked.connect(self._save)
+            self.btn_save.clicked.connect(self._save_clicked)
             self.btn_cancel.clicked.connect(self.reject)
             buttons.addStretch(1)
             buttons.addWidget(self.btn_cancel)
             buttons.addWidget(self.btn_save)
             layout.addWidget(title)
-            layout.addWidget(self.lbl_info)
+            layout.addWidget(self.btn_instruction)
+            layout.addWidget(self.instruction_scroll)
             layout.addWidget(self.lbl_status)
             layout.addWidget(self.edit_token)
             layout.addWidget(self.chk_show)
+            layout.addLayout(action_row)
             layout.addLayout(buttons)
+            self.check_done.connect(self._on_check_done)
+            self.resize(680, 540)
+
+        def _log(self, text):
+            if callable(self.logger):
+                try:
+                    self.logger(str(text))
+                except Exception:
+                    pass
+
+        def _open_site(self):
+            url = "https://warframe.market/"
+            try:
+                if callable(self.open_url):
+                    self.open_url(url)
+                else:
+                    import webbrowser
+                    webbrowser.open(url)
+                return True
+            except Exception as exc:
+                self._log(f"токен: браузер не открылся "
+                          f"({type(exc).__name__})")
+                return False
+
+        @staticmethod
+        def _result_parts(result):
+            if isinstance(result, dict):
+                state = str(result.get("state") or "")
+                code = result.get("code") or 0
+                message = str(result.get("message") or "")
+                nickname = str(result.get("nickname") or result.get("ingameName")
+                               or result.get("name") or "")
+                ok = bool(result.get("ok")) or state == "ok" or code == 200
+                return ok, state, int(code or 0), message, nickname
+            if isinstance(result, tuple):
+                state = str(result[0] if result else "")
+                message = str(result[1] if len(result) > 1 else "")
+                return state == "ok", state, 0, message, ""
+            text = str(result or "")
+            return text in ("ok", "200"), text, 0, text, ""
+
+        def _check(self):
+            if self._checking:
+                return False
+            token = self.edit_token.text().strip()
+            if len(token) < 20:
+                self.lbl_status.setText("⚠ токен слишком короткий — "
+                                        "скопируйте JWT целиком")
+                return False
+            self._checking = True
+            self.btn_check.setEnabled(False)
+            self.btn_check.setText("Проверяю…")
+            self.lbl_status.setText("проверяю токен: GET /v2/me…")
+            self._log("токен: проверка через /v2/me")
+
+            def worker():
+                try:
+                    if callable(self.verify_fn):
+                        result = self.verify_fn(token)
+                    else:
+                        result = _verify_token_http(token, self.http_get)
+                except Exception as exc:
+                    result = {"ok": False, "state": "error", "code": 0,
+                              "message": f"нет сети ({type(exc).__name__})"}
+                try:
+                    self.check_done.emit(
+                        result if isinstance(result, dict)
+                        else {"ok": False, "state": "error",
+                              "message": str(result)})
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True,
+                             name="wf-token-check").start()
+            return True
+
+        def _on_check_done(self, result):
+            self._checking = False
+            self.btn_check.setEnabled(True)
+            self.btn_check.setText("Проверить токен")
+            ok, state, code, message, nickname = self._result_parts(result)
+            if ok:
+                self._checked_token = self.edit_token.text().strip()
+                who = nickname or "аккаунт"
+                self.lbl_status.setText(f"✅ токен принят (ник: {who})")
+            elif code == 401 or "401" in message or state in (
+                    "unauthorized", "expired", "guest"):
+                self.lbl_status.setText(
+                    "⚠ 401 — гостевой или просрочен; сначала войдите на сайте")
+            elif state in ("no_network", "network") or "нет сети" in message:
+                self.lbl_status.setText("🌐 нет сети — проверьте интернет")
+            else:
+                self.lbl_status.setText(
+                    f"⚠ токен не принят: {message or state or 'ошибка'}")
+
+        def _copy_instruction(self):
+            text = self.INSTRUCTION + "\n\nПроверка: " + self.CHECK_COMMAND
+            return self._set_clipboard(text)
+
+        def _copy_command(self):
+            token = self.edit_token.text().strip() or "<JWT>"
+            return self._set_clipboard(
+                self.CHECK_COMMAND.replace("<JWT>", token))
+
+        def _set_clipboard(self, text):
+            try:
+                if self.clipboard is not None:
+                    self.clipboard.setText(text)
+                else:
+                    from PyQt5.QtWidgets import QApplication
+                    QApplication.clipboard().setText(text)
+                self.lbl_status.setText("скопировано в буфер обмена")
+                return True
+            except Exception as exc:
+                self._log(f"токен: буфер недоступен ({type(exc).__name__})")
+                return False
+
+        def _save_clicked(self):
+            token = self.edit_token.text().strip()
+            if token and token != self._checked_token:
+                answer = QMessageBox.question(
+                    self, "Токен не проверен",
+                    "Токен ещё не проверен через /v2/me. Сохранить?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if answer != QMessageBox.Yes:
+                    return False
+            return self._save()
 
         def _save(self):
             """Проверяет и сохраняет токен. True при успехе (без печати токена)."""
@@ -3786,6 +4036,8 @@ _SETTINGS_UI_MODULE = {"mod": None, "tried": False}
 _NOTIFICATION_CENTER_MODULE = {"mod": None, "tried": False}
 _CHAT_CLIENT_MODULE = {"mod": None, "tried": False}
 _MARKET_STATUS_MODULE = {"mod": None, "tried": False}
+_BROWSER_TOKEN_MODULE = {"mod": None, "tried": False}
+_UPDATE_WATCHER_MODULE = {"mod": None, "tried": False}
 
 #: Страховка, если login_mode.py нет рядом (старая сборка): флаг всё равно
 #: нужен guard-ам окон/хоткеев, чтобы не всплывать во время входа.
@@ -3946,6 +4198,18 @@ def market_status_module():
     """Статус warframe.market (market_status.py): WS A/чип/авто."""
     return _load_local_module("market_status.py", "market_status",
                               _MARKET_STATUS_MODULE)
+
+
+def browser_token_module():
+    """JWT из профилей Chrome/Edge/Yandex/Opera/Firefox (browser_token.py)."""
+    return _load_local_module("browser_token.py", "browser_token",
+                              _BROWSER_TOKEN_MODULE)
+
+
+def update_watcher_module():
+    """Фоновая автопроверка обновлений (update_watcher.py)."""
+    return _load_local_module("update_watcher.py", "update_watcher",
+                              _UPDATE_WATCHER_MODULE)
 
 
 def login_in_progress():
@@ -4940,6 +5204,10 @@ def run_gui(cfg):
         return LoginDialog(auth_ctl, parent=parent, cfg=cfg,
                            data_dir=DATA_DIR, manual_factory=manual,
                            logger=log,
+                           manual_open=lambda url: webbrowser.open(str(url)),
+                           browser_token_finder=lambda:
+                           browser_token_module().BrowserTokenFinder(
+                               logger=log) if browser_token_module() else None,
                            save_values=lambda mapping: save_config_keys(cfg, mapping),
                            on_login_state=_on_login_state)
 
@@ -5719,6 +5987,19 @@ def run_gui(cfg):
             except Exception as e:
                 log(f"Настройки: опрос уведомлений не переключён "
                     f"({type(e).__name__}: {e})")
+        # автоматическая проверка обновлений: включить/выключить на лету
+        try:
+            if auto_update_watcher is not None:
+                if auto_update_watcher.enabled():
+                    if not auto_update_watcher.start():
+                        # интервал мог измениться — перезапустить таймер
+                        auto_update_watcher.stop()
+                        auto_update_watcher.start()
+                else:
+                    auto_update_watcher.stop()
+        except Exception as e:
+            log(f"Настройки: автопроверка обновлений не переключена "
+                f"({type(e).__name__}: {e})")
         # прозрачность окна/фона
         if unified is not None:
             try:
@@ -5875,6 +6156,37 @@ def run_gui(cfg):
         except Exception as e:
             log(f"Дроп: хвост статистики не запущен ({type(e).__name__}: {e})")
 
+    # ── автопроверка обновлений на ходу (t34) ─────────────────────────
+    auto_update_watcher = None
+    try:
+        watcher_mod = update_watcher_module()
+        if watcher_mod is not None:
+            def _auto_update_available(info):
+                version = str((info or {}).get("version") or "").strip()
+                if not version or notifier is None:
+                    return False
+                title = f"Доступно обновление {version}"
+                text = ("Откройте настройки → «Обновления», чтобы проверить "
+                        "и установить")
+                try:
+                    return notifier.notify("updates", title, text,
+                                           force=True, action="updates")
+                except Exception as exc:
+                    log(f"Обновления: уведомление не показано "
+                        f"({type(exc).__name__})")
+                    return False
+
+            auto_update_watcher = watcher_mod.UpdateWatcher(
+                cfg, _updates_check,
+                on_available=_auto_update_available,
+                save_fn=lambda mapping: save_config_keys(cfg, mapping),
+                logger=log)
+            auto_update_watcher.start()
+    except Exception as e:
+        log(f"Обновления: автопроверка не запущена "
+            f"({type(e).__name__}: {e})")
+        auto_update_watcher = None
+
     log("=" * 60)
     log(f"Warframe Price Overlay {APP_VERSION} — готово.")
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
@@ -5920,6 +6232,11 @@ def run_gui(cfg):
     except KeyboardInterrupt:
         pass
     finally:
+        if auto_update_watcher is not None:
+            try:
+                auto_update_watcher.stop()
+            except Exception:
+                pass
         if unified is not None:
             unified.save_state()
         if events_ctl is not None:
