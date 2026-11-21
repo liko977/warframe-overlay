@@ -2,7 +2,8 @@
 """Единое окно «Warframe Overlay» с вкладками (стиль AlecaFrame).
 
 Одна кнопка (F8) открывает одно окно; внутри — вкладки «Выбрано», «Маркет»,
-«Мои ордера», «События». Содержимое — уже существующие панели:
+«Мои ордера», «События», «Дроп», «Уведомления», «Чат». Содержимое — уже
+существующие панели:
 редактор списка (F8-редактор), маркет-браузер (t6) и панель событий (t5);
 они создаются один раз и не пересоздаются ни при переключении вкладок,
 ни при смене режима окна.
@@ -91,13 +92,13 @@ TOKEN_CHIP_TOOLTIP = {
 
 def build_overlay_window():
     """Фабрика класса единого окна (PyQt5 импортируется лениво)."""
-    from PyQt5.QtCore import QPoint, QRect, Qt, QTimer, pyqtSignal
+    from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
     from PyQt5.QtGui import QFont, QGuiApplication, QKeySequence
     from PyQt5.QtWidgets import (QAbstractButton, QAbstractSlider,
                                  QAbstractSpinBox, QButtonGroup, QComboBox,
                                  QFrame, QHBoxLayout, QLabel, QLineEdit,
-                                 QPushButton, QShortcut, QStackedWidget,
-                                 QVBoxLayout, QWidget)
+                                 QMenu, QPushButton, QShortcut,
+                                 QStackedWidget, QVBoxLayout, QWidget)
 
     #: Виджеты в шапке, которые сами обрабатывают мышь: с них drag не стартует.
     INTERACTIVE = (QAbstractButton, QLineEdit, QComboBox, QAbstractSpinBox,
@@ -245,8 +246,10 @@ def build_overlay_window():
                      token_factory=None, save_values=None,
                      market_client=None, on_open=None, on_close=None,
                      hotkey_aliases=True, auth_factory=None,
-                     drops_widget=None, on_updates=None, on_settings=None,
-                     notifications_widget=None):
+                     drops_widget=None, on_settings=None,
+                     notifications_widget=None, chat_widget=None,
+                     on_status_set=None, on_status_auto=None,
+                     on_status_profile=None):
             super().__init__(None, Qt.Window | Qt.FramelessWindowHint |
                              Qt.WindowStaysOnTopHint)
             self.cfg = cfg
@@ -255,7 +258,8 @@ def build_overlay_window():
             self.events_widget = events
             self.drops_widget = drops_widget
             self.notifications_widget = notifications_widget
-            #: названия вкладок: 4 старые + «Дроп» + «Уведомления» (если есть)
+            self.chat_widget = chat_widget
+            #: названия вкладок: 4 старые + «Дроп» + «Уведомления» + «Чат»
             self.titles = list(TAB_TITLES)
             if drops_widget is not None:
                 self.titles.append("Дроп")
@@ -263,6 +267,10 @@ def build_overlay_window():
             if notifications_widget is not None:
                 self._notifications_index = len(self.titles)
                 self.titles.append("Уведомления")
+            self._chat_index = None
+            if chat_widget is not None:
+                self._chat_index = len(self.titles)
+                self.titles.append("Чат")
             self.market_client = market_client
             self.token_factory = token_factory
             # auth_factory(parent) -> QDialog — окно входа через браузер
@@ -271,8 +279,11 @@ def build_overlay_window():
             self.save_values = save_values or (lambda mapping: True)
             self.on_open = on_open
             self.on_close = on_close
-            self.on_updates = on_updates
             self.on_settings = on_settings
+            self.on_status_set = on_status_set
+            self.on_status_auto = on_status_auto
+            self.on_status_profile = on_status_profile
+            self._status_auto = False
             self.hotkey_aliases = bool(hotkey_aliases)
             self.status_providers = list(status_providers or [])
             self.refresh_actions = list(refresh_actions or [])
@@ -282,6 +293,11 @@ def build_overlay_window():
                     lambda: f"уведомления: "
                             f"{self.notifications_widget.unread_count()}")
                 self.refresh_actions.append(self.notifications_widget.refresh)
+            if chat_widget is not None:
+                self.status_providers.append(
+                    lambda: str(getattr(self.chat_widget, "lbl_status").text()
+                                or "чат"))
+                self.refresh_actions.append(None)
             self._active_tab = self._initial_tab()
             # ── режим окна: normal | maximized | fullscreen ─────────────
             self._mode = "normal"
@@ -336,6 +352,14 @@ def build_overlay_window():
             self.btn_token.setCursor(Qt.PointingHandCursor)
             self.btn_token.setStyleSheet(theme.button_qss(small=True))
             self.btn_token.clicked.connect(self.open_token)
+            # чип статуса warframe.market (t20): ● Онлайн / В игре / …
+            self.btn_status = QPushButton("● —")
+            self.btn_status.setFont(make_font(10, True))
+            self.btn_status.setCursor(Qt.PointingHandCursor)
+            self.btn_status.setStyleSheet(theme.button_qss(small=True))
+            self.btn_status.setToolTip("Статус warframe.market")
+            self.btn_status.clicked.connect(self.open_status_menu)
+            self._status = ""
             self.lbl_status = QLabel("—")
             self.lbl_status.setFont(make_font(10))
             self.lbl_status.setStyleSheet(theme.status_qss())
@@ -384,6 +408,7 @@ def build_overlay_window():
             self.btn_close.clicked.connect(self.hide_window)
             header_lay.addWidget(self.lbl_title)
             header_lay.addWidget(self.btn_token)
+            header_lay.addWidget(self.btn_status)
             header_lay.addStretch(1)
             header_lay.addWidget(self.lbl_status)
             header_lay.addWidget(self.btn_bell)
@@ -411,26 +436,24 @@ def build_overlay_window():
                 self.tab_buttons.append(button)
                 tabs_lay.addWidget(button)
             tabs_lay.addStretch(1)
-            # «пункт» обновлений прямо в едином окне (F8): текущая версия,
-            # проверка, «Обновить и перезапустить» — открывает диалог.
-            self.btn_updates = QPushButton("Обновления")
-            self.btn_updates.setFont(make_font(10))
-            self.btn_updates.setStyleSheet(theme.button_qss(small=True))
-            self.btn_updates.setCursor(Qt.PointingHandCursor)
-            self.btn_updates.setToolTip(
-                "Обновления приложения: проверить и установить новую версию")
-            self.btn_updates.clicked.connect(self.open_updates)
-            tabs_lay.addWidget(self.btn_updates)
-            # «⚙»: настройки (горячие клавиши, уведомления, оверлей…)
-            self.btn_settings = QPushButton("⚙")
+            # Настройки: шестерёнка (обновления — внутри вкладки «Обновления»)
+            self.btn_settings = QPushButton("")
             self.btn_settings.setFont(make_font(12))
-            self.btn_settings.setFixedSize(24, 22)
+            self.btn_settings.setFixedSize(26, 22)
+            try:
+                import ui_icons
+                self.btn_settings.setIcon(ui_icons.gear_icon(22))
+                self.btn_settings.setIconSize(QSize(22, 22))
+            except Exception:
+                self.btn_settings.setText("⋯")
             self.btn_settings.setStyleSheet(theme.button_qss(small=True))
             self.btn_settings.setCursor(Qt.PointingHandCursor)
-            self.btn_settings.setToolTip(
-                "Настройки: горячие клавиши, уведомления, оверлей, обновления")
+            self.btn_settings.setToolTip("Настройки (Ctrl+,)")
             self.btn_settings.clicked.connect(self.open_settings)
             tabs_lay.addWidget(self.btn_settings)
+            # Ctrl+, — тот же диалог, доступен и в полноэкранном режиме
+            self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+            self._settings_shortcut.activated.connect(self.open_settings)
 
             self.stack = QStackedWidget()
             self.stack.addWidget(self.editor_widget)
@@ -440,6 +463,8 @@ def build_overlay_window():
                 self.stack.addWidget(self.drops_widget)
             if self.notifications_widget is not None:
                 self.stack.addWidget(self.notifications_widget)
+            if self.chat_widget is not None:
+                self.stack.addWidget(self.chat_widget)
             self.stack.setStyleSheet("background: transparent;")
 
             lay.addWidget(self.header)
@@ -664,6 +689,8 @@ def build_overlay_window():
             elif (self.notifications_widget is not None
                   and index == self._notifications_index):
                 self.stack.setCurrentWidget(self.notifications_widget)
+            elif self.chat_widget is not None and index == self._chat_index:
+                self.stack.setCurrentWidget(self.chat_widget)
             else:
                 self.stack.setCurrentWidget(self.editor_widget)
             self.lbl_status.setText(self._provider(index))
@@ -671,20 +698,8 @@ def build_overlay_window():
                 self.save_values({"last_tab": index})
                 self.cfg["last_tab"] = index
 
-        def open_updates(self):
-            """Пункт «Обновления» в едином окне: открыть окно проверки версии."""
-            if not callable(self.on_updates):
-                self.lbl_status.setText("обновления недоступны в этой сборке")
-                return False
-            try:
-                self.on_updates()
-                return True
-            except Exception as exc:
-                self.lbl_status.setText(f"обновления: {exc}")
-                return False
-
         def open_settings(self):
-            """Кнопка «⚙»: открыть окно настроек (клавиши/уведомления/…)."""
+            """Настройки: клавиши/уведомления/обновления/прочее."""
             if not callable(self.on_settings):
                 self.lbl_status.setText("настройки недоступны в этой сборке")
                 return False
@@ -728,6 +743,128 @@ def build_overlay_window():
                 f"Уведомления: {count} непрочитанных" if count
                 else "Уведомления")
             return count
+
+        def open_chat(self):
+            """Открыть вкладку «Чат»."""
+            if self.chat_widget is None:
+                self.lbl_status.setText("чат недоступен")
+                return False
+            self.show_tab(self._chat_index)
+            return True
+
+        def set_chat_badge(self, count):
+            """Бейдж непрочитанных на вкладке «Чат»."""
+            if self.chat_widget is None:
+                return False
+            try:
+                count = max(0, int(count or 0))
+            except Exception:
+                count = 0
+            try:
+                button = self.tab_buttons[self._chat_index]
+            except Exception:
+                return False
+            button.setText("Чат" if not count else f"Чат · {count}")
+            button.setToolTip(
+                f"Чат: {count} непрочитанных" if count else "Чат")
+            return count
+
+        def set_market_status(self, status, duration=None):
+            """t20: чип статуса warframe.market (точка + подпись)."""
+            labels = {"online": "Онлайн", "ingame": "В игре",
+                      "invisible": "Невидимка", "offline": "Оффлайн"}
+            colors = {"online": theme.PALETTE["success"],
+                      "ingame": theme.PALETTE["accent"],
+                      "invisible": theme.PALETTE["muted"],
+                      "offline": theme.PALETTE["muted"]}
+            status = str(status or "").lower()
+            self._status = status
+            text = labels.get(status, "—")
+            if self._status_auto and status:
+                text += " · авто"
+            color = colors.get(status, theme.PALETTE["muted"])
+            self.btn_status.setText(f"● {text}")
+            self.btn_status.setStyleSheet(
+                theme.button_qss(small=True)
+                + f"QPushButton {{ color:{color}; border:1px solid {color}; }}")
+            self.btn_status.setToolTip(
+                f"Статус warframe.market: {text}"
+                + (f" · до {duration} с" if duration else ""))
+            return status
+
+        def set_status_auto(self, enabled):
+            self._status_auto = bool(enabled)
+            self.btn_status.setToolTip(
+                "Статус warframe.market"
+                + (" · Авто (В игре, когда игра в фокусе)"
+                   if self._status_auto else ""))
+            if self._status:
+                self.set_market_status(self._status)
+            return self._status_auto
+
+        def request_status(self, status, duration=None):
+            """Явный выбор в меню → callback сервиса статуса."""
+            if not callable(self.on_status_set):
+                return False
+            try:
+                self.on_status_set(str(status), duration)
+                return True
+            except Exception as exc:
+                self.lbl_status.setText(f"статус: {exc}")
+                return False
+
+        def request_status_auto(self, enabled):
+            self._status_auto = bool(enabled)
+            if not callable(self.on_status_auto):
+                return False
+            try:
+                self.on_status_auto(self._status_auto)
+                return True
+            except Exception as exc:
+                self.lbl_status.setText(f"статус: {exc}")
+                return False
+
+        def request_status_profile(self):
+            """Fallback: открыть профиль на сайте (если WS-смена не видна)."""
+            if not callable(self.on_status_profile):
+                return False
+            try:
+                self.on_status_profile()
+                return True
+            except Exception as exc:
+                self.lbl_status.setText(f"профиль: {exc}")
+                return False
+
+        def status_menu_labels(self):
+            return ["Онлайн", "В игре", "Невидимка", "Авто"]
+
+        def open_status_menu(self):
+            menu = QMenu(self)
+            for label, status in (("Онлайн", "online"), ("В игре", "ingame"),
+                                  ("Невидимка", "invisible")):
+                action = menu.addAction(label)
+                action.triggered.connect(
+                    lambda _=False, s=status: self.request_status(s))
+            duration_menu = menu.addMenu("На время")
+            for label, status in (("Онлайн", "online"), ("В игре", "ingame")):
+                sub = duration_menu.addMenu(label)
+                for seconds, title in ((1800, "30 мин"), (3600, "1 ч"),
+                                       (7200, "2 ч"), (14400, "4 ч")):
+                    act = sub.addAction(title)
+                    act.triggered.connect(
+                        lambda _=False, s=status, d=seconds:
+                        self.request_status(s, d))
+            menu.addSeparator()
+            auto = menu.addAction("Авто (В игре, когда игра в фокусе)")
+            auto.setCheckable(True)
+            auto.setChecked(bool(self._status_auto))
+            auto.triggered.connect(
+                lambda checked: self.request_status_auto(bool(checked)))
+            profile = menu.addAction("Открыть профиль на сайте")
+            profile.triggered.connect(self.request_status_profile)
+            menu.exec_(self.btn_status.mapToGlobal(
+                self.btn_status.rect().bottomLeft()))
+            return True
 
         def update_hotkey_hints(self, mapping=None):
             """Обновить подписи/подсказки после смены горячих клавиш."""
@@ -1397,238 +1534,3 @@ def build_overlay_window():
                         and not report["transparent_for_input"])
 
     return OverlayWindow
-
-
-def build_updates_dialog():
-    """Фабрика окна «Обновления» (F8 → пункт «Обновления»).
-
-    Окно показывает текущую версию, кнопку «Проверить обновления», статус и
-    «Обновить и перезапустить». Сеть/установка — только через переданные
-    колбэки и в фоновом потоке, поэтому GUI не блокируется:
-
-    * ``check_fn() -> dict`` (как ``launcher.check_for_update(..., apply=False)``);
-    * ``apply_fn(manifest) -> dict`` (как ``launcher.apply_manifest``);
-    * ``restart_fn()`` — перезапуск приложения после установки.
-    """
-    import threading
-
-    from PyQt5.QtCore import Qt, pyqtSignal
-    from PyQt5.QtWidgets import (QDialog, QHBoxLayout, QLabel, QPushButton,
-                                 QVBoxLayout)
-
-    try:
-        import ui_theme as theme
-    except Exception:                 # pragma: no cover - тема всегда рядом
-        theme = None
-
-    def qss():
-        return theme.dialog_qss() if theme is not None else ""
-
-    def button_qss(primary=False, danger=False):
-        if theme is None:
-            return ""
-        return theme.button_qss(primary=primary, danger=danger)
-
-    def color(name, default="#e6edf6"):
-        if theme is None:
-            return default
-        return theme.PALETTE.get(name, default)
-
-    class UpdatesDialog(QDialog):
-        """Окно обновлений: текущая версия, проверка, установка и перезапуск."""
-
-        checked = pyqtSignal(dict)
-        applied = pyqtSignal(dict)
-
-        def __init__(self, cfg=None, current_version="", check_fn=None,
-                     apply_fn=None, restart_fn=None, parent=None):
-            super().__init__(parent)
-            self.cfg = dict(cfg or {})
-            self.current_version = str(current_version or "—")
-            self.check_fn = check_fn
-            self.apply_fn = apply_fn
-            self.restart_fn = restart_fn
-            self.info = {}
-            self._busy = False
-            self.setWindowTitle("Обновления")
-            self.setModal(True)
-            self.setMinimumWidth(520)
-            self.setStyleSheet(qss())
-            try:
-                import login_mode
-                login_mode.register_dialog(self)     # B2: закроется при F9
-            except Exception:
-                pass
-
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(16, 14, 16, 12)
-            layout.setSpacing(10)
-            title = QLabel("<b>Обновления Warframe Price Overlay</b>")
-            title.setStyleSheet(f"color:{color('text')}; font-size:14px;")
-            self.lbl_current = QLabel(f"Текущая версия: {self.current_version}")
-            self.lbl_current.setStyleSheet(
-                f"color:{color('muted')}; font-size:11px;")
-            self.lbl_status = QLabel(
-                "Нажмите «Проверить обновления», чтобы узнать о новой версии.")
-            self.lbl_status.setWordWrap(True)
-            self.lbl_status.setStyleSheet(
-                f"color:{color('text')}; font-size:11px;")
-            self.lbl_notes = QLabel("")
-            self.lbl_notes.setWordWrap(True)
-            self.lbl_notes.setStyleSheet(
-                f"color:{color('muted')}; font-size:10px;")
-            layout.addWidget(title)
-            layout.addWidget(self.lbl_current)
-            layout.addWidget(self.lbl_status)
-            layout.addWidget(self.lbl_notes)
-
-            buttons = QHBoxLayout()
-            buttons.setSpacing(8)
-            self.btn_check = QPushButton("Проверить обновления")
-            self.btn_check.setStyleSheet(button_qss(primary=True))
-            self.btn_check.setCursor(Qt.PointingHandCursor)
-            self.btn_check.clicked.connect(self.start_check)
-            self.btn_update = QPushButton("Обновить и перезапустить")
-            self.btn_update.setStyleSheet(button_qss())
-            self.btn_update.setCursor(Qt.PointingHandCursor)
-            self.btn_update.setEnabled(False)
-            self.btn_update.clicked.connect(self.start_update)
-            self.btn_close = QPushButton("Закрыть")
-            self.btn_close.setStyleSheet(button_qss())
-            self.btn_close.setCursor(Qt.PointingHandCursor)
-            self.btn_close.clicked.connect(self.reject)
-            buttons.addWidget(self.btn_check)
-            buttons.addWidget(self.btn_update)
-            buttons.addStretch(1)
-            buttons.addWidget(self.btn_close)
-            layout.addLayout(buttons)
-
-            self.checked.connect(self._on_checked)
-            self.applied.connect(self._on_applied)
-            self.finished.connect(
-                lambda _result=0: self._release_dialog())
-
-        # ── служебное ─────────────────────────────────────────────────
-        def _release_dialog(self):
-            try:
-                import login_mode
-                login_mode.unregister_dialog(self)
-            except Exception:
-                pass
-
-        def _run(self, function):
-            """Выполнить сетевую/дисковую операцию в фоне (GUI не блокируем)."""
-            thread = threading.Thread(target=function, daemon=True,
-                                      name="wf-updates")
-            thread.start()
-            return thread
-
-        def _set_status(self, text, warn=False):
-            self.lbl_status.setText(str(text))
-            self.lbl_status.setStyleSheet(
-                f"color:{color('warning' if warn else 'text')};"
-                " font-size:11px;")
-
-        def _set_busy(self, busy):
-            self._busy = bool(busy)
-            self.btn_check.setEnabled(not busy)
-            self.btn_update.setEnabled(
-                not busy and bool(self.info.get("available")))
-
-        # ── проверка ──────────────────────────────────────────────────
-        def start_check(self):
-            if self._busy:
-                return False
-            if not callable(self.check_fn):
-                self._set_status("Проверка обновлений недоступна в этой сборке.",
-                                 warn=True)
-                return False
-            self._set_busy(True)
-            self.lbl_notes.setText("")
-            self._set_status("Проверяю обновления…")
-
-            def worker():
-                try:
-                    result = self.check_fn() or {}
-                except Exception as exc:
-                    result = {"checked": False, "available": False,
-                              "error": f"{type(exc).__name__}: {exc}"}
-                try:
-                    self.checked.emit(dict(result))
-                except RuntimeError:
-                    pass
-
-            self._run(worker)
-            return True
-
-        def _on_checked(self, result):
-            self.info = dict(result or {})
-            self._set_busy(False)
-            if self.info.get("skipped"):
-                self._set_status(f"Обновления не настроены: "
-                                 f"{self.info['skipped']}.", warn=True)
-                return
-            if self.info.get("error"):
-                self._set_status(f"Не удалось проверить обновления: "
-                                 f"{self.info['error']}.", warn=True)
-                return
-            if self.info.get("available"):
-                version = self.info.get("version") or "?"
-                self._set_status(f"Доступна версия {version}. Нажмите "
-                                 "«Обновить и перезапустить».")
-                notes = str(self.info.get("notes") or "").strip()
-                self.lbl_notes.setText(f"Что нового: {notes}" if notes else "")
-                return
-            current = self.info.get("current") or self.current_version
-            self._set_status(f"Обновлений нет: у вас последняя версия "
-                             f"({current}).")
-
-        # ── установка + перезапуск ────────────────────────────────────
-        def start_update(self):
-            if self._busy:
-                return False
-            manifest = self.info.get("manifest")
-            if not manifest:
-                self._set_status("Сначала проверьте обновления.", warn=True)
-                return False
-            if not callable(self.apply_fn):
-                self._set_status("Установка обновлений недоступна.", warn=True)
-                return False
-            self._set_busy(True)
-            self._set_status(f"Скачиваю версию {self.info.get('version') or '?'}…")
-
-            def worker():
-                try:
-                    result = self.apply_fn(manifest) or {}
-                except Exception as exc:
-                    result = {"ok": False,
-                              "error": f"{type(exc).__name__}: {exc}"}
-                try:
-                    self.applied.emit(dict(result))
-                except RuntimeError:
-                    pass
-
-            self._run(worker)
-            return True
-
-        def _on_applied(self, result):
-            result = dict(result or {})
-            if not result.get("ok") or result.get("error"):
-                self._set_busy(False)
-                self._set_status(f"Не удалось обновить: "
-                                 f"{result.get('error') or 'неизвестная ошибка'}.",
-                                 warn=True)
-                return
-            version = result.get("version") or self.info.get("version") or "?"
-            self._set_status(f"Обновление {version} установлено — "
-                             "перезапускаю приложение…")
-            if callable(self.restart_fn):
-                try:
-                    self.restart_fn()
-                except Exception as exc:
-                    self._set_status(f"Обновление установлено, но перезапуск "
-                                     f"не удался ({type(exc).__name__}). "
-                                     "Закройте и запустите приложение вручную.",
-                                     warn=True)
-
-    return UpdatesDialog
