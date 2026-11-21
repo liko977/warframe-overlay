@@ -1,7 +1,7 @@
 {
-  "version": "0.6.4",
-  "notes": "Скорость Alt+Q, цвета платины/дукатов, фикс чертежей, иконки предметов, сборка без консоли",
-  "updated_at": "2026-11-21T19:21:30Z",
+  "version": "0.6.5",
+  "notes": "Тест OTA: маркер 0.6.5 поверх 0.6.4",
+  "updated_at": "2026-11-21T19:36:31Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -139,7 +139,7 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "960fce8eda00cd502e8a4f20b7e8071aa3058dff7b17696af65a5f2ea5677cc2",
+      "sha256": "f0d21df94a0e0b74d499128441a7766ef29dc50d6e191629865d7441288c79fc",
       "size": 328880
     }
   ]
