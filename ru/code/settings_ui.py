@@ -78,7 +78,10 @@ DEFAULT_VALUES = {
     "overlay_layout": "bottom",
     "font_scale": 1.0,
     "overlay_opacity": 1.0,
+    "currency_platinum_color": "#E7F1FF",
+    "currency_ducats_color": "#C9A66B",
     "show_summary": True,
+    "show_item_icons": True,
     "update_check": True,
     "update_url": "",
     "update_check_interval_min": 180,
@@ -438,6 +441,18 @@ def open_data_folder(path, opener=None):
     path = os.path.abspath(str(path or "."))
     if not os.path.isdir(path):
         return False
+    return _open_path(path, opener)
+
+
+def open_log_file(path, opener=None):
+    """Открыть app.log; без файла — False."""
+    path = os.path.abspath(str(path or ""))
+    if not os.path.isfile(path):
+        return False
+    return _open_path(path, opener)
+
+
+def _open_path(path, opener=None):
     if callable(opener):
         try:
             opener(path)
@@ -631,7 +646,7 @@ def build_settings_dialog():
         def __init__(self, cfg=None, apply_fn=None, on_open_data_dir=None,
                      on_test_notification=None, check_update_fn=None,
                      apply_update_fn=None, restart_fn=None, auto_check=False,
-                     data_dir="", version="", parent=None):
+                     data_dir="", version="", parent=None, on_open_log=None):
             super().__init__(parent)
             self.cfg = dict(cfg or {})
             self.apply_fn = apply_fn
@@ -642,6 +657,7 @@ def build_settings_dialog():
             self.last_checked = ""
             self._update_busy = False
             self.on_open_data_dir = on_open_data_dir
+            self.on_open_log = on_open_log
             self.on_test_notification = on_test_notification
             self.data_dir = data_dir
             self.version = version
@@ -877,7 +893,41 @@ def build_settings_dialog():
             self.chk_show_summary = QCheckBox("Показывать блок «Итого»")
             self.chk_show_summary.setFont(font(11))
             form.addRow(QLabel(""), self.chk_show_summary)
+            self.chk_show_item_icons = QCheckBox("Иконки предметов")
+            self.chk_show_item_icons.setFont(font(11))
+            self.chk_show_item_icons.setToolTip(
+                "Иконки WFCD в плашках, «Дропе» и «Маркете»; загрузка в фоне")
+            form.addRow(QLabel(""), self.chk_show_item_icons)
+
+            def currency_combo(current, choices):
+                combo = QComboBox()
+                for value in choices:
+                    combo.addItem(value, value)
+                index = combo.findData(current)
+                if index < 0 and current:
+                    combo.addItem(f"{current} (текущий)", current)
+                    index = combo.count() - 1
+                combo.setCurrentIndex(max(0, index))
+                combo.setFont(font(11))
+                return combo
+
+            palette = (theme.PALETTE if theme is not None else {})
+            self.cmb_currency_platinum = currency_combo(
+                str(self.cfg.get("currency_platinum_color")
+                    or palette.get("currency_platinum") or "#E7F1FF"),
+                getattr(theme, "PLATINUM_CHOICES", ("#E7F1FF",)))
+            self.cmb_currency_ducats = currency_combo(
+                str(self.cfg.get("currency_ducats_color")
+                    or palette.get("currency_ducats") or "#C9A66B"),
+                getattr(theme, "DUCATS_CHOICES", ("#C9A66B",)))
+            form.addRow(QLabel("Цвет платины (p)"),
+                        self.cmb_currency_platinum)
+            form.addRow(QLabel("Цвет дукатов (дк)"),
+                        self.cmb_currency_ducats)
             outer.addLayout(form)
+            outer.addWidget(muted(
+                "Платина подписывается «p», дукаты — «дк»; цвета валют "
+                "применяются сразу и не могут совпадать."))
             outer.addWidget(muted(
                 "Масштаб и положение применятся к следующему скану "
                 "наград; прозрачность — сразу."))
@@ -966,6 +1016,11 @@ def build_settings_dialog():
             self.btn_open_data.clicked.connect(self.open_data)
             row = QHBoxLayout()
             row.addWidget(self.btn_open_data)
+            self.btn_open_log = QPushButton("Открыть app.log")
+            self.btn_open_log.setStyleSheet(button_qss())
+            self.btn_open_log.setCursor(Qt.PointingHandCursor)
+            self.btn_open_log.clicked.connect(self.open_log)
+            row.addWidget(self.btn_open_log)
             row.addStretch(1)
             outer.addLayout(row)
             self.lbl_data_dir = QLabel(str(self.data_dir or "—"))
@@ -1036,6 +1091,18 @@ def build_settings_dialog():
                 float(values.get("overlay_opacity", 1.0) or 1.0))
             self.chk_show_summary.setChecked(
                 bool(values.get("show_summary", True)))
+            self.chk_show_item_icons.setChecked(
+                bool(values.get("show_item_icons", True)))
+            for combo, key in (
+                    (self.cmb_currency_platinum, "currency_platinum_color"),
+                    (self.cmb_currency_ducats, "currency_ducats_color")):
+                value = str(values.get(key) or "")
+                index = combo.findData(value)
+                if index < 0 and value:
+                    combo.addItem(f"{value} (текущий)", value)
+                    index = combo.count() - 1
+                if index >= 0:
+                    combo.setCurrentIndex(index)
             self.chk_update_check.setChecked(
                 bool(values.get("update_check", True)))
             self.edit_update_url.setText(str(values.get("update_url") or ""))
@@ -1075,7 +1142,12 @@ def build_settings_dialog():
                 "overlay_layout": str(self.cmb_layout.currentData() or "bottom"),
                 "font_scale": round(float(self.spin_font_scale.value()), 2),
                 "overlay_opacity": round(float(self.spin_opacity.value()), 2),
+                "currency_platinum_color": str(
+                    self.cmb_currency_platinum.currentData() or "#E7F1FF"),
+                "currency_ducats_color": str(
+                    self.cmb_currency_ducats.currentData() or "#C9A66B"),
                 "show_summary": self.chk_show_summary.isChecked(),
+                "show_item_icons": self.chk_show_item_icons.isChecked(),
                 "update_check": self.chk_update_check.isChecked(),
                 "update_url": self.edit_update_url.text().strip(),
                 "update_check_interval_min":
@@ -1113,6 +1185,13 @@ def build_settings_dialog():
 
         def save(self):
             values = self.values()
+            try:
+                theme.validate_currency_colors(
+                    values.get("currency_platinum_color"),
+                    values.get("currency_ducats_color"))
+            except Exception as exc:
+                self._set_status(f"Не сохранено: {exc}.", warn=True)
+                return {"ok": False, "error": str(exc)}
             check = validate_hotkeys(values.get("hotkeys") or {})
             self._clear_errors()
             if not check["ok"]:
@@ -1322,6 +1401,14 @@ def build_settings_dialog():
                 self._set_status("Папка данных открыта.")
                 return True
             self._set_status("Не удалось открыть папку данных.", warn=True)
+            return False
+
+        def open_log(self):
+            path = os.path.join(self.data_dir, "app.log")
+            if open_log_file(path, opener=self.on_open_log):
+                self._set_status("app.log открыт.")
+                return True
+            self._set_status("app.log пока нет.", warn=True)
             return False
 
     return SettingsDialog
