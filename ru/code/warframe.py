@@ -73,7 +73,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.6.5"
+APP_VERSION = "0.6.6"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -746,6 +746,9 @@ class MarketAPI:
                 if game_ref and game_ref not in refs:
                     refs[game_ref] = slug
                 i18n = it.get("i18n") or {}
+                en_meta = i18n.get("en") if isinstance(i18n.get("en"), dict) else {}
+                icon = str(en_meta.get("icon") or "")
+                thumb = str(en_meta.get("thumb") or "")
                 # рынок отдаёт и русские, и английские названия — берём оба,
                 # чтобы приложение понимало игру на любом языке
                 for lang in ("ru", "en"):
@@ -755,7 +758,8 @@ class MarketAPI:
                     key = normalize_name(name)
                     if key and key not in items:
                         items[key] = {"slug": slug, "name": name, "lang": lang,
-                                      "gameRef": game_ref}
+                                      "gameRef": game_ref,
+                                      "icon": icon, "thumb": thumb}
             if items:
                 with self._lock:
                     self.items = items
@@ -939,6 +943,8 @@ class MarketAPI:
             out["en_name"] = self.en_name_by_slug(m["slug"])
         except Exception:
             out["en_name"] = None
+        for field in ("icon", "thumb", "gameRef"):
+            out[field] = m.get(field) or ""
         return self._fill_market(out, m["slug"])
 
     def name_by_slug(self, slug):
@@ -1562,12 +1568,12 @@ def build_overlays():
             self.icon_label.setStyleSheet("background: transparent;")
             self.icon_label.setToolTip("Иконка предмета")
             self.icon_badge = QLabel("Ч", self.icon_label)
-            self.icon_badge.setFixedSize(12, 12)
+            self.icon_badge.setFixedSize(16, 12)
             self.icon_badge.setAlignment(Qt.AlignCenter)
             self.icon_badge.setStyleSheet(
-                "background:#f5c451; color:#17212e; font-size:8px;"
+                "background:#f5c451; color:#17212e; font-size:7px;"
                 " font-weight:700; border-radius:2px;")
-            self.icon_badge.move(20, 0)
+            self.icon_badge.move(15, 0)
             self.icon_badge.setVisible(False)
             self._set_placeholder_icon()
 
@@ -1657,21 +1663,27 @@ def build_overlays():
                                      en_name=data.get("en_name") or "",
                                      game_ref=game_ref)
             blueprint = False
+            badge = ""
             try:
-                blueprint = bool(item_icons_module().is_blueprint(
-                    name, slug))
+                badge = item_icons_module().part_badge(slug, name)
+                blueprint = bool(badge)
             except Exception:
+                badge = ""
                 blueprint = False
             self.icon_label.setVisible(True)
+            self.icon_badge.setText(badge or "Ч")
             self.icon_badge.setVisible(blueprint)
             self.icon_badge.raise_()
             key = slug or name or (image or "unknown")
             self._icon_key = key
-            if not image:
+            if not slug and not image:
                 pix = provider.placeholder(32)
                 if pix is not None:
                     self.icon_label.setPixmap(pix)
                 self.icon_badge.setVisible(blueprint)
+                return
+            if (not (data.get("thumb") or data.get("icon"))
+                    and not getattr(provider, "has_index", lambda: False)()):
                 return
             self._set_placeholder_icon()
             self.icon_label.setVisible(True)
@@ -1690,7 +1702,7 @@ def build_overlays():
                     pass
 
             try:
-                provider.request(key, image, callback=done, size=32)
+                provider.request_item(key, data, callback=done, size=32)
             except Exception:
                 pass
 
