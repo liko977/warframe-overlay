@@ -72,7 +72,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -1804,7 +1804,7 @@ def build_overlays():
         def _on_market(self):
             """Кнопка «⌕» в шапке редактора: открыть «Маркет» (Alt+M)."""
             if self.unified_window is not None:
-                self.unified_window.show_tab(1)
+                self.unified_window.show_tab(0)
                 return
             if self.market_browser is None:
                 log("  маркет: окно недоступно (нет market_browser.py).")
@@ -4131,7 +4131,7 @@ def login_mode_module():
 def farm_stats_module():
     """Сборщик статистики фарма (farm_stats.py) — вкладка «Дроп».
 
-    Модуль опционален: без него оверлей работает с прежними 4 вкладками.
+    Модуль опционален: без него оверлей работает с базовыми вкладками.
     """
     return _load_local_module("farm_stats.py", "farm_stats", _FARM_STATS_MODULE)
 
@@ -4139,7 +4139,7 @@ def farm_stats_module():
 def relic_pool_module():
     """Пулы реликвий (relic_pool.py) — вкладка «Дроп» → «Пулы реликвий».
 
-    Модуль опционален: без него оверлей работает с прежними 4 вкладками.
+    Модуль опционален: без него оверлей работает с базовыми вкладками.
     """
     return _load_local_module("relic_pool.py", "relic_pool", _RELIC_POOL_MODULE)
 
@@ -5018,7 +5018,7 @@ def run_gui(cfg):
             market = None
 
     # ── статистика фарма и пулы реликвий (вкладка «Дроп») ──────────────
-    # Модули опциональны: без них единое окно остаётся с 4 вкладками.
+    # Модули опциональны: без них единое окно остаётся с базовыми вкладками.
     farm_mod = farm_stats_module()
     pool_mod = relic_pool_module()
     ui_mod = farm_stats_ui_module()
@@ -5401,7 +5401,6 @@ def run_gui(cfg):
                     events_ctl.start()
                 if cfg.get("focus_editor_on_f8", True) and not login_in_progress():
                     focus_editor(unified)
-
             # панель «Дроп» собирается только когда единое окно реально строится
             if ui_mod is not None and collector is not None and pool is not None:
                 try:
@@ -5411,11 +5410,10 @@ def run_gui(cfg):
                     log(f"Дроп: панель не создана ({type(e).__name__}: {e})")
                     drops_panel = None
 
-            status_providers = [manager.selected.status_text,
-                                browser.status_text,
+            status_providers = [browser.status_text,
                                 browser.status_text,
                                 events_client.status_text]
-            refresh_actions = [None, browser.refresh, browser.refresh,
+            refresh_actions = [browser.refresh, browser.refresh,
                                events_ctl.refresh_now]
             drops_widget = None
             if drops_panel is not None:
@@ -5815,7 +5813,7 @@ def run_gui(cfg):
             unified.set_status_auto(status_service.auto)
 
     def toggle_selected():
-        """F8: единое окно (вкладка «Выбрано») или старый редактор."""
+        """F8: единое окно (первая вкладка «Маркет») или старый редактор."""
         if login_in_progress():
             # идёт вход в браузере: окно поверх браузера не показываем
             return
@@ -5842,7 +5840,7 @@ def run_gui(cfg):
             return
         if unified is not None:
             if cfg.get("hotkey_aliases", True):
-                unified.show_tab(3)
+                unified.show_tab(2)
             return
         if events_ctl is None:
             log("События: панель недоступна (нет events_api.py или PyQt5).")
@@ -5855,7 +5853,7 @@ def run_gui(cfg):
             return
         if unified is not None:
             if cfg.get("hotkey_aliases", True):
-                unified.show_tab(1)
+                unified.show_tab(0)
             return
         if browser is None:
             log("Маркет: окно недоступно (нет market_browser.py).")
@@ -6192,7 +6190,7 @@ def run_gui(cfg):
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
     if unified is not None:
         hotkey = (cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")).upper()
-        tabs_desc = ("Выбрано · Маркет · Мои ордера · События · Дроп · "
+        tabs_desc = ("Маркет · Мои ордера · События · Дроп · "
                      "Уведомления · Чат")
         log(f"{hotkey} — единое окно: {tabs_desc}.")
         if cfg.get("hotkey_aliases", True):
@@ -6200,7 +6198,7 @@ def run_gui(cfg):
                 f"{cfg.get('hotkey_market', 'alt+m').upper()} — алиасы вкладок "
                 "«События» / «Маркет».")
     else:
-        log(f"{cfg.get('hotkey_editor', 'f8').upper()} — список выбранного (редактор).")
+        log(f"{cfg.get('hotkey_editor', 'f8').upper()} — единое окно F8 (список выбранного остаётся в плашках/Alt+1…4).")
         if events_ctl is not None:
             log(f"{cfg.get('hotkey_events', 'alt+e').upper()} — игровые события.")
         if browser is not None:
