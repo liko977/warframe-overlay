@@ -73,7 +73,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.7.1"
+APP_VERSION = "0.7.2"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -602,6 +602,101 @@ def word_coverage(query, candidate):
         if best >= threshold:
             hits += 1
     return hits / len(qw)
+
+
+def _order_online(order):
+    user = (order or {}).get("user")
+    if isinstance(user, dict):
+        status = str(user.get("status") or "").lower()
+        if status in ("ingame", "online"):
+            return True
+        if status == "offline":
+            return False
+    status = str((order or {}).get("status") or "").lower()
+    return status in ("ingame", "online")
+
+
+def lowest_sell_order(client, slug):
+    """Минимальный sell-ордер: сначала онлайн-игроки.
+
+    Возвращает ``{"price", "seller", "online", "error", "count"}``; сеть/ошибки
+    не бросает — цена остаётся ``None`` для ручного ввода.
+    """
+    out = {"price": None, "seller": "", "online": False,
+           "error": None, "count": 0}
+    try:
+        orders = client.orders(slug) if client is not None else []
+    except Exception as exc:
+        out["error"] = f"не удалось узнать цену ({type(exc).__name__})"
+        return out
+    sells = []
+    for order in orders or []:
+        if not isinstance(order, dict) or order.get("visible") is False:
+            continue
+        kind = str(order.get("type") or order.get("order_type") or "").lower()
+        try:
+            platinum = int(order.get("platinum"))
+        except Exception:
+            continue
+        if kind != "sell" or platinum < 1:
+            continue
+        sells.append((platinum, _order_online(order), order))
+    out["count"] = len(sells)
+    if not sells:
+        out["error"] = "нет ордеров — введите цену вручную"
+        return out
+    online = [item for item in sells if item[1]]
+    price, is_online, order = min(online or sells, key=lambda item: item[0])
+    user = order.get("user") if isinstance(order.get("user"), dict) else {}
+    out.update({"price": price, "online": is_online,
+                "seller": user.get("ingameName") or user.get("name") or ""})
+    return out
+
+
+def loot_sell_status(record, client, browser=None):
+    """Состояние кнопки «Продать» в строке лута (без сети)."""
+    record = dict(record or {})
+    slug = str(record.get("slug") or "")
+    if client is None or not getattr(client, "has_token", lambda: False)():
+        return {"enabled": False, "label": "Продать",
+                "tooltip": "войдите на маркет"}
+    order = None
+    if browser is not None:
+        try:
+            order = browser.find_my_sell_order(slug)
+        except Exception:
+            order = None
+    if order is not None:
+        return {"enabled": True, "label": "Изменить цену",
+                "tooltip": "Изменить цену своего ордера", "order": order}
+    return {"enabled": True, "label": "Продать",
+            "tooltip": "Выставить на продажу по цене рынка"}
+
+
+def pick_toast_record(result, duplicate=False):
+    """Запись эфемерного тоста лута (без HistoryStore)."""
+    result = dict(result or {})
+    item = result.get("item") if isinstance(result.get("item"), dict) else {}
+    name = str(result.get("name") or item.get("market_name")
+               or item.get("name") or "предмет")
+    price = result.get("price", item.get("price"))
+    text = name
+    if isinstance(price, (int, float)) and price:
+        text += f" — {int(price)}p"
+    ducats = item.get("ducats")
+    if isinstance(ducats, (int, float)) and ducats:
+        text += f" · дукаты: {int(ducats)}"
+    return {
+        "kind": "pick",
+        "title": ("Уже в дропах" if duplicate else "Добавлено в Дропы"),
+        "text": text,
+        "action": "drops",
+        "item_slug": item.get("slug") or "",
+        "item_name": name,
+        "item_en_name": item.get("en_name") or "",
+        "item_thumb": item.get("thumb") or "",
+        "item_icon": item.get("icon") or "",
+    }
 
 
 def set_slug_for_part(slug, name=""):
@@ -1585,7 +1680,7 @@ def build_overlays():
             self.frame.setStyleSheet(self._style_normal)
 
             lay = QVBoxLayout(self.frame)
-            lay.setContentsMargins(9, 5, 9, 6)
+            lay.setContentsMargins(9, 2, 9, 3)
             lay.setSpacing(0)
 
             self.lbl_name = QLabel("")
@@ -1625,6 +1720,20 @@ def build_overlays():
             mid.addStretch(1)
             mid.addWidget(self.lbl_ducats)
 
+            self.lbl_set = QLabel("")
+            set_font = QFont(self.font())
+            set_font.setPixelSize(12)
+            set_font.setWeight(QFont.DemiBold)
+            self.lbl_set.setFont(set_font)
+            self.lbl_set.setTextFormat(Qt.RichText)
+            self.lbl_set.setToolTip("Полный комплект")
+            self.lbl_set.setVisible(False)
+            set_row = QHBoxLayout()
+            set_row.setContentsMargins(0, 1, 0, 0)
+            set_row.setSpacing(0)
+            set_row.addWidget(self.lbl_set)
+            set_row.addStretch(1)
+
             bot = QHBoxLayout()
             bot.setContentsMargins(0, 0, 0, 0)
             bot.setSpacing(4)
@@ -1633,14 +1742,7 @@ def build_overlays():
             self.lbl_sold = QLabel("")
             self.lbl_sold.setStyleSheet("color:#8b97a8; font-size:10px;")
             self.lbl_sold.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.lbl_set = QLabel("")
-            self.lbl_set.setStyleSheet(
-                f"color:{theme.currency_platinum()}; font-size:9px; "
-                "font-weight:600;")
-            self.lbl_set.setToolTip("Полный комплект")
-            self.lbl_set.setVisible(False)
             bot.addWidget(self.lbl_owned)
-            bot.addWidget(self.lbl_set)
             bot.addStretch(1)
             bot.addWidget(self.lbl_sold)
 
@@ -1651,6 +1753,7 @@ def build_overlays():
             top.addWidget(self.lbl_name, 1)
             lay.addLayout(top)
             lay.addLayout(mid)
+            lay.addLayout(set_row)
             lay.addLayout(bot)
 
             outer.addWidget(self.frame)
@@ -1761,11 +1864,15 @@ def build_overlays():
                 return
             name = ((data or {}).get("set_name")
                     or (data or {}).get("set_slug") or "комплект")
-            self.lbl_set.setText(f"компл. {int(price)} p")
+            platinum = theme.currency_platinum()
+            self.lbl_set.setText(
+                '<span style="color:rgba(231,241,255,191);'
+                ' font-weight:400;">компл.</span> '
+                f'<span style="color:{platinum}; font-weight:700;">'
+                f'{int(price)} p</span>')
             self.lbl_set.setToolTip(f"Полный комплект: {name}")
             self.lbl_set.setStyleSheet(
-                f"color:{theme.currency_platinum()}; font-size:9px; "
-                "font-weight:600;")
+                "background: transparent; font-size:12px;")
             self.lbl_set.setVisible(True)
 
         def apply_set_setting(self):
@@ -2255,7 +2362,8 @@ def build_overlays():
                 return self._pick_message("неверный номер награды",
                                           ok=False, index=None, added=False)
             if index < 0 or index >= 4:
-                return self._pick_message("награда выбирается Alt+1…Alt+4",
+                return self._pick_message("награда выбирается вашими "
+                                          "клавишами отметки",
                                           ok=False, index=index, added=False)
             if login_in_progress():
                 return self._pick_message(
@@ -3780,7 +3888,8 @@ def build_market_dialogs():
 
             form = QFormLayout()
             self.spin_price = QSpinBox()
-            self.spin_price.setRange(1, 900000)
+            self.spin_price.setRange(0, 900000)
+            self.spin_price.setSpecialValueText("не задана")
             self.spin_price.setSuffix(" p")
             default_price = (self.prefill_price
                              if isinstance(self.prefill_price, (int, float))
@@ -3799,6 +3908,11 @@ def build_market_dialogs():
                 default_qty = 1
             if self.order:
                 default_qty = int(self.order.get("quantity") or default_qty)
+            else:
+                try:
+                    default_qty = int(self.item.get("quantity") or default_qty)
+                except Exception:
+                    pass
             self.spin_quantity.setValue(max(1, min(9999, default_qty)))
             self.spin_rank = QSpinBox()
             self.spin_rank.setRange(0, 0)
@@ -3889,6 +4003,26 @@ def build_market_dialogs():
 
         def _on_price_edited(self, _value):
             self._price_user_edited = True
+            self._update_price_state()
+
+        def _update_price_state(self):
+            """Цена обязательна: 0/пусто → кнопка disabled + подсветка."""
+            valid = self.spin_price.value() >= 1
+            if valid:
+                self.spin_price.setStyleSheet("")
+            else:
+                self.spin_price.setStyleSheet(
+                    f"border:1px solid {theme.PALETTE['danger']};")
+            loaded = bool(self.meta.get("id"))
+            self.btn_create.setEnabled(bool(loaded and valid))
+
+        def _update_button_text(self):
+            if self.order:
+                self.btn_create.setText("Обновить ордер")
+                self.setWindowTitle("Обновить ордер")
+            else:
+                self.btn_create.setText(f"Создать {self.order_type}-ордер")
+                self.setWindowTitle(f"Создать {self.order_type}-ордер")
 
         def set_order_type(self, order_type):
             """Sell/buy: цена предзаполняется из низшей sell / высшей buy."""
@@ -3902,14 +4036,6 @@ def build_market_dialogs():
                          else self.hint.get("sell"))
                 if value:
                     self._set_price(value)
-
-        def _update_button_text(self):
-            if self.order:
-                self.btn_create.setText("Обновить ордер")
-                self.setWindowTitle("Обновить ордер")
-            else:
-                self.btn_create.setText(f"Создать {self.order_type}-ордер")
-                self.setWindowTitle(f"Создать {self.order_type}-ордер")
 
         def _set_price(self, value):
             self.spin_price.blockSignals(True)
@@ -3951,7 +4077,7 @@ def build_market_dialogs():
                 self.combo_subtype.setVisible(True)
             self._apply_hint(payload.get("hint") or {})
             self.lbl_status.setText("данные предмета получены")
-            self.btn_create.setEnabled(True)
+            self._update_price_state()
 
         def _update_hint_text(self):
             parts = []
@@ -3966,6 +4092,11 @@ def build_market_dialogs():
                 parts.append("онлайн-продавцов нет (цена по оффлайну)")
             if self.hint.get("error"):
                 parts.append(f"подсказка недоступна: {self.hint['error']}")
+            if self.hint.get("sell") is None and self.hint.get("buy") is None:
+                parts.append("введите цену вручную")
+            sell = self.hint.get("sell")
+            if isinstance(sell, (int, float)) and sell <= 1:
+                parts.append("рынок почти пуст — проверьте цену")
             self.lbl_hint.setText(" · ".join(parts)
                                   or "Подсказка цены недоступна — введите цену вручную.")
 
@@ -3982,6 +4113,7 @@ def build_market_dialogs():
                          else self.hint.get("sell"))
                 if value:
                     self._set_price(value)
+            self._update_price_state()
 
         def _on_rank_changed(self, rank):
             """Сменили ранг мода — уточняем цену именно для этого ранга."""
@@ -6104,13 +6236,104 @@ def run_gui(cfg):
                 if cfg.get("focus_editor_on_f8", True) and not login_in_progress():
                     focus_editor(unified)
             # панель «Дроп» собирается только когда единое окно реально строится
+            _loot_orders_requested = [False]
+
+            def _loot_sell_handler(record, action):
+                """«Продать»/«Изменить цену» из строки лута."""
+                record = dict(record or {})
+                status = loot_sell_status(record, market, browser)
+                if browser is None:
+                    status.update(enabled=False,
+                                  tooltip="маркет недоступен")
+                if action == "status" and status.get("enabled") is not False:
+                    try:
+                        if (not getattr(browser, "_orders", None)
+                                and not getattr(browser, "_busy_orders", False)
+                                and not _loot_orders_requested[0]):
+                            _loot_orders_requested[0] = True
+                            browser._load_orders(force=True)
+                    except Exception:
+                        pass
+                if action == "status":
+                    return status
+                if not status.get("enabled"):
+                    return {"ok": False, "error": status.get("tooltip")}
+                slug = str(record.get("slug") or "")
+                if not slug:
+                    return {"ok": False, "error": "в записи нет предмета"}
+                name = (record.get("picked_name") or record.get("name")
+                        or slug)
+                try:
+                    quantity = int(record.get("quantity") or
+                                   record.get("picked_quantity") or 1)
+                except Exception:
+                    quantity = 1
+                item = {"slug": slug, "name": name, "market_name": name,
+                        "quantity": max(1, quantity)}
+                hint = lowest_sell_order(market, slug)
+                price = hint.get("price")
+                if price is not None:
+                    seller = hint.get("seller") or ""
+                    where = f"у продавца {seller}" if seller else "на рынке"
+                    if hint.get("online"):
+                        where += ", онлайн"
+                    note = f"по рынку: {int(price)}p ({where})"
+                else:
+                    note = (hint.get("error")
+                            or "введите цену вручную")
+                order = None
+                try:
+                    order = browser.find_my_sell_order(slug)
+                except Exception:
+                    order = None
+                accepted = False
+                try:
+                    accepted = bool(browser.open_loot_order(
+                        item, prefill_price=price, price_note=note,
+                        order=order))
+                except Exception as exc:
+                    return {"ok": False,
+                            "error": f"форма продажи: {exc}"}
+                if not accepted:
+                    return {"ok": False, "cancelled": True}
+                message = f"Выставлено: {name}"
+                if price is not None:
+                    message += f" — {int(price)}p"
+                log("  Продажа: " + message)
+                try:
+                    if notifier is not None:
+                        notifier.notify("market", "Выставлено", message,
+                                        force=True)
+                except Exception:
+                    pass
+                try:
+                    if drops_panel is not None:
+                        drops_panel._listed_slugs.add(slug)
+                        drops_panel.refresh()
+                except Exception:
+                    pass
+                try:
+                    browser._load_orders(force=True)
+                except Exception:
+                    pass
+                return {"ok": True, "price": price, "mode":
+                        "edit" if order is not None else "sell"}
+
             if ui_mod is not None and collector is not None and pool is not None:
                 try:
                     build_drops_panel = ui_mod.build_drops_panel()
-                    drops_panel = build_drops_panel(cfg, collector, pool)
+                    drops_panel = build_drops_panel(
+                        cfg, collector, pool,
+                        sell_handler=_loot_sell_handler)
                 except Exception as e:
                     log(f"Дроп: панель не создана ({type(e).__name__}: {e})")
                     drops_panel = None
+                if drops_panel is not None and browser is not None:
+                    try:
+                        browser.orders_ready.connect(
+                            lambda _orders: drops_panel.refresh())
+                    except Exception:
+                        pass
 
             status_providers = [browser.status_text,
                                 browser.status_text,
@@ -6284,9 +6507,23 @@ def run_gui(cfg):
         return bool(result.get("ok"))
 
     def _toast_activated(record):
-        """Клик по своему тосту: открыть центр уведомлений на этой записи."""
+        """Клик по тосту: лут → «Дроп», остальные → центр на записи."""
         record = dict(record or {})
         record_id = record.get("id")
+        if record.get("action") == "drops" or record.get("kind") == "pick":
+            if unified is not None:
+                try:
+                    titles = unified.tab_titles()
+                    index = titles.index("Дроп") if "Дроп" in titles else 0
+                    unified.show_tab(index)
+                except Exception:
+                    pass
+            try:
+                if drops_panel is not None:
+                    drops_panel.refresh()
+            except Exception:
+                pass
+            return record_id
         if unified is not None:
             try:
                 unified.open_notifications(record_id)
@@ -6574,6 +6811,20 @@ def run_gui(cfg):
             return
         browser.toggle()
 
+    def _show_pick_toast(result, duplicate=False):
+        """Эфемерный тост «Добавлено/Уже в дропах» — без центра/бейджа."""
+        if center_mod is None or not callable(
+                getattr(center_mod, "dispatch_toast_only", None)):
+            return None
+        record = pick_toast_record(result, duplicate=duplicate)
+        try:
+            return center_mod.dispatch_toast_only(
+                record, cfg=cfg, toast_stack=toast_stack,
+                login_check=login_in_progress)
+        except Exception as exc:
+            log(f"  Дроп: тост не показан ({type(exc).__name__}: {exc})")
+            return None
+
     def pick_reward(index):
         """Alt+1…4: «взята награда №N» → «Выбрано» и «Дроп» (без угадывания)."""
         if login_in_progress():
@@ -6582,12 +6833,16 @@ def run_gui(cfg):
         message = str(result.get("message") or "")
         if not message:
             return False
-        log(f"  Награда Alt+{int(index) + 1}: {message}")
+        log(f"  Награда #{int(index) + 1}: {message}")
         if unified is not None:
             try:
                 unified.lbl_status.setText(message)
             except Exception:
                 pass
+        if result.get("ok") and (result.get("added")
+                                 or result.get("reason") == "duplicate"):
+            _show_pick_toast(result,
+                             duplicate=not bool(result.get("added")))
         if result.get("added") and collector is not None:
             item = result.get("item") or {}
             try:
@@ -6662,13 +6917,25 @@ def run_gui(cfg):
     pick_registered = []
     if cfg.get("pick_enabled", True):
         pick_registered = add_hotkeys_pick(cfg, keyboard, ui.pick_reward.emit)
-        if pick_registered:
-            log("Взятая награда из последнего скана: " + ", ".join(
-                f"{key}=карточка {index + 1}"
-                for key, index in pick_registered))
-        else:
-            log("Награда Alt+1…4: все клавиши заняты/выключены — "
-                "см. pick_hotkeys в config.json.")
+
+    def _pick_hint_text(values=None):
+        try:
+            source = values if values is not None else cfg
+            return ui_mod.format_pick_hint(source.get("pick_hotkeys", []))
+        except Exception:
+            return "ваши клавиши отметки награды"
+
+    def _log_pick_hint(values=None):
+        try:
+            hint = _pick_hint_text(values)
+        except Exception:
+            hint = "ваши клавиши отметки награды"
+        log("Взятая награда из последнего скана: " + hint)
+
+    _log_pick_hint()
+    if not pick_registered:
+        log("Награда: все клавиши заняты/выключены — "
+            "см. pick_hotkeys в config.json.")
 
     # ── настройки (шестерёнка): клавиши и параметры без перезапуска ──────
     settings_mod = settings_ui_module()
@@ -6770,6 +7037,19 @@ def run_gui(cfg):
                 unified.lbl_status.setText("настройки сохранены и применены")
             except Exception:
                 pass
+        # подсказка «Дропа» и консольная строка — по новым биндам
+        try:
+            if drops_panel is not None:
+                drops_panel.cfg["pick_hotkeys"] = list(
+                    settings_cfg.get("pick_hotkeys", []))
+                drops_panel.update_pick_hint()
+        except Exception as e:
+            log(f"Дроп: подсказка биндов не обновлена "
+                f"({type(e).__name__}: {e})")
+        try:
+            _log_pick_hint(settings_cfg)
+        except Exception:
+            pass
         # «Итого» выключено — убираем сразу (дальше решает Manager._apply)
         if not settings_cfg.get("show_summary", True):
             try:
@@ -6945,15 +7225,16 @@ def run_gui(cfg):
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
     if unified is not None:
         hotkey = (cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")).upper()
-        tabs_desc = ("Маркет · Мои ордера · События · Дроп · "
-                     "Уведомления · Чат")
+        tabs_desc = ("Маркет · Мои ордера · События · Дроп · Чат")
         log(f"{hotkey} — единое окно: {tabs_desc}.")
         if cfg.get("hotkey_aliases", True):
             log(f"{cfg.get('hotkey_events', 'alt+e').upper()} / "
                 f"{cfg.get('hotkey_market', 'alt+m').upper()} — алиасы вкладок "
                 "«События» / «Маркет».")
     else:
-        log(f"{cfg.get('hotkey_editor', 'f8').upper()} — единое окно F8 (список выбранного остаётся в плашках/Alt+1…4).")
+        log(f"{cfg.get('hotkey_editor', 'f8').upper()} — единое окно F8 "
+            "(список выбранного остаётся в плашках/ваших клавишах "
+            "отметки награды).")
         if events_ctl is not None:
             log(f"{cfg.get('hotkey_events', 'alt+e').upper()} — игровые события.")
         if browser is not None:
