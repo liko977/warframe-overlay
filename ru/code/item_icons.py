@@ -16,6 +16,7 @@ from collections import OrderedDict
 WFCD = ("https://raw.githubusercontent.com/WFCD/warframe-items/master/"
         "data/json/{name}.json")
 CDN = "https://cdn.warframestat.us/img/{image}"
+MARKET_ASSETS = "https://warframe.market/static/assets/"
 CATEGORIES = ("Warframes", "Primary", "Secondary", "Melee", "Mods", "Misc",
               "Resources", "Gear", "Relics", "Pets", "Archwing", "Arch-Gun",
               "Arch-Melee", "Sentinels", "SentinelWeapons", "Skins")
@@ -40,6 +41,58 @@ def normalize_name(text):
 def is_blueprint(name="", slug=""):
     return bool(_BLUEPRINT_RE.search(str(name or ""))
                 or _BLUEPRINT_RE.search(str(slug or "").replace("_", " ")))
+
+
+#: (суффикс slug, бейдж типа части); порядок важен: длинные раньше.
+_PART_BADGES = (
+    ("chassis", "К"), ("neuroptics", "Н"), ("systems", "С"),
+    ("barrel", "Ст"), ("receiver", "Пр"), ("stock", "Пк"),
+    ("blades", "Кл"), ("blade", "Кл"), ("handle", "Рк"),
+    ("link", "Св"), ("gauntlet", "Зах"), ("string", "Тет"),
+    ("upper_limb", "ВЧ"), ("lower_limb", "НЧ"), ("band", "Зас"),
+    ("buckle", "Пряж"), ("set", "Км"),
+)
+
+
+def part_info(slug="", name=""):
+    """Разбирает slug на часть: ``(is_part, badge, parent_slug)``.
+
+    Любой ``*_blueprint`` — «Ч», кроме chassis/neuroptics/systems (К/Н/С);
+    целые предметы (в т.ч. kavasa_prime_kubrow_collar) — без бейджа.
+    """
+    text = str(slug or "").strip().lower().replace("-", "_").replace(" ", "_")
+    # имя тоже может быть источником, если slug пуст
+    if not text:
+        text = normalize_name(name).replace(" ", "_")
+    if text.endswith("_kubrow_collar"):
+        return False, "", text
+    if text.endswith("_chassis_blueprint"):
+        return True, "К", text[:-len("chassis_blueprint")].rstrip("_")
+    if text.endswith("_neuroptics_blueprint"):
+        return True, "Н", text[:-len("neuroptics_blueprint")].rstrip("_")
+    if text.endswith("_systems_blueprint"):
+        return True, "С", text[:-len("systems_blueprint")].rstrip("_")
+    if text.endswith("_blueprint"):
+        return True, "Ч", text[:-len("blueprint")].rstrip("_")
+    for suffix, badge in _PART_BADGES:
+        if text.endswith("_" + suffix):
+            parent = text[:-(len(suffix) + 1)].rstrip("_")
+            return True, badge, parent
+    return False, "", text
+
+
+def part_badge(slug="", name=""):
+    return part_info(slug, name)[1]
+
+
+def visual_config(item):
+    """Конфигурация визуала: parent+badge; для тестов дедупликации частей."""
+    item = dict(item or {})
+    slug = str(item.get("slug") or "")
+    name = str(item.get("name_en") or item.get("name") or "")
+    is_part, badge, parent = part_info(slug, name)
+    return {"parent": parent, "badge": badge, "part": is_part,
+            "slug": slug}
 
 
 def image_name(value, fallback=""):
@@ -256,7 +309,7 @@ class ItemIconProvider:
     @staticmethod
     def _fetch_url(url, timeout=8):
         request = urllib.request.Request(url, headers={
-            "User-Agent": "WarframePriceOverlayRU/0.6.5"})
+            "User-Agent": "WarframePriceOverlayRU/0.6.6"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read()
 
@@ -359,9 +412,21 @@ class ItemIconProvider:
             self.refresh_index_async()
 
     # ── картинки ──────────────────────────────────────────────────────
-    def _disk_path(self, key):
+    def _disk_path(self, key, ext=".png"):
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(key))[:120]
-        return os.path.join(self.icons_dir, safe + ".png")
+        if not ext.startswith("."):
+            ext = "." + ext
+        return os.path.join(self.icons_dir, safe + ext)
+
+    def _find_disk(self, key):
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(key))[:120]
+        try:
+            for name in os.listdir(self.icons_dir):
+                if name.startswith(safe + "."):
+                    return os.path.join(self.icons_dir, name)
+        except Exception:
+            pass
+        return ""
 
     def _make_placeholder(self, size=32):
         try:
@@ -434,8 +499,8 @@ class ItemIconProvider:
             if callable(callback):
                 callback(key, pix)
             return key
-        path = self._disk_path(key)
-        if os.path.isfile(path):
+        path = self._find_disk(key)
+        if path:
             pix = self._load_pixmap(path)
             if pix is not None:
                 self._remember(key, pix)
@@ -447,34 +512,94 @@ class ItemIconProvider:
                 callback(key, self.placeholder(size))
             return key
         self._attempted.add(key)
+        variants = image_variants(image)
+        self._start_request(key, [CDN.format(image=name)
+                                  for name in variants], callback, size)
+        return key
+
+    def request_item(self, key, item, callback=None, size=32):
+        """Главный путь: иконка warframe.market по slug (thumb → icon), затем WFCD."""
+        if not self.enabled:
+            return None
+        item = dict(item or {})
+        key = str(key or item.get("slug") or "")
+        if not key:
+            return None
+        cached = self.get_cached(key)
+        if cached is not None:
+            if callable(callback):
+                callback(key, cached)
+            return key
+        disk = self._find_disk(key)
+        if disk:
+            pix = self._load_pixmap(disk)
+            if pix is not None:
+                self._remember(key, pix)
+                if callable(callback):
+                    callback(key, pix)
+                return key
+        if key in self._attempted:
+            if callable(callback):
+                callback(key, self.placeholder(size))
+            return key
+        urls = []
+        for field in ("thumb", "icon"):
+            rel = str(item.get(field) or "").strip()
+            if rel:
+                if rel.startswith("http"):
+                    urls.append(rel)
+                else:
+                    urls.append(MARKET_ASSETS + rel.lstrip("/"))
+        # fallback WFCD только если рынок не дал путей или ответит 404
+        name = item.get("name_en") or item.get("en_name") or item.get("name") or ""
+        wfcd = self.resolve(name=name, slug=key,
+                            en_name=item.get("name_en") or "",
+                            game_ref=str(item.get("game_ref")
+                                        or item.get("gameRef") or ""))
+        if wfcd:
+            urls.extend(CDN.format(image=name2)
+                        for name2 in image_variants(wfcd))
+        if not urls:
+            pix = self.placeholder(size)
+            if callable(callback):
+                callback(key, pix)
+            return key
+        self._attempted.add(key)
+        self._start_request(key, urls, callback, size)
+        return key
+
+    def _start_request(self, key, urls, callback, size):
         bridge = _Bridge(callback, self, size) if callable(callback) else None
         if bridge is not None:
             # держим мост до доставки queued-сигнала в GUI-поток
             self._bridges.add(bridge)
-        variants = image_variants(image)
 
         def worker():
-            pix = None
-            for candidate in variants:
-                if candidate in self._missing:
+            image = None
+            used_url = ""
+            for url in urls:
+                if url in self._missing:
                     continue
                 try:
-                    data = self.loader(CDN.format(image=candidate))
+                    data = self.loader(url)
                     if isinstance(data, (bytes, bytearray)) and data:
-                        path_tmp = path + ".tmp"
-                        with open(path_tmp, "wb") as handle:
+                        ext = os.path.splitext(url.split("?", 1)[0])[1] or ".png"
+                        path = self._disk_path(key, ext)
+                        tmp = path + ".tmp"
+                        with open(tmp, "wb") as handle:
                             handle.write(data)
-                        os.replace(path_tmp, path)
-                        pix = self._load_image(path)
-                        if pix is not None:
+                        os.replace(tmp, path)
+                        image = self._load_image(path)
+                        if image is not None:
+                            used_url = url
                             break
                 except Exception:
-                    self._mark_missing(candidate, candidate)
-            if pix is None:
-                self._mark_missing(key, image)
-                pix = None
+                    file_name = url.split("?", 1)[0].rsplit("/", 1)[-1]
+                    self._mark_missing(file_name, url)
+            if image is None:
+                self._mark_missing(key, key)
             if bridge is not None:
-                bridge.emit(key, pix)
+                bridge.emit(key, image)
 
         if self._executor is None:
             from concurrent.futures import ThreadPoolExecutor
