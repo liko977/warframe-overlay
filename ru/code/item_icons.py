@@ -74,7 +74,7 @@ def base_candidates(name, slug="", game_ref=""):
         if not value:
             continue
         norm = normalize_name(value)
-        for candidate in (norm,):
+        for candidate in (norm, compact_name(value)):
             if candidate and candidate not in out:
                 out.append(candidate)
         # Blueprint / (Blueprint)
@@ -102,37 +102,125 @@ def build_index(records):
                 continue
             name = item.get("name") or ""
             image = image_name(item.get("imageName"), name)
-            key = normalize_name(name)
-            if key and image and key not in index:
-                index[key] = image
-            # imageName иногда без расширения; имя файла важнее
+            if not image:
+                continue
+            keys = {normalize_name(name)}
+            compact = compact_name(name)
+            if compact:
+                keys.add(compact)
+            # имя файла тоже полезно как alias (TwinKeresPrime.png)
+            keys.add(normalize_name(image.rsplit(".", 1)[0]))
+            for key in keys:
+                if key and key not in index:
+                    index[key] = image
     return index
+
+
+def compact_name(text):
+    """«Twin Keres Prime» → «twinkeresprime» (для CamelCase-вариантов)."""
+    return re.sub(r"[^a-z0-9]+", "", normalize_name(text).replace("ё", "е"))
+
+
+def camel_name(text):
+    words = re.split(r"[^A-Za-z0-9]+", str(text or ""))
+    return "".join(word[:1].upper() + word[1:] for word in words if word)
+
+
+def image_variants(image, name="", slug="", game_ref=""):
+    """Возможные имена файлов CDN: базовое, без Prime/частей, CamelCase, Ak/Dual."""
+    base = image_name(image)
+    out = []
+
+    def add(value):
+        value = image_name(value)
+        if value and value not in out:
+            out.append(value)
+
+    add(base)
+    stem = base.rsplit(".", 1)[0] if base else ""
+    original_stem = stem
+    add(stem.replace("Prime", ""))
+    for token in _PARTS:
+        stem2 = re.sub(rf"{re.escape(token)}", "", stem, flags=re.IGNORECASE)
+        if stem2 and stem2 != stem:
+            add(stem2)
+            stem = stem2
+    for value in (name, slug.replace("_", " "), game_ref.rsplit("/", 1)[-1]):
+        value = str(value or "")
+        if not value:
+            continue
+        camel = camel_name(value)
+        add(camel)
+        add(camel.replace("Prime", ""))
+        # оружие с префиксом Ak/Dual/Twin: BoltoPrime → AkboltoPrime
+        for prefix in ("Ak", "Dual", "Twin"):
+            if camel and not camel.lower().startswith(prefix.lower()):
+                tail = camel[:1].lower() + camel[1:]
+                add(prefix + tail)
+                add(prefix + tail.replace("Prime", ""))
+    if stem:
+        add(stem + "Weapon")
+        add(stem.replace("Prime", "") + "PrimeWeapon")
+        add("Ak" + original_stem[:1].lower() + original_stem[1:])
+        add("Ak" + (original_stem[:1].lower() + original_stem[1:]).replace(
+            "Prime", ""))
+        add("Ak" + stem[:1].lower() + stem[1:])
+        add("Ak" + (stem[:1].lower() + stem[1:]).replace("Prime", ""))
+        if "Kavasa" in stem:
+            add(stem + "Collar")
+            add(original_stem + "Collar")
+            add(stem.replace("Prime", "") + "Collar")
+    return out
 
 
 class _Bridge:
     """Ленивый Qt-мостик: callback всегда в GUI-потоке."""
 
-    def __init__(self, callback):
+    def __init__(self, callback, provider=None, size=32):
         self.callback = callback
+        self.provider = provider
+        self.size = int(size)
         try:
             from PyQt5.QtCore import QObject, pyqtSignal
 
             class _Q(QObject):
                 ready = pyqtSignal(str, object)
             self.q = _Q()
-            self.q.ready.connect(lambda key, pix: self.callback(key, pix))
+            self.q.ready.connect(self._deliver)
         except Exception:
             self.q = None
 
-    def emit(self, key, pixmap):
+    def _deliver(self, key, value):
+        pix = value
+        try:
+            from PyQt5.QtGui import QImage, QPixmap
+            if value is None and self.provider is not None:
+                pix = self.provider.placeholder(self.size)
+            elif isinstance(value, QImage):
+                pix = QPixmap.fromImage(value)
+                if self.provider is not None:
+                    self.provider._remember(key, pix)
+        except Exception:
+            pix = None
+        try:
+            self.callback(key, pix)
+        except Exception:
+            pass
+        try:
+            if self.provider is not None:
+                self.provider._bridges.discard(self)
+        except Exception:
+            pass
+
+    def emit(self, key, value):
         if self.q is not None:
             try:
-                self.q.ready.emit(key, pixmap)
+                self.q.ready.emit(key, value)
                 return
             except Exception:
                 pass
         try:
-            self.callback(key, pixmap)
+            self.callback(key, value)
         except Exception:
             pass
 
@@ -149,11 +237,15 @@ class ItemIconProvider:
         self.index_ttl = int(index_ttl)
         self.memory_limit = max(1, int(memory_limit))
         self._index = {}
+        self._missing = set()
+        self._misses = 0
+        self._refreshed_once = False
         self._lock = threading.Lock()
         self._pixmaps = OrderedDict()
         self._attempted = set()
         self._executor = None
         self._index_threads = []
+        self._bridges = set()
         try:
             os.makedirs(self.icons_dir, exist_ok=True)
         except Exception:
@@ -164,7 +256,7 @@ class ItemIconProvider:
     @staticmethod
     def _fetch_url(url, timeout=8):
         request = urllib.request.Request(url, headers={
-            "User-Agent": "WarframePriceOverlayRU/0.6.4"})
+            "User-Agent": "WarframePriceOverlayRU/0.6.5"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read()
 
@@ -173,8 +265,10 @@ class ItemIconProvider:
             with open(self.index_path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             self._index = dict(data.get("index") or {})
+            self._missing = set(data.get("missing") or [])
         except Exception:
             self._index = {}
+            self._missing = set()
         return self._index
 
     def index_age(self):
@@ -209,7 +303,8 @@ class ItemIconProvider:
             self._index = index
             try:
                 with open(self.index_path, "w", encoding="utf-8") as handle:
-                    json.dump({"updated": time.time(), "index": index},
+                    json.dump({"updated": time.time(), "index": index,
+                               "missing": sorted(self._missing)},
                               handle, ensure_ascii=False)
             except Exception:
                 pass
@@ -230,7 +325,38 @@ class ItemIconProvider:
         for candidate in base_candidates(en_name or name, slug, game_ref):
             if candidate in self._index:
                 return self._index[candidate]
+        # индекс не знает имя — пробуем CamelCase-вариант, CDN ответит 404
+        # на отсутствующие, а provider запомнит отрицательный кэш.
+        for value in (en_name or name, slug.replace("_", " "),
+                      game_ref.rsplit("/", 1)[-1]):
+            value = str(value or "").strip()
+            if not value:
+                continue
+            camel = camel_name(value)
+            if camel:
+                return camel + ".png"
         return ""
+
+    def _save_missing(self, image):
+        try:
+            with open(self.index_path, "w", encoding="utf-8") as handle:
+                json.dump({"updated": time.time(), "index": self._index,
+                           "missing": sorted(self._missing)},
+                          handle, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _mark_missing(self, key, image):
+        with self._lock:
+            self._missing.add(str(image or ""))
+            self._missing.add(str(key or ""))
+            self._misses += 1
+            refresh = (self._misses >= 3 and not self._refreshed_once)
+            if refresh:
+                self._refreshed_once = True
+        self._save_missing(image)
+        if refresh:
+            self.refresh_index_async()
 
     # ── картинки ──────────────────────────────────────────────────────
     def _disk_path(self, key):
@@ -239,15 +365,24 @@ class ItemIconProvider:
 
     def _make_placeholder(self, size=32):
         try:
+            from PyQt5.QtWidgets import QApplication
+            if QApplication.instance() is None:
+                return None
             from PyQt5.QtCore import Qt
-            from PyQt5.QtGui import QColor, QPainter, QPixmap
+            from PyQt5.QtGui import QColor, QFont, QPainter, QPen, QPixmap
             pix = QPixmap(int(size), int(size))
-            pix.fill(QColor("#24344a"))
+            pix.fill(QColor("#17212e"))
             painter = QPainter(pix)
             painter.setRenderHint(QPainter.Antialiasing, True)
-            painter.setBrush(QColor("#4aa8ff"))
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(4, 4, size - 8, size - 8, 3, 3)
+            painter.setBrush(QColor("#17212e"))
+            painter.setPen(QPen(QColor("#24344a"), 1))
+            painter.drawRoundedRect(1, 1, size - 2, size - 2, 3, 3)
+            painter.setPen(QColor("#93a1b5"))
+            font = QFont("Segoe UI")
+            font.setPixelSize(max(9, int(size * 0.42)))
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(pix.rect(), Qt.AlignCenter, "?")
             painter.end()
             return pix
         except Exception:
@@ -273,6 +408,9 @@ class ItemIconProvider:
     def memory_size(self):
         return len(self._pixmaps)
 
+    def has_index(self):
+        return bool(self._index)
+
     def get_cached(self, key):
         with self._lock:
             pix = self._pixmaps.get(key)
@@ -291,7 +429,7 @@ class ItemIconProvider:
                 callback(key, cached)
             return key
         image = image_name(image_name_value) if image_name_value else ""
-        if not image:
+        if not image or image in self._missing or key in self._missing:
             pix = self.placeholder(size)
             if callable(callback):
                 callback(key, pix)
@@ -309,24 +447,32 @@ class ItemIconProvider:
                 callback(key, self.placeholder(size))
             return key
         self._attempted.add(key)
-        bridge = _Bridge(callback) if callable(callback) else None
+        bridge = _Bridge(callback, self, size) if callable(callback) else None
+        if bridge is not None:
+            # держим мост до доставки queued-сигнала в GUI-поток
+            self._bridges.add(bridge)
+        variants = image_variants(image)
 
         def worker():
             pix = None
-            try:
-                data = self.loader(CDN.format(image=image))
-                if isinstance(data, (bytes, bytearray)):
-                    path_tmp = path + ".tmp"
-                    with open(path_tmp, "wb") as handle:
-                        handle.write(data)
-                    os.replace(path_tmp, path)
-                    pix = self._load_pixmap(path)
-            except Exception:
-                pix = None
+            for candidate in variants:
+                if candidate in self._missing:
+                    continue
+                try:
+                    data = self.loader(CDN.format(image=candidate))
+                    if isinstance(data, (bytes, bytearray)) and data:
+                        path_tmp = path + ".tmp"
+                        with open(path_tmp, "wb") as handle:
+                            handle.write(data)
+                        os.replace(path_tmp, path)
+                        pix = self._load_image(path)
+                        if pix is not None:
+                            break
+                except Exception:
+                    self._mark_missing(candidate, candidate)
             if pix is None:
-                pix = self.placeholder(size)
-            else:
-                self._remember(key, pix)
+                self._mark_missing(key, image)
+                pix = None
             if bridge is not None:
                 bridge.emit(key, pix)
 
@@ -338,11 +484,22 @@ class ItemIconProvider:
 
     def _load_pixmap(self, path):
         try:
+            from PyQt5.QtWidgets import QApplication
+            if QApplication.instance() is None:
+                return None
             from PyQt5.QtGui import QPixmap
             pix = QPixmap(path)
             if pix.isNull():
                 return None
             return pix
+        except Exception:
+            return None
+
+    def _load_image(self, path):
+        try:
+            from PyQt5.QtGui import QImage
+            image = QImage(path)
+            return image if not image.isNull() else None
         except Exception:
             return None
 
