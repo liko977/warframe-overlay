@@ -1,7 +1,7 @@
 {
-  "version": "0.6.1",
-  "notes": "Вход из любого браузера (Chrome/Edge/Yandex/Opera/Opera GX/Firefox); исправлены шапка и уведомления; инструкция по токену; автопроверка обновлений",
-  "updated_at": "2026-11-21T16:52:41Z",
+  "version": "0.6.2",
+  "notes": "Убрана вкладка «Выбрано» (плашки Alt+Q и Alt+1…4 сохранены)",
+  "updated_at": "2026-11-21T17:22:28Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -79,7 +79,7 @@
     {
       "path": "notification_center.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/notification_center.py",
-      "sha256": "80ee21e09175b435db366d9c9e20de7abe6bdeb18ebc4aee9e8ab812d8aeb318",
+      "sha256": "c5b9ed97abd4c014800ccdd74e33354b989fc88b1b7c7cc2e933143f790dda6b",
       "size": 53690
     },
     {
@@ -91,8 +91,8 @@
     {
       "path": "overlay_window.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/overlay_window.py",
-      "sha256": "9167cc11fd7923be3f21fb1a0567ccb807aea1a93e1e118620bb5c7892fa42de",
-      "size": 80488
+      "sha256": "97ea69720a633c5b0af4e43deb50ea69806d1cff9deb9bdad76c6f713fe7c271",
+      "size": 81490
     },
     {
       "path": "relic_pool.py",
@@ -127,8 +127,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "85fb7a6c84e42c1de454347d6d26f16351899883e55e9659bd883d86df96f508",
-      "size": 302444
+      "sha256": "65e308c39ca83b3739da83b73f6e8f8f7eb3a77b5550ccd4dc3c11ac7a2c1b9b",
+      "size": 302432
     }
   ]
 }
