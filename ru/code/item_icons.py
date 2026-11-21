@@ -309,7 +309,7 @@ class ItemIconProvider:
     @staticmethod
     def _fetch_url(url, timeout=8):
         request = urllib.request.Request(url, headers={
-            "User-Agent": "WarframePriceOverlayRU/0.6.6"})
+            "User-Agent": "WarframePriceOverlayRU/0.7.0"})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read()
 
