@@ -1,7 +1,7 @@
 {
-  "version": "0.6.4",
-  "notes": "Скорость Alt+Q, цвета платины/дукатов, фикс чертежей, иконки предметов, сборка без консоли",
-  "updated_at": "2026-11-21T19:41:59Z",
+  "version": "0.6.5",
+  "notes": "Иконки: исправлена загрузка, нейтральный плейсхолдер, перекрытия в Маркете",
+  "updated_at": "2026-11-21T20:04:22Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -31,14 +31,14 @@
     {
       "path": "farm_stats_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/farm_stats_ui.py",
-      "sha256": "cbf57727437adfa9342360be3c62bc29c9ecb5c0dd69e804ff52f454cd15e03a",
-      "size": 31145
+      "sha256": "306936b7f711f7a389be01946f48b8c1b39060848a4cac85f06a8f55272ebd33",
+      "size": 31559
     },
     {
       "path": "item_icons.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/item_icons.py",
-      "sha256": "ed5b7472201eb0e7c09bfdc41018fd770edfb56ad61fdaa1580f6259bbc65a15",
-      "size": 13952
+      "sha256": "bfe3357b131a40e582a982c068fa28b799b5a18f19685c05a8e0b9424cbf6071",
+      "size": 20098
     },
     {
       "path": "log_parser.py",
@@ -61,8 +61,8 @@
     {
       "path": "market_browser.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_browser.py",
-      "sha256": "56661dc26ffad9d00edc471334bba199c43e0e0c0c48cf4a6896ce0e56592ad1",
-      "size": 80327
+      "sha256": "938bb7c92d0bb2695a74592c8cf7be0e11458035d35225c0483a53ef6bc6932e",
+      "size": 80374
     },
     {
       "path": "market_browser_login.py",
@@ -139,8 +139,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "960fce8eda00cd502e8a4f20b7e8071aa3058dff7b17696af65a5f2ea5677cc2",
-      "size": 328880
+      "sha256": "e723658bb2b9b669a35d7419bd4973175670bb250643b01276a1ddd22fa81dd6",
+      "size": 328716
     }
   ]
 }
