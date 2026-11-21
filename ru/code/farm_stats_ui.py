@@ -15,6 +15,7 @@
 Модуль не импортирует warframe/market_client: ``collector`` и ``pool``
 передаются извне (см. ``build_drops_panel``).
 """
+import os
 import time
 
 import ui_theme as theme
@@ -24,6 +25,59 @@ TIER_COLORS = {
     "Lith": "#b08d57", "Meso": "#8fb8d6", "Neo": "#d9a441",
     "Axi": "#a468c9", "Requiem": "#c0392b",
 }
+
+
+def _item_icon_label(cfg, item, size=24):
+    """QLabel с ленивой иконкой предмета (или placeholder); None без Qt."""
+    try:
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import QLabel
+        import item_icons
+        base = (cfg or {}).get("data_dir") or os.environ.get("WF_DATA_DIR")
+        provider = item_icons.get_provider(
+            base, enabled=bool((cfg or {}).get("show_item_icons", True)))
+        label = QLabel()
+        label.setFixedSize(int(size), int(size))
+        label.setStyleSheet("background: transparent;")
+        if not (cfg or {}).get("show_item_icons", True):
+            label.setVisible(False)
+            return label
+        name = item.get("en_name") or item.get("name") or ""
+        slug = str(item.get("slug") or "")
+        game_ref = str(item.get("gameRef") or "")
+        image = provider.resolve(name=name, slug=slug,
+                                 en_name=item.get("en_name") or "",
+                                 game_ref=game_ref)
+        blueprint = item_icons.is_blueprint(name, slug)
+        pix = provider.placeholder(size)
+        if pix is not None:
+            label.setPixmap(pix)
+        if blueprint:
+            badge = QLabel("Ч", label)
+            badge.setFixedSize(11, 11)
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setStyleSheet(
+                "background:#f5c451; color:#17212e; font-size:7px;"
+                " font-weight:700; border-radius:2px;")
+            badge.move(int(size) - 12, 0)
+            badge.show()
+        if not image:
+            return label
+
+        def done(_key, pixmap):
+            try:
+                if pixmap is not None and not pixmap.isNull():
+                    label.setPixmap(pixmap.scaled(
+                        int(size), int(size), Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation))
+            except Exception:
+                pass
+
+        provider.request(slug or name or image, image, callback=done,
+                         size=size)
+        return label
+    except Exception:
+        return None
 
 
 def build_drops_panel():
@@ -65,15 +119,7 @@ def build_drops_panel():
     def _color_for_price(p):
         if p is None:
             return theme.PALETTE["muted"]
-        if p < 15:
-            return "#b9c3d1"
-        if p < 40:
-            return "#dbe3ee"
-        if p < 80:
-            return theme.PALETTE["ducats"]
-        if p < 150:
-            return "#ffa23a"
-        return "#ff6a3a"
+        return theme.PALETTE["platinum"]
 
     class _DropsPanel(QWidget):
         pools_ready = pyqtSignal()
@@ -244,6 +290,9 @@ def build_drops_panel():
             self.card_relics["sub"].setText(
                 f"текущая сессия: {stats['current_relics']} ({active})")
             self.card_value["value"].setText(_fmt_price(stats["total_value"]))
+            self.card_value["value"].setStyleSheet(
+                f"color:{theme.PALETTE['platinum']}; background: transparent;")
+            self.card_value["value"].setToolTip(theme.currency_tooltip("platinum"))
             self.card_value["sub"].setText(
                 f"оценено дропов: {stats['priced_drops']} · сессий: {stats['sessions']}")
             best = stats["best_drop"]
@@ -309,6 +358,9 @@ def build_drops_panel():
                 " background: transparent;")
             price.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             lay.addWidget(t)
+            icon = _item_icon_label(self.cfg, d, 24)
+            if icon is not None:
+                lay.addWidget(icon)
             lay.addWidget(name, 1)
             picked = str(d.get("picked_name") or "").strip()
             if picked:
@@ -572,11 +624,16 @@ def build_drops_panel():
                 price.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 price.setStyleSheet(
                     f"color:{price_color}; background: transparent;")
-                rev = QLabel(f"EV {rw.get('ev', 0):.2f}")
+                rev = QLabel(f"EV {rw.get('ev', 0):.2f} p")
                 rev.setFont(self._f_detail)
                 rev.setFixedWidth(64)
                 rev.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                rev.setStyleSheet(theme.muted_qss(10))
+                rev.setStyleSheet(
+                    f"color:{theme.PALETTE['platinum']}; "
+                    "background: transparent;")
+                icon = _item_icon_label(self.cfg, rw, 24)
+                if icon is not None:
+                    row.addWidget(icon)
                 row.addWidget(rname, 1)
                 row.addWidget(chance)
                 row.addWidget(price)
