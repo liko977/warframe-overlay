@@ -89,6 +89,48 @@ DEFAULT_MARKET_COLOR = "#43d17c"
 DEFAULT_PRICE_COLOR = "#f5c451"
 DEFAULT_SYSTEM_COLOR = "#93a1b5"
 
+#: Варианты кнопки «Проверить уведомление» в настройках.
+TEST_NOTIFICATION_TYPES = (
+    ("market", "Маркет (куплен ордер)"),
+    ("price", "Цена ниже моей"),
+    ("chat", "Чат"),
+    ("system", "Система"),
+)
+
+
+def test_notification_record(kind="market"):
+    """Демо-уведомление для настроек: «ТЕСТ», без реального события."""
+    kind = str(kind or "market").lower()
+    mapping = {
+        "market": ("order_bought", "ТЕСТ: куплен ордер",
+                   "Проверка уведомления — маркет", "market"),
+        "price": ("price_drop", "ТЕСТ: цена ниже моей",
+                  "Проверка уведомления — цена", "market"),
+        "chat": ("chat", "ТЕСТ: сообщение в чате",
+                 "Проверка уведомления — чат", "chat"),
+        "system": ("updates", "ТЕСТ: системное уведомление",
+                   "Проверка уведомления — система", "updates"),
+    }
+    event_kind, title, text, action = mapping.get(kind, mapping["market"])
+    return {
+        "kind": event_kind,
+        "title": title,
+        "text": text,
+        "ts": time.time(),
+        "sound": True,
+        "action": action,
+        "payload": {"test": True},
+    }
+
+
+def dispatch_test_notification(kind="market", **kwargs):
+    """Показать «ТЕСТ»-уведомление (история/тост/трей/звук).
+
+    Не проходит через NotificationManager: не зависит от notify_enabled,
+    не трогает кулдауны и не меняет флаги настроек.
+    """
+    return dispatch_notification(test_notification_record(kind), **kwargs)
+
 #: Палитра для выбора акцента в настройках (имя → ключ ui_theme.PALETTE).
 COLOR_CHOICES = (
     ("accent", "accent"),
