@@ -82,6 +82,7 @@ DEFAULT_VALUES = {
     "currency_ducats_color": "#C9A66B",
     "show_summary": True,
     "show_item_icons": True,
+    "overlay_show_set_price": True,
     "update_check": True,
     "update_url": "",
     "update_check_interval_min": 180,
@@ -101,6 +102,52 @@ _SPECIAL_KEYS = {
     "space", "tab", "enter", "insert", "delete", "home", "end",
     "pageup", "pagedown", "up", "down", "left", "right",
 }
+
+#: Русская раскладка → латинские имена клавиш (ЙЦУКЕН).
+RU_TO_EN = {
+    "й": "q", "ц": "w", "у": "e", "к": "r", "е": "t", "н": "y",
+    "г": "u", "ш": "i", "щ": "o", "з": "p", "х": "[", "ъ": "]",
+    "ф": "a", "ы": "s", "в": "d", "а": "f", "п": "g", "р": "h",
+    "о": "j", "л": "k", "д": "l", "ж": ";", "э": "'", "я": "z",
+    "ч": "x", "с": "c", "м": "v", "и": "b", "т": "n", "ь": "m",
+    "б": ",", "ю": ".",
+}
+EN_TO_RU = {value: key for key, value in RU_TO_EN.items()
+            if len(value) == 1}
+_KEY_PUNCT = set("[];',./")
+
+
+def canon_key(token):
+    """Канонизировать одну клавишу/модификатор (RU → EN)."""
+    token = str(token or "").strip().lower()
+    return RU_TO_EN.get(token, token)
+
+
+def canon_hotkey(value):
+    """Каноническая комбинация: ``' Alt + Ц '`` → ``'alt+w'``.
+
+    Русские буквы переводятся в латинские имена клавиш; цифры/F-клавиши и
+    специальные имена не меняются. Это единая точка для config, захвата,
+    валидации и поиска дубликатов.
+    """
+    return normalize_hotkey(value)
+
+
+def hotkey_variants(value):
+    """[канонический вариант, русский вариант] для регистрации хуков."""
+    key = canon_hotkey(value)
+    if not key:
+        return []
+    parts = key.split("+")
+    last = parts[-1]
+    ru = EN_TO_RU.get(last)
+    out = [key]
+    if ru:
+        ru_key = "+".join(parts[:-1] + [ru])
+        if ru_key != key:
+            out.append(ru_key)
+    return out
+
 
 
 def default_hotkeys():
@@ -129,6 +176,7 @@ def normalize_hotkey(value):
     mods = []
     keys = []
     for token in tokens:
+        token = canon_key(token)
         if token in _MODIFIER_ALIASES:
             mod = _MODIFIER_ALIASES[token]
             if mod not in mods:
@@ -146,6 +194,8 @@ def valid_key(key):
     if re.fullmatch(r"f([1-9]|1[0-2])", key):
         return True
     if len(key) == 1 and (key.isascii() and key.isalnum()):
+        return True
+    if key in _KEY_PUNCT:
         return True
     return key in _SPECIAL_KEYS
 
@@ -278,22 +328,44 @@ class HotkeyBinder:
 
     def _remove(self, action):
         key = self._keys.get(action)
-        handle = self._handles.pop(action, None)
-        try:
-            if handle is not None:
-                self.keyboard.remove_hotkey(handle)
-            elif key:
-                self.keyboard.remove_hotkey(key)
-            return True
-        except Exception:
+        handled = self._handles.pop(action, None)
+        if handled is not None:
+            try:
+                for handle in (handled if isinstance(handled, list)
+                               else [handled]):
+                    self.keyboard.remove_hotkey(handle)
+                return True
+            except Exception:
+                return False
+        if not key:
             return False
+        ok = False
+        for variant in hotkey_variants(key):
+            try:
+                self.keyboard.remove_hotkey(variant)
+                ok = True
+            except Exception:
+                pass
+        return ok
 
     def _add(self, action, key):
         callback = self.callbacks.get(action)
         if not callable(callback):
             return False
-        handle = self.keyboard.add_hotkey(key, callback, suppress=False)
-        self._handles[action] = handle
+        variants = hotkey_variants(key)
+        handles = []
+        errors = []
+        for variant in variants:
+            try:
+                handles.append(self.keyboard.add_hotkey(
+                    variant, callback, suppress=False))
+            except Exception as exc:
+                errors.append(exc)
+        if not handles:
+            if errors:
+                raise errors[-1]
+            return False
+        self._handles[action] = handles
         return True
 
     def apply(self, mapping):
@@ -526,6 +598,7 @@ def build_settings_dialog():
             self._value = normalize_hotkey(value)
             self._backup = self._value
             self._capturing = False
+            self._ru_hint = ""
             self.setFont(font(11))
             self.setCursor(Qt.PointingHandCursor)
             self.setMinimumWidth(170)
@@ -534,7 +607,12 @@ def build_settings_dialog():
             self.clicked.connect(self.start_capture)
 
         def _render(self):
-            self.setText(self._value or "—")
+            if self._value and self._ru_hint:
+                head, _sep, last = self._value.rpartition("+")
+                shown = last.upper() + f" ({self._ru_hint})"
+                self.setText((head + "+" if head else "") + shown)
+            else:
+                self.setText(self._value or "—")
             self.setToolTip("Нажмите, чтобы назначить комбинацию "
                             "(Esc — отмена, Backspace/Delete — очистить)")
             self.setStyleSheet(button_qss())
@@ -546,6 +624,7 @@ def build_settings_dialog():
             self._value = normalize_hotkey(value)
             self._backup = self._value
             self._capturing = False
+            self._ru_hint = ""
             self._render()
 
         def is_capturing(self):
@@ -588,6 +667,8 @@ def build_settings_dialog():
             combo = _event_combo(event)
             if combo:
                 self._value = combo
+                ru_char = str(event.text() or "").strip().lower()
+                self._ru_hint = (ru_char if ru_char in RU_TO_EN else "")
                 self._capturing = False
                 self._render()
             event.accept()
@@ -612,11 +693,18 @@ def build_settings_dialog():
             Qt.Key_PageUp: "pageup", Qt.Key_PageDown: "pagedown",
             Qt.Key_Up: "up", Qt.Key_Down: "down",
             Qt.Key_Left: "left", Qt.Key_Right: "right",
+            Qt.Key_Semicolon: ";", Qt.Key_Comma: ",", Qt.Key_Period: ".",
+            Qt.Key_BracketLeft: "[", Qt.Key_BracketRight: "]",
+            Qt.Key_Apostrophe: "'", Qt.Key_Slash: "/",
         }
         return special.get(key, "")
 
     def _event_combo(event):
         name = _qt_key_name(event.key())
+        if not name:
+            text = str(event.text() or "").strip().lower()
+            if text in RU_TO_EN:
+                name = RU_TO_EN[text]
         if not name:
             return ""
         modifiers = []
@@ -772,13 +860,18 @@ def build_settings_dialog():
             outer.setContentsMargins(12, 10, 12, 10)
             outer.setSpacing(8)
             self.chk_notify_enabled = QCheckBox("Показывать уведомления")
-            self.chk_notify_sound = QCheckBox("Звук вместе с уведомлением")
+            self.chk_notify_sound = QCheckBox("Звук уведомлений")
+            self.chk_notify_sound.setToolTip(
+                "Выключено — полная тишина (тосты, чат, лут, трей)")
             self.chk_notify_skip_focus = QCheckBox(
                 "Только когда игра НЕ в фокусе")
             for box in (self.chk_notify_enabled, self.chk_notify_sound,
                         self.chk_notify_skip_focus):
                 box.setFont(font(11))
                 outer.addWidget(box)
+            outer.addWidget(muted(
+                "Звук уведомлений — мастер: выключено = полная тишина "
+                "(тосты, чат, лут, трей)."))
             outer.addWidget(muted("Типы событий:"))
             for kind, label in NOTIFY_EVENT_OPTIONS:
                 box = QCheckBox(label)
@@ -862,9 +955,18 @@ def build_settings_dialog():
             test_row.addWidget(self.cmb_test_kind, 1)
             test_row.addWidget(self.btn_test_notify)
             form.addRow(QLabel(""), test_row)
+            self.chk_notify_sound.toggled.connect(
+                self._update_sound_controls)
+            self._update_sound_controls()
             outer.addLayout(form)
             outer.addStretch(1)
             return page
+
+        def _update_sound_controls(self, *_args):
+            enabled = bool(self.chk_notify_sound.isChecked())
+            for widget in (self.cmb_sound_choice, self.edit_sound_file,
+                           self.btn_sound_browse):
+                widget.setEnabled(enabled)
 
         def _build_overlay_tab(self):
             page = QWidget()
@@ -898,6 +1000,11 @@ def build_settings_dialog():
             self.chk_show_item_icons.setToolTip(
                 "Иконки WFCD в плашках, «Дропе» и «Маркете»; загрузка в фоне")
             form.addRow(QLabel(""), self.chk_show_item_icons)
+            self.chk_show_set_price = QCheckBox("Показывать цену комплекта")
+            self.chk_show_set_price.setFont(font(11))
+            self.chk_show_set_price.setToolTip(
+                "На плашках частей — мелкая строка «компл. N p»")
+            form.addRow(QLabel(""), self.chk_show_set_price)
 
             def currency_combo(current, choices):
                 combo = QComboBox()
@@ -1045,6 +1152,7 @@ def build_settings_dialog():
                 bool(values.get("notify_enabled", True)))
             self.chk_notify_sound.setChecked(
                 bool(values.get("notify_sound", True)))
+            self._update_sound_controls()
             self.chk_notify_skip_focus.setChecked(
                 bool(values.get("notify_skip_when_game_focused", False)))
             events = values.get("notify_events")
@@ -1093,6 +1201,8 @@ def build_settings_dialog():
                 bool(values.get("show_summary", True)))
             self.chk_show_item_icons.setChecked(
                 bool(values.get("show_item_icons", True)))
+            self.chk_show_set_price.setChecked(
+                bool(values.get("overlay_show_set_price", True)))
             for combo, key in (
                     (self.cmb_currency_platinum, "currency_platinum_color"),
                     (self.cmb_currency_ducats, "currency_ducats_color")):
@@ -1148,6 +1258,7 @@ def build_settings_dialog():
                     self.cmb_currency_ducats.currentData() or "#C9A66B"),
                 "show_summary": self.chk_show_summary.isChecked(),
                 "show_item_icons": self.chk_show_item_icons.isChecked(),
+                "overlay_show_set_price": self.chk_show_set_price.isChecked(),
                 "update_check": self.chk_update_check.isChecked(),
                 "update_url": self.edit_update_url.text().strip(),
                 "update_check_interval_min":
@@ -1392,7 +1503,9 @@ def build_settings_dialog():
                                  f"{result.get('error') or 'ошибка'}",
                                  warn=True)
                 return False
-            self._set_status("ТЕСТ отправлен: история/тост/звук.")
+            self._set_status("ТЕСТ отправлен: " + (
+                "без звука" if not self.chk_notify_sound.isChecked()
+                else "история/тост/звук."))
             return True
 
         def open_data(self):
