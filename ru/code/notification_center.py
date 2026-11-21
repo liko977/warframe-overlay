@@ -59,6 +59,8 @@ _KIND_CATEGORY = {
 CHAT_KIND_ALIASES = ("chat_message", "message", "im", "im_message",
                      "new_message")
 _KIND_ALIASES = {alias: "chat" for alias in CHAT_KIND_ALIASES}
+_KIND_ALIASES.update({"update": "updates", "system_update": "updates",
+                      "system-update": "updates"})
 
 _KIND_BADGE = {
     "order_bought": "продажа",
