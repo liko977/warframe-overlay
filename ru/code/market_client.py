@@ -289,12 +289,15 @@ def catalog_item(row):
     i18n = row.get("i18n") if isinstance(row.get("i18n"), dict) else {}
     name_ru = ((i18n.get("ru") or {}).get("name") or "").strip()
     name_en = ((i18n.get("en") or {}).get("name") or "").strip()
+    en_meta = i18n.get("en") if isinstance(i18n.get("en"), dict) else {}
     slug = row.get("slug") or ""
     return {
         "id": row.get("id") or row.get("_id") or "",
         "slug": slug,
         "name": name_ru or name_en or slug,
         "name_en": name_en or name_ru,
+        "icon": str(en_meta.get("icon") or ""),
+        "thumb": str(en_meta.get("thumb") or ""),
         "tags": [str(x) for x in (row.get("tags") or []) if x],
         "game_ref": row.get("gameRef") or "",
         "url": f"{SITE}/items/{slug}" if slug else SITE,
