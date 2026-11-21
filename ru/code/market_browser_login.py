@@ -60,6 +60,7 @@ FIREFOX_PROFILE_FOLDER = "wf_firefox_profile"  # профиль Firefox (cookies
 PROBE_FOLDER = "wf_browser_probe"            # временная папка для кнопки «Проверить»
 DEFAULT_TIMEOUT = 600                   # 10 минут на вход (сек)
 DEFAULT_POLL = 1.0                      # период опроса cookie, сек
+AUTH_DIAG_FILE = "auth_diag.log"        # t29: диагностика входа в DATA_DIR
 DISCOVERY_TIMEOUT = 20.0                # ожидание отладочного порта, сек
 PORT_ATTEMPTS = 3                       # сколько портов пробовать подряд
 MIN_TOKEN_LEN = 20
@@ -1007,10 +1008,15 @@ class BrowserLoginSession:
                  port_attempts=None, http_json=None, transport_factory=None,
                  port_provider=None, popen=None, sleep=None, logger=None,
                  clock=None, firefox_reader_factory=None, kill_process=None,
-                 foreground_raiser=None):
+                 foreground_raiser=None, stage_callback=None):
         self.auth = auth
         self.cfg = cfg if isinstance(cfg, dict) else {}
         self.data_dir = str(data_dir or self.cfg.get("data_dir") or "")
+        self.diag_path = (os.path.join(os.path.abspath(self.data_dir),
+                                       AUTH_DIAG_FILE)
+                          if self.data_dir else "")
+        self.stage_callback = stage_callback
+        self.last_port = 0
         self.browser_path = browser_path
         if timeout is None:
             try:
@@ -1056,6 +1062,7 @@ class BrowserLoginSession:
 
     def _log(self, message):
         text = scrub(message)
+        self._diag(text)
         if callable(self.logger):
             try:
                 self.logger(text)
@@ -1067,6 +1074,26 @@ class BrowserLoginSession:
         except Exception:
             pass
 
+    def _diag(self, message):
+        """Пишет диагностику входа в ``DATA_DIR/auth_diag.log`` (без токена)."""
+        if not self.diag_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.diag_path), exist_ok=True)
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(self.diag_path, "a", encoding="utf-8") as handle:
+                handle.write(f"{stamp} {scrub(message)}\n")
+        except Exception:
+            pass
+
+    def _stage(self, text):
+        """Промежуточный статус для окна входа / пилюли."""
+        if callable(self.stage_callback):
+            try:
+                self.stage_callback(str(text))
+            except Exception:
+                pass
+
     def _result(self, state, message, **extra):
         self.last_state = state
         self.last_message = scrub(message)
@@ -1074,6 +1101,8 @@ class BrowserLoginSession:
                    "message": self.last_message,
                    "status": STATE_TEXT.get(state, str(state))}
         payload.update(extra)
+        self._diag("результат входа: state="
+                   f"{state!r} message={self.last_message[:300]!r}")
         return payload
 
     # ── отмена и очистка ──────────────────────────────────────────────
@@ -1137,6 +1166,7 @@ class BrowserLoginSession:
     def _launch(self, browser, port):
         profile = self.profile_dir()
         os.makedirs(profile, exist_ok=True)
+        self.last_port = int(port)
         cmd = [
             str(browser),
             f"--remote-debugging-port={int(port)}",
@@ -1147,7 +1177,9 @@ class BrowserLoginSession:
             SITE,
         ]
         self._log(f"вход: запускаю браузер ({os.path.basename(str(browser))}), "
-                  f"порт {int(port)}, профиль {profile}")
+                  f"путь {browser}, порт {int(port)}, профиль {profile}")
+        self._stage("браузер запущен — войдите на warframe.market ИМЕННО "
+                    "В ЭТОМ ОКНЕ (профиль приложения)")
         return self.popen(cmd)
 
     def _prepare_firefox_profile(self):
@@ -1166,6 +1198,8 @@ class BrowserLoginSession:
         cmd = [str(browser)] + list(FIREFOX_FLAGS) + [str(profile), SITE]
         self._log("вход: запускаю Firefox с отдельным профилем "
                   f"({profile}) — CDP у Gecko нет, читаем cookies.sqlite")
+        self._stage("браузер запущен — войдите на warframe.market ИМЕННО "
+                    "В ЭТОМ ОКНЕ (профиль приложения)")
         return self.popen(cmd)
 
     def _raise_browser_window(self, proc):
@@ -1209,8 +1243,18 @@ class BrowserLoginSession:
             try:
                 targets = self.http_json(
                     f"http://127.0.0.1:{int(port)}/json/list", 2.0)
+                self._diag("/json/list: целей "
+                           f"{len(targets) if isinstance(targets, list) else '?'}")
+                for item in (targets or [])[:10]:
+                    if isinstance(item, dict):
+                        self._diag(
+                            "  target: type="
+                            f"{item.get('type')!r} title="
+                            f"{str(item.get('title') or '')[:80]!r} url="
+                            f"{str(item.get('url') or '')[:120]!r}")
             except Exception as exc:
                 last_error = exc
+                self._diag(f"/json/list недоступен: {type(exc).__name__}: {exc}")
                 self.sleep(0.4)
                 continue
             target = _pick_page_target(targets)
@@ -1274,16 +1318,20 @@ class BrowserLoginSession:
             self._log(message)
             return self._result(STATE_NO_BROWSER,
                                 message + ". Можно вставить токен вручную.")
+        self._log(f"вход: DATA_DIR={self.data_dir or '—'}, "
+                  f"auth_diag={self.diag_path or '—'}, "
+                  f"таймаут={int(self.timeout)}с, попыток порта={self.port_attempts}")
         if not browser:
             message = ("браузер не найден: установите Chrome/Edge/Yandex/Opera/"
                        "Opera GX/Firefox или укажите путь в config.json → "
                        "market_browser_path")
             self._log(message)
+            self._stage("браузер не найден — используйте ручной путь")
             return self._result(STATE_NO_BROWSER, message
                                 + ". Можно вставить токен вручную.")
         family = browser_family(browser, browser_title(browser))
         name = browser_title(browser)
-        self._log(f"вход: браузер «{name}», семейство: "
+        self._log(f"вход: найден браузер «{name}», путь {browser}, семейство: "
                   f"{FAMILY_TEXT.get(family, family)}")
         if family == FAMILY_FIREFOX:
             return self._run_firefox(browser, name)
@@ -1314,10 +1362,13 @@ class BrowserLoginSession:
             if self._stop.is_set():
                 return self._result(STATE_CANCELLED, "вход отменён")
             attempt_started = self.clock()
-            try:
-                port = int(self.port_provider() or 0)
-            except Exception:
-                port = 0
+            # повтор («Я вошёл — проверить снова») переиспользует порт сессии
+            port = int(self.last_port or 0) if attempt == 0 else 0
+            if port <= 0:
+                try:
+                    port = int(self.port_provider() or 0)
+                except Exception:
+                    port = 0
             if port <= 0:
                 port = free_port()
             try:
@@ -1355,11 +1406,14 @@ class BrowserLoginSession:
                 return self._result(STATE_ERROR, str(exc))
             finally:
                 self._finish(proc)
+        self._stage("не удалось подключиться к браузеру — используйте "
+                    "ручной путь")
         return self._result(
             STATE_NO_TARGET,
             "не удалось подключиться к браузеру"
             + (f": {last_error}" if last_error else "")
-            + " — закройте лишние окна браузера и повторите")
+            + " — закройте лишние окна браузера и повторите вход или "
+              "используйте «Войти через свой браузер (вручную)»")
 
     def _run_firefox(self, browser, name=""):
         """Вход через Firefox: отдельный профиль + cookies.sqlite (CDP нет)."""
@@ -1398,12 +1452,33 @@ class BrowserLoginSession:
             return None
         checked.add(token)
         self._log(f"вход: поймана cookie JWT ({mask_token(token)})")
+        self._stage("cookie найдена, проверяю")
         result = self._accept(token)
         if result.get("ok"):
+            self._stage("токен принят")
             return result
+        message = str(result.get("message") or "")
+        state = str(result.get("state") or "")
+        if (state in ("unauthorized", "expired", "guest")
+                or "401" in message or "не принят" in message):
+            self._stage("токен отклонён (401)")
+        else:
+            self._stage(f"токен не принят: {message}")
         self._log(f"вход: токен пока не принят ({result.get('message')}) — "
                   "жду вход на сайте")
         return None
+
+    @staticmethod
+    def _cookie_summary(cookies):
+        """Имена/домены cookie для диагностики (значения не логируются)."""
+        pairs = []
+        for cookie in cookies or []:
+            if not isinstance(cookie, dict):
+                continue
+            name = str(cookie.get("name") or "")[:40]
+            domain = str(cookie.get("domain") or "")[:80]
+            pairs.append(f"{domain}:{name}")
+        return pairs[:80]
 
     def _ok_message(self, token, result, note=""):
         message = (f"токен получен: {mask_token(token)} — "
@@ -1426,16 +1501,29 @@ class BrowserLoginSession:
                     "профиль занят другим окном Firefox, закройте его)")
             if self.clock() >= deadline:
                 minutes = max(1, int(round(self.timeout / 60.0)))
+                self._stage("cookie не появилась — вход не выполнен")
                 return self._result(
                     STATE_TIMEOUT,
-                    f"не дождались входа за {minutes} мин — повторите вход "
+                    f"cookie не появилась: не дождались входа за {minutes} мин "
                     "(Firefox при первом запуске готовит профиль дольше) или "
                     "вставьте токен вручную")
             try:
                 token = reader.token()
+                cookies = []
+                cookie_reader = getattr(reader, "cookies", None)
+                if callable(cookie_reader):
+                    cookies = cookie_reader() or []
+                self._log("вход: cookies.sqlite — cookie "
+                          f"{len(cookies)}; JWT "
+                          f"{'найдена' if token else 'не найдена'}")
+                if cookies:
+                    self._log("вход: cookie (домен:имя): "
+                              + ", ".join(self._cookie_summary(
+                                  [{"domain": host, "name": cookie_name}
+                                   for cookie_name, _value, host in cookies])))
             except Exception as exc:
                 self._log(f"вход: cookies.sqlite не прочитан "
-                          f"({type(exc).__name__})")
+                          f"({type(exc).__name__}: {exc})")
                 token = ""
             result = self._token_result(token, checked)
             if result is not None:
@@ -1464,13 +1552,14 @@ class BrowserLoginSession:
                     "браузер закрыт до завершения входа — повторите попытку")
             if self.clock() >= deadline:
                 minutes = max(1, int(round(self.timeout / 60.0)))
+                self._stage("cookie не появилась — вход не выполнен")
                 return self._result(
                     STATE_TIMEOUT,
-                    f"не дождались входа за {minutes} мин — повторите вход "
-                    "(нажмите «Войти в браузере» ещё раз) или вставьте токен "
-                    "вручную")
+                    f"cookie не появилась: не дождались входа за {minutes} мин — "
+                    "повторите вход (войдите именно в окне с профилем "
+                    "приложения) или вставьте токен вручную")
             try:
-                cookies = self._get_cookies(cdp)
+                tokens_cookies = self._get_cookies(cdp)
             except CdpError as exc:
                 # браузер мог закрыться между poll() и запросом
                 if proc.poll() is not None:
@@ -1478,8 +1567,17 @@ class BrowserLoginSession:
                         STATE_BROWSER_CLOSED,
                         "браузер закрыт до завершения входа")
                 self._log(f"вход: cookie не получены ({exc})")
-                cookies = []
+                tokens_cookies = []
+            cookies = tokens_cookies
             token = jwt_from_cookies(cookies)
+            self._log("вход: cookie получены "
+                      f"{len(cookies)}; JWT "
+                      f"{'найдена' if token else 'не найдена'}")
+            if cookies:
+                self._log("вход: cookie (домен:имя): "
+                          + ", ".join(self._cookie_summary(cookies)))
+            if not token:
+                self._stage("жду cookie JWT")
             result = self._token_result(token, checked)
             if result is not None:
                 message = self._ok_message(token, result)
@@ -1498,8 +1596,19 @@ class BrowserLoginSession:
             return {"state": STATE_ERROR, "ok": False,
                     "message": "контроллер авторизации недоступен"}
         try:
-            return self.auth.accept_token(token)
+            result = self.auth.accept_token(token)
+            state = str(result.get("state") or "")
+            http_code = (200 if result.get("ok") else
+                         401 if state in ("unauthorized", "expired", "guest")
+                         else "error")
+            self._diag("проверка GET /v2/me (Authorization: Bearer): "
+                       f"HTTP {http_code} state={state!r} "
+                       f"ok={bool(result.get('ok'))} "
+                       f"message={str(result.get('message') or '')[:200]!r}")
+            return result
         except Exception as exc:
+            self._diag(f"проверка GET /v2/me: ошибка "
+                       f"{type(exc).__name__}: {exc}")
             return {"state": STATE_ERROR, "ok": False,
                     "message": f"не удалось проверить токен "
                                f"({type(exc).__name__})"}
@@ -1789,12 +1898,16 @@ def build_login_dialog():
         auth_changed = pyqtSignal()          # токен изменился (без значения)
         progress = pyqtSignal(str, str)      # (state, message) из фонового потока
         probe_done = pyqtSignal(bool, str)   # результат кнопки «Проверить»
+        stage = pyqtSignal(str)              # промежуточный статус входа
+        token_from_browser_done = pyqtSignal(dict)
+        browser_profiles_ready = pyqtSignal(list)
 
         def __init__(self, controller, parent=None, cfg=None, data_dir="",
                      manual_factory=None, session_factory=None,
                      browser_finder=None, logger=None, browser_lister=None,
                      save_values=None, probe_factory=None, choose_file=None,
-                     pill_factory=None, on_login_state=None):
+                     pill_factory=None, on_login_state=None, manual_open=None,
+                     browser_token_finder=None, choose_folder=None):
             super().__init__(parent)
             if login_mode is not None:
                 try:
@@ -1817,6 +1930,15 @@ def build_login_dialog():
             #: (entering: bool, keep=(), restore_dialog=False) -> None —
             #: спрятать/вернуть окна оверлея (keep — что нельзя прятать)
             self.on_login_state = on_login_state
+            #: (url) -> bool — открыть warframe.market в обычном браузере
+            self.manual_open = manual_open
+            #: () -> BrowserTokenFinder — чтение JWT из профилей браузеров
+            self.browser_token_finder = browser_token_finder
+            self.choose_folder = choose_folder
+            self._manual_profile_path = ""
+            self._token_finder = None
+            self._token_thread = None
+            self._profiles_thread = None
             self._login_state_kwargs = callback_accepts(
                 on_login_state, ("keep", "restore_dialog"))
             self._session = None
@@ -1827,11 +1949,15 @@ def build_login_dialog():
             self._busy = False
             self._login_mode = False
             self._pill = None
+            self._last_stage = ""
             #: была ли модальность до входа (BUG-1: снимаем её на время входа)
             self._modal_before_hide = False
 
             self.progress.connect(self._on_progress)
             self.probe_done.connect(self._on_probe_done)
+            self.stage.connect(self._on_stage)
+            self.token_from_browser_done.connect(self._on_token_from_browser)
+            self.browser_profiles_ready.connect(self._on_browser_profiles)
             self.setWindowTitle("Вход на warframe.market")
             self.setModal(True)
             self.setMinimumWidth(780)
@@ -1845,6 +1971,13 @@ def build_login_dialog():
             title.setFont(font(14, True))
             title.setStyleSheet(f"color:{color('text')};")
             self.lbl_info = QLabel(
+                "Самый быстрый путь — «Взять токен из моего браузера»: "
+                "приложение прочитает cookie JWT из уже авторизованного "
+                "профиля Chrome, Edge, Yandex, Opera GX, Firefox… "
+                "Ничего вводить не нужно.\n\n"
+                "Либо «Войти в браузере»: откроется отдельное окно браузера "
+                "(профиль приложения). Войдите на warframe.market ИМЕННО В ЭТОМ "
+                "ОКНЕ — cookie обычного браузера в этот режим не попадает.\n\n"
                 "1. Выберите браузер ниже (Chrome, Edge, Yandex, Opera, Opera GX, "
                 "Brave, Vivaldi, Firefox…)\n"
                 "   и нажмите «Войти в браузере» — откроется его отдельное окно "
@@ -1859,9 +1992,10 @@ def build_login_dialog():
                 "отдельный профиль: приложение\n"
                 "читает cookies.sqlite из своей папки — личный профиль не "
                 "используется.\n"
-                "Можно и вручную: вставить JWT из DevTools кнопкой ниже. Пароль "
-                "оверлей не спрашивает\n"
-                "и не хранит; токен — только маской.")
+                "Ручной путь доступен сразу: «Войти через свой браузер "
+                "(вручную)» → DevTools → Application → Cookies → JWT.\n"
+                "Пароль оверлей не спрашивает и не хранит; токен — только "
+                "маской.")
             self.lbl_info.setWordWrap(True)
             self.lbl_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
             self.lbl_info.setStyleSheet(
@@ -1894,11 +2028,61 @@ def build_login_dialog():
             self.lbl_status = QLabel("")
             self.lbl_status.setWordWrap(True)
 
+            self.btn_from_browser = QPushButton(
+                "Взять токен из моего браузера")
+            self.btn_from_browser.setFont(font(12, True))
+            self.btn_from_browser.setMinimumHeight(30)
+            self.btn_from_browser.setStyleSheet(
+                theme.button_qss(primary=True) if theme is not None else "")
+            self.btn_from_browser.setToolTip(
+                "Прочитать cookie JWT из уже авторизованного профиля Chrome, "
+                "Edge, Yandex, Opera GX, Firefox… (личный профиль, без "
+                "повторного входа)")
+            self.btn_from_browser.clicked.connect(self.take_token_from_browser)
+            self.btn_token_retry = QPushButton("Попробовать снова")
+            self.btn_token_retry.setVisible(False)
+            self.btn_token_retry.clicked.connect(self.take_token_from_browser)
+            token_row = QHBoxLayout()
+            token_row.addWidget(self.btn_from_browser)
+            token_row.addWidget(self.btn_token_retry)
+            token_row.addStretch(1)
+            self.cmb_browser_token = QComboBox()
+            self.cmb_browser_token.setFont(font(11))
+            self.cmb_browser_token.addItem("Авто (первый, где есть JWT)", "")
+            self.cmb_browser_token.setMinimumWidth(420)
+            self.btn_profile_refresh = QPushButton("Найти заново")
+            self.btn_profile_refresh.clicked.connect(
+                self.refresh_browser_profiles)
+            self.btn_pick_profile = QPushButton("Указать папку профиля…")
+            self.btn_pick_profile.setToolTip(
+                "Выбрать папку профиля браузера вручную (Cookies, "
+                "Network/Cookies или cookies.sqlite)")
+            self.btn_pick_profile.clicked.connect(self.pick_profile_folder)
+            self.btn_howto = QPushButton("Как войти?")
+            self.btn_howto.setToolTip(
+                "Инструкция: где взять JWT в Chrome/Edge/Yandex/Opera GX "
+                "и Firefox")
+            self.btn_howto.clicked.connect(self.open_manual)
+            token_choose_row = QHBoxLayout()
+            token_choose_row.addWidget(QLabel("Взять токен из браузера:"))
+            token_choose_row.addWidget(self.cmb_browser_token, 1)
+            token_choose_row.addWidget(self.btn_profile_refresh)
+            token_choose_row.addWidget(self.btn_pick_profile)
+            token_choose_row.addWidget(self.btn_howto)
             buttons = QHBoxLayout()
             self.btn_browser = QPushButton("Войти в браузере")
             self.btn_browser.setFont(font(11, True))
             self.btn_browser.clicked.connect(self.start_browser_login)
-            self.btn_manual = QPushButton("Вставить токен вручную…")
+            self.btn_retry = QPushButton("Я вошёл — проверить снова")
+            self.btn_retry.setToolTip(
+                "Повторно забрать cookie JWT из уже открытого окна браузера "
+                "и проверить токен без перезапуска приложения")
+            self.btn_retry.clicked.connect(self.retry_login)
+            self.btn_manual = QPushButton(
+                "Войти через свой браузер (вручную)")
+            self.btn_manual.setToolTip(
+                "Открыть warframe.market в вашем обычном браузере; JWT — "
+                "DevTools → Application → Cookies → JWT, затем вставить в поле")
             self.btn_manual.clicked.connect(self.open_manual)
             self.btn_logout = QPushButton("Выйти")
             self.btn_logout.setToolTip(
@@ -1907,6 +2091,7 @@ def build_login_dialog():
             self.btn_close = QPushButton("Закрыть")
             self.btn_close.clicked.connect(self._finish)
             buttons.addWidget(self.btn_browser)
+            buttons.addWidget(self.btn_retry)
             buttons.addWidget(self.btn_manual)
             buttons.addWidget(self.btn_logout)
             buttons.addStretch(1)
@@ -1917,11 +2102,14 @@ def build_login_dialog():
             layout.addLayout(browser_row)
             layout.addWidget(self.lbl_token)
             layout.addWidget(self.lbl_status)
+            layout.addLayout(token_row)
+            layout.addLayout(token_choose_row)
             layout.addStretch(1)
             layout.addLayout(buttons)
 
             self._refresh_token_label()
             self._refresh_browser_list()
+            QTimer.singleShot(0, self.refresh_browser_profiles)
 
         # ── список браузеров и выбор ──────────────────────────────────
         def _discover(self):
@@ -2197,13 +2385,42 @@ def build_login_dialog():
 
         def _set_busy(self, busy):
             self._busy = bool(busy)
-            for button in (self.btn_browser, self.btn_manual, self.btn_logout,
-                           self.btn_check_browser):
+            for button in (self.btn_browser, self.btn_retry, self.btn_manual,
+                           self.btn_logout, self.btn_check_browser,
+                           self.btn_from_browser, self.btn_token_retry,
+                           self.btn_profile_refresh, self.btn_pick_profile,
+                           self.btn_howto):
                 button.setEnabled(not self._busy)
+            if hasattr(self, "cmb_browser_token"):
+                self.cmb_browser_token.setEnabled(not self._busy)
             if hasattr(self, "combo_browser"):
                 self.combo_browser.setEnabled(not self._busy)
             if not self._busy:
                 self._update_browser_state(announce=False)
+
+        def _on_stage(self, text):
+            """Промежуточный статус из фонового потока (пилюля/строка)."""
+            text = scrub(text)
+            try:
+                self._last_stage = text
+            except Exception:
+                pass
+            if self._pill is not None:
+                try:
+                    label = getattr(self._pill, "lbl_state", None)
+                    if label is not None:
+                        label.setText(text[:80])
+                        label.setToolTip(text)
+                except Exception:
+                    pass
+            if not self._closed:
+                self._set_status(text)
+
+        def _stage_from_thread(self, text):
+            try:
+                self.stage.emit(str(text))
+            except RuntimeError:
+                pass
 
         # ── режим входа: окна приложения не перекрывают браузер ──────
         def _notify_login_state(self, entering, restore_dialog=False):
@@ -2328,12 +2545,19 @@ def build_login_dialog():
             path = self.selected_browser()
             if callable(self.session_factory):
                 try:
-                    return self.session_factory(path)
+                    session = self.session_factory(path)
                 except TypeError:
-                    return self.session_factory()
+                    session = self.session_factory()
+                if session is not None:
+                    try:
+                        session.stage_callback = self._stage_from_thread
+                    except Exception:
+                        pass
+                return session
             return BrowserLoginSession(
                 self.controller, cfg=self.cfg, data_dir=self.data_dir,
-                browser_path=path, logger=self.logger)
+                browser_path=path, logger=self.logger,
+                stage_callback=self._stage_from_thread)
 
         def start_browser_login(self):
             if self._thread is not None:
@@ -2369,8 +2593,21 @@ def build_login_dialog():
                     f"не удалось подготовить вход ({type(exc).__name__})",
                     warn=True)
                 return False
+            return self._start_session(session)
+
+        def retry_login(self):
+            """«Я вошёл — проверить снова»: повторный захват без рестарта."""
+            if self._thread is not None:
+                return False
+            session = self._session
+            if session is None:
+                return self.start_browser_login()
+            return self._start_session(session)
+
+        def _start_session(self, session):
             self._session = session
             self._set_busy(True)
+            path = self.selected_browser()
             name = browser_title(path) if path else "браузер"
             self._set_status(f"ожидаю вход… открываю {name}; войдите на "
                              "warframe.market")
@@ -2413,8 +2650,13 @@ def build_login_dialog():
             self._busy = False
             if self._closed:
                 return
-            for button in (self.btn_browser, self.btn_manual, self.btn_logout):
+            for button in (self.btn_browser, self.btn_retry, self.btn_manual,
+                           self.btn_logout, self.btn_from_browser,
+                           self.btn_token_retry, self.btn_profile_refresh,
+                           self.btn_pick_profile, self.btn_howto):
                 button.setEnabled(True)
+            if hasattr(self, "cmb_browser_token"):
+                self.cmb_browser_token.setEnabled(True)
             if state == STATE_OK:
                 self._set_status(message, ok=True)
                 self._refresh_token_label()
@@ -2428,13 +2670,219 @@ def build_login_dialog():
                 self._set_status("вход отменён", warn=True)
                 self._update_browser_state(announce=False)
                 return
-            self._set_status(message or STATE_TEXT.get(state, "не удалось"),
+            self._set_status("вход не выполнен: "
+                             + (message or STATE_TEXT.get(state, "не удалось")),
                              warn=True)
             self._refresh_token_label()
             self._update_browser_state(announce=False)
 
+        # ── токен из личного профиля браузера (t30) ───────────────────
+        def _make_token_finder(self):
+            if self._token_finder is not None:
+                return self._token_finder
+            factory = self.browser_token_finder
+            if factory is None:
+                import browser_token
+                self._token_finder = browser_token.BrowserTokenFinder(
+                    logger=self.logger)
+                return self._token_finder
+            if callable(factory) and not hasattr(factory, "find_token"):
+                self._token_finder = factory()
+            else:
+                self._token_finder = factory
+            return self._token_finder
+
+        def refresh_browser_profiles(self):
+            """«Найти заново»: перечитать список профилей (кэш сбрасывается)."""
+            try:
+                finder = self._make_token_finder()
+            except Exception:
+                finder = None
+            if finder is None:
+                return False
+            if hasattr(finder, "refresh"):
+                try:
+                    finder.refresh()
+                except Exception:
+                    pass
+            self.btn_profile_refresh.setEnabled(False)
+            def worker():
+                try:
+                    items = (finder.scan_profiles()
+                             if callable(getattr(finder, "scan_profiles", None))
+                             else [])
+                except Exception:
+                    items = []
+                try:
+                    self.browser_profiles_ready.emit(list(items or []))
+                except RuntimeError:
+                    pass
+
+            if self._profiles_thread is not None and \
+                    getattr(self._profiles_thread, "is_alive", lambda: False)():
+                return False
+            self._profiles_thread = threading.Thread(
+                target=worker, daemon=True, name="wf-browser-profiles")
+            self._profiles_thread.start()
+            return True
+
+        def _on_browser_profiles(self, items):
+            self.btn_profile_refresh.setEnabled(True)
+            if self._closed or not hasattr(self, "cmb_browser_token"):
+                return
+            selected = self.cmb_browser_token.currentData()
+            self.cmb_browser_token.blockSignals(True)
+            self.cmb_browser_token.clear()
+            self.cmb_browser_token.addItem("Авто (первый, где есть JWT)", "")
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                browser = str(item.get("browser") or "Браузер")
+                profile = str(item.get("profile") or "Default")
+                has = "JWT есть" if item.get("has_jwt") else "JWT нет"
+                label = f"{browser} — {profile} — {has}"
+                self.cmb_browser_token.addItem(label,
+                                               item.get("db_path") or profile)
+            if selected:
+                index = self.cmb_browser_token.findData(selected)
+                if index >= 0:
+                    self.cmb_browser_token.setCurrentIndex(index)
+            self.cmb_browser_token.blockSignals(False)
+
+        def pick_profile_folder(self):
+            """«Указать папку…»: ручной выбор профиля браузера."""
+            folder = ""
+            try:
+                if callable(self.choose_folder):
+                    folder = str(self.choose_folder() or "")
+                else:
+                    from PyQt5.QtWidgets import QFileDialog
+                    folder = QFileDialog.getExistingDirectory(
+                        self, "Папка профиля браузера")
+            except Exception:
+                folder = ""
+            folder = folder.strip()
+            if not folder:
+                return False
+            self._manual_profile_path = folder
+            try:
+                finder = self._make_token_finder()
+                if finder is not None:
+                    paths = getattr(finder, "extra_paths", None)
+                    if isinstance(paths, list):
+                        paths.append(folder)
+                    if callable(getattr(finder, "refresh", None)):
+                        finder.refresh()
+            except Exception:
+                pass
+            self._set_status(f"проверяю выбранную папку: {folder}")
+            self.refresh_browser_profiles()
+            return self.take_token_from_browser(only=folder)
+
+        def take_token_from_browser(self, only=None):
+            """«Взять токен из моего браузера»: чтение cookie JWT из профиля."""
+            if self._token_thread is not None:
+                return False
+            try:
+                finder = self._make_token_finder()
+            except Exception as exc:
+                self._set_status(
+                    f"чтение cookie браузера недоступно "
+                    f"({type(exc).__name__}) — войдите вручную", warn=True)
+                self.btn_token_retry.setVisible(True)
+                return False
+            if finder is None or not callable(getattr(finder, "find_token", None)):
+                self._set_status("чтение cookie браузера недоступно — "
+                                 "войдите вручную", warn=True)
+                self.btn_token_retry.setVisible(True)
+                return False
+            if only is None:
+                try:
+                    only = self.cmb_browser_token.currentData() or None
+                except Exception:
+                    only = None
+            self._set_busy(True)
+            self.btn_token_retry.setVisible(False)
+            self._set_status("ищу cookie JWT в профилях браузеров…")
+            try:
+                self._token_thread = threading.Thread(
+                    target=self._token_worker, args=(finder, only), daemon=True,
+                    name="wf-browser-token")
+                self._token_thread.start()
+            except Exception as exc:
+                self._token_thread = None
+                self._set_busy(False)
+                self._set_status(f"не удалось запустить чтение "
+                                 f"({type(exc).__name__})", warn=True)
+                self.btn_token_retry.setVisible(True)
+                return False
+            return True
+
+        def _token_worker(self, finder, only=None):
+            try:
+                try:
+                    result = (finder.find_token(only=only) if only
+                              else finder.find_token())
+                except TypeError:
+                    result = finder.find_token()
+            except Exception as exc:
+                result = {"ok": False, "status": "error", "token": "",
+                          "checked": [],
+                          "message": f"ошибка чтения "
+                                     f"({type(exc).__name__})"}
+            try:
+                self.token_from_browser_done.emit(dict(result or {}))
+            except RuntimeError:
+                pass
+
+        def _on_token_from_browser(self, result):
+            self._token_thread = None
+            self._set_busy(False)
+            if self._closed:
+                return
+            result = dict(result or {})
+            token = str(result.get("token") or "")
+            browser = str(result.get("browser") or "")
+            if result.get("ok") and token:
+                try:
+                    accepted = self.controller.accept_token(token)
+                except Exception as exc:
+                    accepted = {"state": STATE_ERROR, "ok": False,
+                                "message": f"проверка не удалась "
+                                           f"({type(exc).__name__})"}
+                if accepted.get("ok"):
+                    self._set_status(
+                        f"токен принят из {browser or 'браузера'}: "
+                        f"{mask_token(token)}", ok=True)
+                    self.btn_token_retry.setVisible(False)
+                    self._refresh_token_label()
+                    try:
+                        self.auth_changed.emit()
+                    except RuntimeError:
+                        pass
+                    return
+                reason = str(accepted.get("message") or "токен отклонён")
+                self._set_status("вход не выполнен: " + reason, warn=True)
+                self.btn_token_retry.setVisible(True)
+                return
+            checked = ", ".join(str(x) for x in (result.get("checked") or []))
+            message = str(result.get("message") or "cookie JWT не найдена")
+            if checked:
+                message += f" (проверено: {checked})"
+            message += (" — ручной путь: «Войти через свой браузер "
+                        "(вручную)» или «Указать папку профиля…»")
+            self._set_status("вход не выполнен: " + message, warn=True)
+            self.btn_token_retry.setVisible(True)
+
         # ── ручная вставка и выход ────────────────────────────────────
         def open_manual(self):
+            # Ручной путь: открываем warframe.market в ОБЫЧНОМ браузере
+            # (если колбэк дан приложением), затем — поле для JWT.
+            if callable(self.manual_open):
+                try:
+                    self.manual_open(SITE)
+                except Exception:
+                    pass
             if not callable(self.manual_factory):
                 self._set_status("ручная вставка недоступна", warn=True)
                 return False
