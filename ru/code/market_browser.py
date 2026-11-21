@@ -110,6 +110,8 @@ def item_icon_label(item, size=24, cfg=None):
             return label
         name = item.get("en_name") or item.get("name") or ""
         slug = str(item.get("slug") or "")
+        if not slug and not item.get("en_name"):
+            return label
         image = provider.resolve(name=name, slug=slug,
                                  en_name=item.get("en_name") or "",
                                  game_ref=str(item.get("gameRef") or ""))
@@ -438,17 +440,17 @@ def build_market_browser():
             super().__init__(parent)
             self.item_data = dict(item)
             self.setObjectName("mRow")
-            self.setFixedHeight(44)
+            self.setFixedHeight(48)
             self.set_style(selected=False, zebra=False)
             lay = QHBoxLayout(self)
-            lay.setContentsMargins(8, 0, 8, 0)
-            lay.setSpacing(6)
+            lay.setContentsMargins(8, 4, 8, 4)
+            lay.setSpacing(8)
             self.lbl_name = QLabel(str(item.get("name") or item.get("slug") or "?"))
             self.lbl_name.setFont(make_font(12))
             self.lbl_name.setStyleSheet(f"color:{theme.PALETTE['text']};")
             self.icon = item_icon_label(item, 40, cfg)
             if self.icon is not None:
-                lay.addWidget(self.icon)
+                lay.addWidget(self.icon, 0, Qt.AlignVCenter)
             self.lbl_sell = QLabel("")
             self.lbl_sell.setFont(make_font(11, True))
             self.lbl_sell.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
@@ -958,7 +960,7 @@ def build_market_browser():
             self._result_rows = []
             for index, item in enumerate(self._result_items):
                 list_item = QListWidgetItem()
-                list_item.setSizeHint(QSize(10, 26))
+                list_item.setSizeHint(QSize(10, 48))
                 self.list_results.addItem(list_item)
                 row = _ResultRow(item, self, self.cfg)
                 row.set_style(zebra=(index % 2 == 1))
@@ -1377,18 +1379,17 @@ def build_market_browser():
             card.setObjectName("mRow")
             card.setProperty("order_id", order.get("id"))
             card.setProperty("order_kind", kind)
-            card.setFixedHeight(44)
+            card.setFixedHeight(48)
             card.setStyleSheet(theme.row_qss(zebra=(index % 2 == 1)))
             lay = QHBoxLayout(card)
             lay.setContentsMargins(8, 0, 8, 0)
             lay.setSpacing(8)
             lay.addWidget(badge_label("SELL" if kind == "sell" else "BUY",
                                       color, "#0d141c"))
-            icon_item = {"name": self._order_item_name(order),
-                         "slug": order.get("itemId") or ""}
+            icon_item = self._order_dialog_item(order)
             icon = item_icon_label(icon_item, 40, self.cfg)
             if icon is not None:
-                lay.addWidget(icon)
+                lay.addWidget(icon, 0, Qt.AlignVCenter)
             name = QLabel(str(self._order_item_name(order)))
             name.setFont(make_font(11))
             name.setStyleSheet(f"color:{theme.PALETTE['text']};")
