@@ -125,6 +125,45 @@ def test_notification_record(kind="market"):
     }
 
 
+def dispatch_toast_only(record, cfg=None, toast_stack=None,
+                        login_check=None, sound_player=None, sound=False):
+    """Эфемерный тост без HistoryStore/бейджа (лут и подобное).
+
+    Не пишет в центр уведомлений, не меняет непрочитанные и не трогает
+    историю; уважает ``notify_enabled``/``login_in_progress``.
+    """
+    cfg = cfg or {}
+    if not _cfg_bool(cfg.get("notify_enabled", True), True):
+        return {"ok": False, "display": "disabled", "stored": False}
+    login = False
+    if callable(login_check):
+        try:
+            login = bool(login_check())
+        except Exception:
+            login = False
+    if login or toast_stack is None:
+        return {"ok": False, "display": "login" if login else "none",
+                "stored": False}
+    try:
+        record = _normalize_record(dict(record or {}))
+    except Exception:
+        record = dict(record or {})
+    record.setdefault("ts", time.time())
+    played = False
+    if sound and sound_player is not None:
+        try:
+            played = bool(sound_player.play(record.get("kind"), cfg))
+        except Exception:
+            played = False
+    try:
+        toast = toast_stack.show_toast(record)
+    except Exception:
+        toast = None
+    return {"ok": toast is not None, "record": dict(record),
+            "display": "toast" if toast is not None else "none",
+            "sound": played, "stored": False}
+
+
 def dispatch_test_notification(kind="market", **kwargs):
     """Показать «ТЕСТ»-уведомление (история/тост/трей/звук).
 
@@ -1146,6 +1185,23 @@ def build_toast_stack():
                 f"background:{self.color}; border:none;"
                 " border-top-left-radius:8px; border-bottom-left-radius:8px;")
             layout.addWidget(stripe)
+            # иконка предмета с бейджем части (если запись о луте)
+            try:
+                import market_browser
+                icon_item = {
+                    "slug": record.get("item_slug") or record.get("slug"),
+                    "name": record.get("item_name") or record.get("name"),
+                    "en_name": record.get("item_en_name"),
+                    "thumb": record.get("item_thumb"),
+                    "icon": record.get("item_icon"),
+                }
+                icon = market_browser.item_icon_label(
+                    icon_item, 32, self.cfg, force=True)
+                if icon is not None:
+                    icon.show()
+                    layout.addWidget(icon, 0, Qt.AlignVCenter)
+            except Exception:
+                pass
             body = QVBoxLayout()
             body.setContentsMargins(8, 7, 0, 7)
             body.setSpacing(2)
