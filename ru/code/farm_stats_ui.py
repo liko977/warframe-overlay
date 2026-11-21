@@ -4,7 +4,7 @@
 Содержит две подвкладки:
   1. «Статистика» — карточки агрегатов ``farm_stats.FarmStatsCollector``
      (открыто реликвий, суммарная стоимость, лучший дроп, средний доход в час,
-     список последних дропов) и кнопка «Сбросить статистику».
+     список взятого лута) и кнопка «Сбросить статистику».
   2. «Пулы реликвий» — выбор тира (Lith/Meso/Neo/Axi/Requiem) и состояния
      (Intact/Exceptional/Flawless/Radiant), список реликвий по EV с шансами,
      ценами и бейджем «стоит ли открывать», кнопка «Обновить».
@@ -26,6 +26,98 @@ TIER_COLORS = {
     "Lith": "#b08d57", "Meso": "#8fb8d6", "Neo": "#d9a441",
     "Axi": "#a468c9", "Requiem": "#c0392b",
 }
+
+_MOD_TITLES = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win"}
+_MOD_ORDER = ("ctrl", "alt", "shift", "win")
+
+
+def _hotkey_helpers():
+    try:
+        import settings_ui
+        return settings_ui.canon_hotkey, settings_ui.hotkey_variants
+    except Exception:
+        return (lambda value: str(value or "").strip().lower()), \
+               (lambda value: [str(value or "").strip().lower()])
+
+
+def _pretty_combo(combo, canonical=True):
+    if canonical:
+        key = _hotkey_helpers()[0](combo)
+        combo = key
+    else:
+        combo = str(combo or "").strip().lower()
+    parts = [part for part in combo.split("+") if part]
+    if not parts:
+        return ""
+    key = parts[-1]
+    mods = [part for part in parts[:-1] if part in _MOD_ORDER]
+    if key.startswith("f") and key[1:].isdigit():
+        key_label = key.upper()
+    elif len(key) == 1:
+        key_label = key.upper()
+    else:
+        key_label = key.capitalize()
+    return "+".join([_MOD_TITLES[mod] for mod in
+                     sorted(mods, key=_MOD_ORDER.index)] + [key_label])
+
+
+def _parse_pick_keys(keys):
+    if isinstance(keys, dict):
+        keys = keys.get("pick_hotkeys", [])
+    if isinstance(keys, str):
+        keys = [part.strip() for part in keys.split(",") if part.strip()]
+    if not isinstance(keys, (list, tuple)):
+        return []
+    canon, _variants = _hotkey_helpers()
+    return [canon(key) for key in keys if str(key or "").strip()]
+
+
+def format_pick_hint(keys):
+    """Человеческая подсказка по фактическим pick_hotkeys."""
+    combos = _parse_pick_keys(keys)
+    if not combos:
+        return ("Отметьте награду (клавиши не заданы — "
+                "настройте в Настройках)")
+    parsed = []
+    for combo in combos:
+        parts = combo.split("+")
+        parsed.append((tuple(parts[:-1]), parts[-1], combo))
+    # одинаковые модификаторы + подряд цифры → компактный диапазон
+    if (len(parsed) >= 2
+            and all(item[0] == parsed[0][0] for item in parsed)
+            and all(item[1].isdigit() for item in parsed)):
+        nums = [int(item[1]) for item in parsed]
+        if nums == list(range(nums[0], nums[0] + len(nums))):
+            head = "+".join(_MOD_TITLES[mod] for mod in
+                            sorted(parsed[0][0], key=_MOD_ORDER.index))
+            if len(parsed) > 4:
+                return ", ".join(_pretty_combo(item[2])
+                                 for item in parsed[:4]) + ", …"
+            return (head + "+" if head else "") + f"{nums[0]}…{nums[-1]}"
+    shown = [_pretty_combo(item[2]) for item in parsed]
+    if len(shown) > 4:
+        shown = shown[:4] + ["…"]
+    return ", ".join(shown)
+
+
+def pick_hint_tooltip(keys):
+    """Полный список биндов + кириллические варианты для регистрации."""
+    combos = _parse_pick_keys(keys)
+    if not combos:
+        return "Клавиши не заданы — откройте Настройки → Клавиши"
+    _canon, variants_fn = _hotkey_helpers()
+    lines = ["Клавиши отметки награды:"]
+    for combo in combos:
+        variants = variants_fn(combo)
+        ru = [variant for variant in variants
+              if variant != combo and any("а" <= ch <= "я"
+                                          for ch in variant.lower())]
+        line = _pretty_combo(combo)
+        if ru:
+            line += " / " + ", ".join(
+                _pretty_combo(value, canonical=False) for value in ru)
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _item_icon_label(cfg, item, size=24):
@@ -90,11 +182,12 @@ def _item_icon_label(cfg, item, size=24):
 
 def build_drops_panel():
     """Фабрика панели вкладки «Дроп» (PyQt5 импортируется лениво)."""
-    from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+    from PyQt5.QtCore import Qt, pyqtSignal
     from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QButtonGroup, QComboBox, QFrame, QHBoxLayout,
-                                 QLabel, QPushButton, QScrollArea, QSizePolicy,
-                                 QStackedWidget, QVBoxLayout, QWidget)
+                                 QLabel, QMessageBox, QPushButton, QScrollArea,
+                                 QSizePolicy, QStackedWidget, QVBoxLayout,
+                                 QWidget)
 
     def make_font(size, bold=False):
         font = QFont(theme.FONT)
@@ -134,11 +227,13 @@ def build_drops_panel():
         prices_ready = pyqtSignal()
         stats_ready = pyqtSignal()
 
-        def __init__(self, cfg, collector, pool):
+        def __init__(self, cfg, collector, pool, sell_handler=None):
             super().__init__()
             self.cfg = dict(cfg or {})
             self.collector = collector
             self.pool = pool
+            self.sell_handler = sell_handler
+            self._listed_slugs = set()
             self._active = 0
             self._loading_pools = False
             self._pools_loaded = False      # ленивая загрузка данных (F6)
@@ -195,17 +290,11 @@ def build_drops_panel():
             self.prices_ready.connect(self._render_pools)
             self.stats_ready.connect(self._render_stats)
 
-            # живой пересчёт «доход в час» раз в секунду (без перестроения UI)
-            self._tick_timer = QTimer(self)
-            self._tick_timer.setInterval(1000)
-            self._tick_timer.timeout.connect(self._update_avg_label)
-            self._tick_timer.start()
-
             self.switch_tab(self._active)
             self._render_stats()
             # данные пулов НЕ грузим здесь — лениво при первом показе вкладки (F6)
 
-        # ── страница «Статистика» ───────────────────────────────────────
+        # ── страница «Статистика» (только выбранное) ────────────────────
         def _build_stats_page(self):
             page = QWidget()
             lay = QVBoxLayout(page)
@@ -214,37 +303,19 @@ def build_drops_panel():
 
             head = QHBoxLayout()
             head.setSpacing(8)
-            title = QLabel("Дроп — статистика фарма")
-            title.setFont(self._f_title)
-            title.setStyleSheet(
-                f"color:{theme.PALETTE['text']}; background: transparent;")
-            self.lbl_stats_status = QLabel("")
-            self.lbl_stats_status.setFont(self._f_detail)
-            self.lbl_stats_status.setStyleSheet(theme.status_qss())
-            self.btn_reset = QPushButton("Сбросить статистику")
-            self.btn_reset.setStyleSheet(theme.button_qss(danger=True, small=True))
+            self.lbl_total = QLabel("Выбрано: 0 предметов · Итого: 0 p")
+            self.lbl_total.setFont(self._f_title)
+            self.lbl_total.setStyleSheet(
+                f"color:{theme.PALETTE['platinum']}; background: transparent;")
+            self.btn_reset = QPushButton("Сбросить")
+            self.btn_reset.setStyleSheet(
+                theme.button_qss(danger=True, small=True))
             self.btn_reset.setCursor(Qt.PointingHandCursor)
             self.btn_reset.clicked.connect(self._reset_stats)
-            head.addWidget(title)
+            head.addWidget(self.lbl_total)
             head.addStretch(1)
-            head.addWidget(self.lbl_stats_status)
             head.addWidget(self.btn_reset)
             lay.addLayout(head)
-
-            cards = QHBoxLayout()
-            cards.setSpacing(8)
-            self.card_relics = self._make_card(
-                "Открыто реликвий", "0", "за текущую сессию: 0")
-            self.card_value = self._make_card(
-                "Суммарная стоимость", "0p", "оценено дропов: 0")
-            self.card_best = self._make_card(
-                "Лучший дроп", "—", "цена: —")
-            self.card_avg = self._make_card(
-                "Средний доход", "0 p/ч", "по всем сессиям")
-            for card in (self.card_relics, self.card_value,
-                         self.card_best, self.card_avg):
-                cards.addWidget(card["frame"], 1)
-            lay.addLayout(cards)
 
             lay.addWidget(self._make_section("Лут"))
             self.loot_host = QWidget()
@@ -254,48 +325,13 @@ def build_drops_panel():
             self.loot_scroll = QScrollArea()
             self.loot_scroll.setWidgetResizable(True)
             self.loot_scroll.setFrameShape(QFrame.NoFrame)
-            self.loot_scroll.setMaximumHeight(210)
+            self.loot_scroll.setMaximumHeight(420)
             self.loot_scroll.setStyleSheet(
                 "QScrollArea { background: transparent; }")
             self.loot_scroll.setWidget(self.loot_host)
-            lay.addWidget(self.loot_scroll)
-
-            lay.addWidget(self._make_section("Последние дропы"))
-            self.recent_host = QWidget()
-            self.recent_lay = QVBoxLayout(self.recent_host)
-            self.recent_lay.setContentsMargins(0, 0, 0, 0)
-            self.recent_lay.setSpacing(4)
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.NoFrame)
-            scroll.setStyleSheet("QScrollArea { background: transparent; }")
-            scroll.setWidget(self.recent_host)
-            lay.addWidget(scroll, 1)
+            lay.addWidget(self.loot_scroll, 1)
 
             return page
-
-        def _make_card(self, caption, value, sub):
-            frame = QFrame()
-            frame.setObjectName("dropsCard")
-            frame.setStyleSheet(theme.card_qss("dropsCard", 6))
-            lay = QVBoxLayout(frame)
-            lay.setContentsMargins(12, 10, 12, 10)
-            lay.setSpacing(4)
-            cap = QLabel(caption)
-            cap.setFont(self._f_detail)
-            cap.setStyleSheet(theme.muted_qss(10))
-            val = QLabel(value)
-            val.setFont(self._f_big)
-            val.setStyleSheet(
-                f"color:{theme.PALETTE['text']}; background: transparent;")
-            val.setWordWrap(True)
-            sub_lbl = QLabel(sub)
-            sub_lbl.setFont(self._f_detail)
-            sub_lbl.setStyleSheet(theme.muted_qss(10))
-            lay.addWidget(cap)
-            lay.addWidget(val)
-            lay.addWidget(sub_lbl)
-            return {"frame": frame, "value": val, "sub": sub_lbl}
 
         def _make_section(self, text):
             lbl = QLabel(text.upper())
@@ -305,89 +341,37 @@ def build_drops_panel():
 
         def _update_stats_labels(self):
             stats = self._stats()
-            if not stats:
-                return
-            self.card_relics["value"].setText(str(stats["relics_opened"]))
-            active = "идёт" if stats.get("current_active") else "завершена"
-            self.card_relics["sub"].setText(
-                f"текущая сессия: {stats['current_relics']} ({active})")
-            self.card_value["value"].setText(_fmt_price(stats["total_value"]))
-            self.card_value["value"].setStyleSheet(
-                f"color:{theme.PALETTE['platinum']}; background: transparent;")
-            self.card_value["value"].setToolTip(theme.currency_tooltip("platinum"))
-            self.card_value["sub"].setText(
-                f"оценено дропов: {stats['priced_drops']} · сессий: {stats['sessions']}")
-            best = stats["best_drop"]
-            if best:
-                self.card_best["value"].setText(str(best.get("name") or "—"))
-                self.card_best["value"].setStyleSheet(
-                    f"color:{_color_for_price(best.get('price'))};"
-                    " background: transparent;")
-                self.card_best["sub"].setText(
-                    f"цена: {_fmt_price(best.get('price'))} · "
-                    f"{self._time_label(best.get('picked_utc') or best.get('utc'))}")
-            else:
-                self.card_best["value"].setText("—")
-                self.card_best["value"].setStyleSheet(
-                    f"color:{theme.PALETTE['text']}; background: transparent;")
-                self.card_best["sub"].setText("цена: —")
-            if stats.get("hours", 0.0) <= 0 or stats.get("avg_per_hour", 0) <= 0:
-                self.card_avg["value"].setText("—")
-                self.card_avg["sub"].setText("нет данных")
-            else:
-                self.card_avg["value"].setText(
-                    f"{stats['avg_per_hour']:.1f} p/ч")
-                self.card_avg["sub"].setText(
-                    f"за {stats['hours']:.1f} ч игры")
-
-        def _update_avg_label(self):
-            stats = self._stats()
-            if stats:
-                self._update_avg_only(stats)
-
-        def _update_avg_only(self, stats):
-            if stats.get("hours", 0.0) <= 0 or stats.get("avg_per_hour", 0) <= 0:
-                self.card_avg["value"].setText("—")
-                self.card_avg["sub"].setText("нет данных")
-            else:
-                self.card_avg["value"].setText(
-                    f"{stats['avg_per_hour']:.1f} p/ч")
-                self.card_avg["sub"].setText(
-                    f"за {stats['hours']:.1f} ч игры")
-
-        @staticmethod
-        def _time_label(ts):
-            try:
-                return datetime.datetime.fromtimestamp(
-                    float(ts)).strftime("%H:%M")
-            except Exception:
-                return "—"
+            count = int(stats.get("relics_opened", 0) or 0)
+            total = int(stats.get("total_value", 0) or 0)
+            self.lbl_total.setText(
+                f"Выбрано: {count} предметов · Итого: {total} p")
+            self.lbl_total.setToolTip(theme.currency_tooltip("platinum"))
 
         def _render_stats(self):
             self._update_stats_labels()
             self._render_loot()
-            # список последних дропов
-            while self.recent_lay.count():
-                item = self.recent_lay.takeAt(0)
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
-            drops = []
-            if self.collector is not None:
-                try:
-                    drops = self.collector.recent_drops(25)
-                except Exception:
-                    drops = []
-            if not drops:
-                empty = QLabel("Дропов пока нет — откройте реликвию в игре.")
-                empty.setFont(self._f_detail)
-                empty.setStyleSheet(theme.muted_qss(11))
-                self.recent_lay.addWidget(empty)
-            for d in drops:
-                self.recent_lay.addWidget(self._make_drop_row(d))
-            self.recent_lay.addStretch(1)
-            self.lbl_stats_status.setText(
-                "обновлено" if drops else "нет данных")
+
+        def _pick_keys(self):
+            raw = (self.cfg or {}).get("pick_hotkeys", [])
+            if isinstance(raw, str):
+                raw = [part.strip() for part in raw.split(",")
+                       if part.strip()]
+            if not isinstance(raw, (list, tuple)):
+                raw = []
+            return [key for key in raw if str(key or "").strip()]
+
+        def _pick_hint(self):
+            hint = format_pick_hint(self._pick_keys())
+            if hint.startswith("Отметьте награду"):
+                return hint
+            return "Лут появится, когда отметите награду: " + hint
+
+        def _pick_tooltip(self):
+            return pick_hint_tooltip(self._pick_keys())
+
+        def update_pick_hint(self):
+            """Смена биндов в настройках — перечитать подсказку сразу."""
+            self._render_loot()
 
         @staticmethod
         def _day_label(ts):
@@ -415,10 +399,11 @@ def build_drops_panel():
                 except Exception:
                     loot = []
             if not loot:
-                empty = QLabel(
-                    "Лут появится, когда отметите награду Alt+1…4")
+                empty = QLabel(self._pick_hint())
                 empty.setFont(self._f_detail)
                 empty.setStyleSheet(theme.muted_qss(11))
+                empty.setWordWrap(True)
+                empty.setToolTip(self._pick_tooltip())
                 self.loot_lay.addWidget(empty)
                 return
             current_day = None
@@ -465,54 +450,66 @@ def build_drops_panel():
                 line.addWidget(name, 1)
                 line.addWidget(price)
                 line.addWidget(qty)
+                line.addWidget(self._sell_button(drop))
                 self.loot_lay.addWidget(row)
 
-        def _make_drop_row(self, d):
-            row = QFrame()
-            row.setObjectName("dropsRow")
-            row.setStyleSheet(theme.row_qss(name="dropsRow", radius=4))
-            lay = QHBoxLayout(row)
-            lay.setContentsMargins(10, 5, 10, 5)
-            lay.setSpacing(8)
-            t = QLabel(_fmt_rel(d.get("rel_time")))
-            t.setFont(self._f_detail)
-            t.setFixedWidth(72)
-            t.setStyleSheet(theme.muted_qss(10))
-            name = QLabel(str(d.get("name") or d.get("path") or "—"))
-            name.setFont(self._f_text)
-            name.setStyleSheet(
-                f"color:{theme.PALETTE['text']}; background: transparent;")
-            price = QLabel(_fmt_price(d.get("price")))
-            price.setFont(make_font(11, True))
-            price.setStyleSheet(
-                f"color:{_color_for_price(d.get('price'))};"
-                " background: transparent;")
-            price.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            lay.addWidget(t)
-            icon = _item_icon_label(self.cfg, d, 24)
-            if icon is not None:
-                lay.addWidget(icon)
-            lay.addWidget(name, 1)
-            picked = str(d.get("picked_name") or "").strip()
-            if picked:
-                picked_lbl = QLabel(f"взято: {picked}")
-                picked_lbl.setFont(self._f_detail)
-                picked_lbl.setStyleSheet(theme.muted_qss(10))
-                tip = "Взята награда из скана Alt+Q"
-                if d.get("picked_price") is not None:
-                    tip += f" · {d.get('picked_price')}p"
-                picked_lbl.setToolTip(tip)
-                lay.addWidget(picked_lbl)
-            lay.addWidget(price)
-            return row
+        def _sell_status(self, drop):
+            slug = str((drop or {}).get("slug") or "")
+            if slug and slug in self._listed_slugs:
+                return {"enabled": True, "label": "Изменить цену",
+                        "tooltip": "Изменить цену своего ордера",
+                        "listed": True}
+            if not callable(self.sell_handler):
+                return {"enabled": False, "label": "Продать",
+                        "tooltip": "продажа недоступна"}
+            try:
+                result = self.sell_handler(drop, "status")
+                return result if isinstance(result, dict) else {}
+            except Exception as exc:
+                return {"enabled": False, "label": "Продать",
+                        "tooltip": f"продажа недоступна: {exc}"}
+
+        def _sell_button(self, drop):
+            info = self._sell_status(drop)
+            button = QPushButton(str(info.get("label") or "Продать"))
+            button.setFont(make_font(9, True))
+            button.setStyleSheet(theme.button_qss(small=True))
+            button.setCursor(Qt.PointingHandCursor)
+            button.setToolTip(str(info.get("tooltip") or "Продать"))
+            button.setEnabled(bool(info.get("enabled", True)))
+            button.setFixedHeight(22)
+            button.clicked.connect(lambda _=False, d=drop:
+                                   self._on_loot_sell(d))
+            return button
+
+        def _on_loot_sell(self, drop):
+            if not callable(self.sell_handler):
+                return
+            try:
+                result = self.sell_handler(drop, "open")
+            except Exception as exc:
+                self.lbl_total.setToolTip(f"продажа: {exc}")
+                return
+            if isinstance(result, dict) and result.get("ok"):
+                slug = str((drop or {}).get("slug") or "")
+                if slug:
+                    self._listed_slugs.add(slug)
+                self._render_loot()
 
         def _reset_stats(self):
-            if self.collector is not None:
-                try:
-                    self.collector.reset()
-                except Exception:
-                    pass
-            self.lbl_stats_status.setText("статистика сброшена")
+            if self.collector is None:
+                return
+            answer = QMessageBox.question(
+                self, "Сбросить лут",
+                "Очистить выбранный лут и историю взятых наград?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+            try:
+                self.collector.reset()
+            except Exception:
+                pass
+            self._listed_slugs.clear()
             self._render_stats()
 
         # ── страница «Пулы реликвий» ────────────────────────────────────
@@ -805,9 +802,8 @@ def build_drops_panel():
             stats = self._stats()
             if not stats:
                 return "дроп: нет данных"
-            return (f"дроп: {stats['relics_opened']} рел. · "
-                    f"{_fmt_price(stats['total_value'])} · "
-                    f"{stats['avg_per_hour']:.1f} p/ч")
+            return (f"дроп: {stats['relics_opened']} предметов · "
+                    f"{stats['total_value']}p")
 
         def refresh(self):
             """⟳ из шапки окна: обновляет активную подвкладку."""
