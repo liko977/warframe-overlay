@@ -45,6 +45,13 @@ def _item_icon_label(cfg, item, size=24):
         name = item.get("en_name") or item.get("name") or ""
         slug = str(item.get("slug") or "")
         game_ref = str(item.get("gameRef") or "")
+        if not slug and not item.get("en_name"):
+            # в пулах бывает только подпись без slug — не создаём пустой слот
+            label.deleteLater()
+            return None
+        if not provider.has_index():
+            # первый запуск: индекс ещё не готов — без сетевых запросов
+            return label
         image = provider.resolve(name=name, slug=slug,
                                  en_name=item.get("en_name") or "",
                                  game_ref=game_ref)
