@@ -9,7 +9,7 @@
     фон окна #0d131c (alpha 0.96), панель #121a25, карточка #17212e,
     границы #24344a, текст #e6edf6, вторичный #93a1b5, акцент #4aa8ff,
     успех #43d17c, предупреждение #f5c451, опасность #ff6b6b,
-    платина #8fd0ff, дукаты #ffd75e.
+    платина #E7F1FF (светлая, не серая/не жёлтая), дукаты #C9A66B.
 """
 
 PALETTE = {
@@ -24,8 +24,11 @@ PALETTE = {
     "success": "#43d17c",
     "warning": "#f5c451",
     "danger": "#ff6b6b",
-    "platinum": "#8fd0ff",
-    "ducats": "#ffd75e",
+    "platinum": "#E7F1FF",
+    "ducats": "#C9A66B",
+    "currency_platinum": "#E7F1FF",
+    "currency_ducats": "#C9A66B",
+    "currency_credits": "#9BC7A8",
     "hover": "#1e2a3a",
     "scroll": "#2a3a4e",
     "zebra": "rgba(255,255,255,0.03)",
@@ -34,6 +37,12 @@ PALETTE = {
 }
 
 FONT = "Segoe UI"
+#: Готовые варианты цветов валют (без свободного пикера).
+PLATINUM_CHOICES = ("#E7F1FF", "#8FD8FF", "#7CC7FF", "#CFE8FF")
+DUCATS_CHOICES = ("#C9A66B", "#F5C451", "#D4AF37", "#E0B45C")
+CURRENCY_TOOLTIP = "Платина (warframe.market)"
+DUCATS_TOOLTIP = "Дукаты (warframe.market)"
+_CURRENCY_LISTENERS = []
 FONT_SIZES = {
     "window": 14,      # заголовок окна, bold
     "section": 11,     # заголовки секций, bold uppercase
@@ -53,6 +62,108 @@ CHART_GRID = PALETTE["grid"]
 CHART_AREA = PALETTE["area"]
 CHART_LINE = PALETTE["accent"]
 CHART_VOLUME = "rgba(74,168,255,0.35)"
+
+
+def _rgb(color):
+    text = str(color or "").lstrip("#")
+    if len(text) == 3:
+        text = "".join(ch * 2 for ch in text)
+    if len(text) != 6:
+        raise ValueError("цвет должен быть #rrggbb")
+    try:
+        return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except Exception as exc:
+        raise ValueError(f"неверный цвет: {color!r}") from exc
+
+
+def luminance(color):
+    """Относительная яркость sRGB (WCAG)."""
+    channels = []
+    for value in _rgb(color):
+        value = value / 255.0
+        channels.append(value / 12.92 if value <= 0.03928
+                        else ((value + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+
+def contrast_ratio(fg, bg):
+    """Контраст двух цветов по WCAG (1..21)."""
+    a, b = luminance(fg), luminance(bg)
+    light, dark = max(a, b), min(a, b)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def validate_currency_colors(platinum, ducats):
+    """Проверяет, что валюты различимы и не совпадают с текстом."""
+    p, d = str(platinum or "").upper(), str(ducats or "").upper()
+    _rgb(p)
+    _rgb(d)
+    if p == d:
+        raise ValueError("цвет платины и дукатов не должен совпадать")
+    if p == PALETTE["text"].upper():
+        raise ValueError("цвет платины не должен совпадать с текстом")
+    if d == PALETTE["text"].upper():
+        raise ValueError("цвет дукатов не должен совпадать с текстом")
+    return True
+
+
+def currency_platinum():
+    return PALETTE.get("currency_platinum") or PALETTE["platinum"]
+
+
+def currency_ducats():
+    return PALETTE.get("currency_ducats") or PALETTE["ducats"]
+
+
+def currency_credits():
+    return PALETTE.get("currency_credits", "#9BC7A8")
+
+
+def on_currency_change(callback):
+    """Подписка на смену цветов валют (для живого обновления виджетов)."""
+    if callable(callback) and callback not in _CURRENCY_LISTENERS:
+        _CURRENCY_LISTENERS.append(callback)
+    return callback
+
+
+def set_currency_colors(platinum=None, ducats=None, notify=True):
+    """Применяет цвета валют без перезапуска; возвращает (p, d)."""
+    p = str(platinum or currency_platinum())
+    d = str(ducats or currency_ducats())
+    validate_currency_colors(p, d)
+    PALETTE["currency_platinum"] = p
+    PALETTE["currency_ducats"] = d
+    PALETTE["platinum"] = p
+    PALETTE["ducats"] = d
+    if notify:
+        for callback in list(_CURRENCY_LISTENERS):
+            try:
+                callback(p, d)
+            except Exception:
+                pass
+    return p, d
+
+
+def configure_currency_colors(cfg):
+    """Цвета из config (currency_*_color) с безопасными умолчаниями."""
+    cfg = dict(cfg or {})
+    p = str(cfg.get("currency_platinum_color") or currency_platinum())
+    d = str(cfg.get("currency_ducats_color") or currency_ducats())
+    try:
+        return set_currency_colors(p, d)
+    except ValueError:
+        return set_currency_colors("#E7F1FF", "#C9A66B")
+
+
+def currency_qss(kind="platinum", px=None):
+    """Стиль цены/валюты: platinum по умолчанию, ducats по запросу."""
+    color = currency_ducats() if str(kind) == "ducats" else currency_platinum()
+    size = f" font-size:{int(px)}px;" if px else ""
+    return f"color:{color};{size} font-weight:700; background: transparent;"
+
+
+def currency_tooltip(kind="platinum"):
+    return CURRENCY_TOOLTIP if str(kind) != "ducats" else DUCATS_TOOLTIP
 
 
 def rgba(hex_color, alpha):
