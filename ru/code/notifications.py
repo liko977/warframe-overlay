@@ -752,8 +752,8 @@ def build_tray():
     """Фабрика трея: ``NotificationTray(cfg, on_open=, on_updates=, on_exit=)``.
 
     Иконка рисуется в памяти (без файлов и сторонних библиотек), меню —
-    «Открыть / Обновления / Выход», тосты — нативные ``QSystemTrayIcon``
-    (Windows 10/11 показывает их как системные уведомления). Если системный
+    «Открыть / Проверить обновление / Настройки / Выход», тосты — нативные
+    ``QSystemTrayIcon`` (Windows 10/11 показывает их как системные уведомления). Если системный
     трей недоступен (headless/offscreen), создание не падает, а
     ``available()`` возвращает ``False``.
     """
@@ -767,11 +767,12 @@ def build_tray():
         MESSAGE_MS = 8000
 
         def __init__(self, cfg=None, on_open=None, on_updates=None,
-                     on_exit=None, parent=None):
+                     on_settings=None, on_exit=None, parent=None):
             super().__init__(parent)
             self.cfg = dict(cfg or {})
             self.on_open = on_open
             self.on_updates = on_updates
+            self.on_settings = on_settings
             self.on_exit = on_exit
             self._shown = False
             self._available = False
@@ -782,9 +783,16 @@ def build_tray():
             self._actions = {}
             for key, title, callback in (
                     ("open", "Открыть", on_open),
-                    ("updates", "Обновления", on_updates),
+                    ("updates", "Проверить обновление", on_updates),
+                    ("settings", "Настройки", on_settings),
                     ("exit", "Выход", on_exit)):
                 action = self.menu.addAction(title)
+                if key == "settings":
+                    try:
+                        import ui_icons
+                        action.setIcon(ui_icons.gear_icon(16))
+                    except Exception:
+                        pass
                 if callable(callback):
                     action.triggered.connect(
                         lambda _checked=False, cb=callback: cb())
