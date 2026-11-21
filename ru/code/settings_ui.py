@@ -23,6 +23,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+from datetime import datetime
 
 try:
     import ui_theme as theme
@@ -613,17 +615,33 @@ def build_settings_dialog():
             modifiers.append("win")
         return make_hotkey(modifiers, name)
 
+    from PyQt5.QtCore import QTimer, pyqtSignal
+    from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog,
+                                 QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+                                 QPushButton, QTabWidget, QVBoxLayout, QWidget,
+                                 QDoubleSpinBox, QSpinBox)
+
     class SettingsDialog(QDialog):
         """Окно настроек: клавиши + уведомления + оверлей + обновления."""
 
-        def __init__(self, cfg=None, apply_fn=None, on_updates=None,
-                     on_open_data_dir=None, data_dir="", version="",
-                     parent=None):
+        update_checked = pyqtSignal(dict)
+        update_applied = pyqtSignal(dict)
+
+        def __init__(self, cfg=None, apply_fn=None, on_open_data_dir=None,
+                     on_test_notification=None, check_update_fn=None,
+                     apply_update_fn=None, restart_fn=None, auto_check=False,
+                     data_dir="", version="", parent=None):
             super().__init__(parent)
             self.cfg = dict(cfg or {})
             self.apply_fn = apply_fn
-            self.on_updates = on_updates
+            self.check_update_fn = check_update_fn
+            self.apply_update_fn = apply_update_fn
+            self.restart_fn = restart_fn
+            self.update_info = {}
+            self.last_checked = ""
+            self._update_busy = False
             self.on_open_data_dir = on_open_data_dir
+            self.on_test_notification = on_test_notification
             self.data_dir = data_dir
             self.version = version
             self.last_result = {}
@@ -665,6 +683,9 @@ def build_settings_dialog():
             self.tabs.addTab(self._build_other_tab(), "Прочее")
             layout.addWidget(self.tabs, 1)
 
+            self.update_checked.connect(self._on_update_checked)
+            self.update_applied.connect(self._on_update_applied)
+
             self.lbl_status = QLabel("")
             self.lbl_status.setFont(font(10))
             self.lbl_status.setStyleSheet(
@@ -695,6 +716,8 @@ def build_settings_dialog():
 
             self.load_values(self.cfg)
             self.finished.connect(self._unregister)
+            if auto_check:
+                QTimer.singleShot(0, self.check_updates)
 
         def _unregister(self, _result=0):
             try:
@@ -807,6 +830,21 @@ def build_settings_dialog():
             sound_row.addWidget(self.edit_sound_file, 1)
             sound_row.addWidget(self.btn_sound_browse)
             form.addRow(QLabel("Свой .wav"), sound_row)
+            test_row = QHBoxLayout()
+            self.cmb_test_kind = QComboBox()
+            for key, title in (("market", "Маркет (куплен ордер)"),
+                               ("price", "Цена ниже моей"),
+                               ("chat", "Чат"),
+                               ("system", "Система")):
+                self.cmb_test_kind.addItem(title, key)
+            self.cmb_test_kind.setFont(font(11))
+            self.btn_test_notify = QPushButton("Проверить уведомление")
+            self.btn_test_notify.setStyleSheet(button_qss(small=True))
+            self.btn_test_notify.setCursor(Qt.PointingHandCursor)
+            self.btn_test_notify.clicked.connect(self.test_notification)
+            test_row.addWidget(self.cmb_test_kind, 1)
+            test_row.addWidget(self.btn_test_notify)
+            form.addRow(QLabel(""), test_row)
             outer.addLayout(form)
             outer.addStretch(1)
             return page
@@ -847,9 +885,16 @@ def build_settings_dialog():
 
         def _build_updates_tab(self):
             page = QWidget()
+            self.updates_page = page
             outer = QVBoxLayout(page)
             outer.setContentsMargins(12, 10, 12, 10)
             outer.setSpacing(8)
+            self.lbl_update_current = QLabel(
+                f"Текущая версия: {self.version or wf_version_fallback()}")
+            self.lbl_update_current.setFont(font(11, True))
+            self.lbl_update_current.setStyleSheet(
+                f"color:{color('text')}; background:transparent;")
+            outer.addWidget(self.lbl_update_current)
             self.chk_update_check = QCheckBox("Проверять обновления при старте")
             self.chk_update_check.setFont(font(11))
             outer.addWidget(self.chk_update_check)
@@ -862,16 +907,41 @@ def build_settings_dialog():
             form.addRow(QLabel("URL манифеста обновлений"), self.edit_update_url)
             outer.addLayout(form)
             row = QHBoxLayout()
-            self.btn_check_updates = QPushButton("Проверить сейчас")
+            self.btn_check_updates = QPushButton("Проверить обновление")
             self.btn_check_updates.setStyleSheet(button_qss(small=True))
             self.btn_check_updates.setCursor(Qt.PointingHandCursor)
             self.btn_check_updates.clicked.connect(self.check_updates)
             row.addWidget(self.btn_check_updates)
+            self.btn_update_apply = QPushButton("Обновить и перезапустить")
+            self.btn_update_apply.setStyleSheet(button_qss(small=True))
+            self.btn_update_apply.setCursor(Qt.PointingHandCursor)
+            self.btn_update_apply.setVisible(False)
+            self.btn_update_apply.clicked.connect(self.apply_and_restart)
+            row.addWidget(self.btn_update_apply)
             row.addStretch(1)
             outer.addLayout(row)
+            self.lbl_update_status = QLabel(
+                "Нажмите «Проверить обновление», чтобы узнать о новой версии.")
+            self.lbl_update_status.setFont(font(11))
+            self.lbl_update_status.setWordWrap(True)
+            self.lbl_update_status.setStyleSheet(
+                f"color:{color('text')}; background:transparent;")
+            outer.addWidget(self.lbl_update_status)
+            self.lbl_update_notes = QLabel("")
+            self.lbl_update_notes.setFont(font(10))
+            self.lbl_update_notes.setWordWrap(True)
+            self.lbl_update_notes.setStyleSheet(
+                f"color:{color('muted')}; background:transparent;")
+            outer.addWidget(self.lbl_update_notes)
+            self.lbl_update_checked = QLabel("Последняя проверка: —")
+            self.lbl_update_checked.setFont(font(10))
+            self.lbl_update_checked.setStyleSheet(
+                f"color:{color('muted')}; background:transparent;")
+            outer.addWidget(self.lbl_update_checked)
             outer.addWidget(muted(
-                "Пустой URL — обновления не проверяются. "
-                "«Проверить сейчас» откроет окно обновлений."))
+                "Пустой URL — обновления не проверяются. Проверка выполняется "
+                "в фоне и не блокирует окно; при доступной версии здесь же "
+                "появится «Обновить и перезапустить»."))
             outer.addStretch(1)
             return page
 
@@ -1073,15 +1143,164 @@ def build_settings_dialog():
             return False
 
         def check_updates(self):
-            if callable(self.on_updates):
+            """«Проверить обновление»: фоновая проверка, окно не блокируется."""
+            if self._update_busy:
+                return False
+            if not callable(self.check_update_fn):
+                self._set_status("Обновления недоступны в этой сборке.",
+                                 warn=True)
+                self.lbl_update_status.setText(
+                    "Проверка обновлений недоступна в этой сборке.")
+                return False
+            self._update_busy = True
+            self.btn_check_updates.setEnabled(False)
+            self.btn_check_updates.setText("Проверяю…")
+            self.btn_update_apply.setVisible(False)
+            self.lbl_update_notes.setText("")
+            self.lbl_update_status.setText("Проверяю обновления…")
+            self.lbl_update_checked.setText(
+                "Последняя проверка: идёт сейчас…")
+
+            def worker():
                 try:
-                    self.on_updates()
+                    result = self.check_update_fn() or {}
                 except Exception as exc:
-                    self._set_status(f"обновления: {exc}", warn=True)
-                    return False
-                return True
-            self._set_status("Обновления недоступны в этой сборке.", warn=True)
-            return False
+                    result = {"checked": False, "available": False,
+                              "error": f"{type(exc).__name__}: {exc}"}
+                try:
+                    self.update_checked.emit(dict(result))
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True,
+                             name="wf-settings-update").start()
+            return True
+
+        def _on_update_checked(self, result):
+            self.update_info = dict(result or {})
+            self._update_busy = False
+            self.btn_check_updates.setEnabled(True)
+            self.btn_check_updates.setText("Проверить обновление")
+            self.last_checked = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+            self.lbl_update_checked.setText(
+                f"Последняя проверка: {self.last_checked}")
+            info = self.update_info
+            if info.get("skipped"):
+                self.lbl_update_status.setText(
+                    f"Обновления не настроены: {info['skipped']}.")
+                self.lbl_update_status.setStyleSheet(
+                    f"color:{color('warning')};")
+                self.btn_update_apply.setVisible(False)
+                return
+            if info.get("error"):
+                self.lbl_update_status.setText(
+                    f"Не удалось проверить обновления: {info['error']}.")
+                self.lbl_update_status.setStyleSheet(
+                    f"color:{color('warning')};")
+                self.btn_update_apply.setVisible(False)
+                return
+            if info.get("available"):
+                version = info.get("version") or "?"
+                self.lbl_update_status.setText(
+                    f"Доступна версия {version}. "
+                    "Нажмите «Обновить и перезапустить».")
+                self.lbl_update_status.setStyleSheet(f"color:{color('text')};")
+                notes = str(info.get("notes") or "").strip()
+                self.lbl_update_notes.setText(
+                    f"Что нового: {notes}" if notes else "")
+                self.btn_update_apply.setVisible(True)
+                self.btn_update_apply.setEnabled(True)
+                self._set_status(f"Доступна версия {version}.")
+                return
+            current = info.get("current") or self.version
+            self.lbl_update_status.setText(
+                f"Обновлений нет: у вас последняя версия"
+                + (f" ({current})." if current else "."))
+            self.lbl_update_status.setStyleSheet(f"color:{color('text')};")
+            self.btn_update_apply.setVisible(False)
+            self._set_status("Обновлений нет.")
+
+        def apply_and_restart(self):
+            """Установить доступное обновление и перезапустить приложение."""
+            if self._update_busy:
+                return False
+            manifest = (self.update_info or {}).get("manifest")
+            if not manifest:
+                self._set_status("Сначала проверьте обновление.", warn=True)
+                return False
+            if not callable(self.apply_update_fn):
+                self._set_status("Установка обновлений недоступна.",
+                                 warn=True)
+                return False
+            self._update_busy = True
+            self.btn_check_updates.setEnabled(False)
+            self.btn_update_apply.setEnabled(False)
+            self.btn_update_apply.setText("Обновляю…")
+            self.lbl_update_status.setText(
+                f"Скачиваю версию "
+                f"{self.update_info.get('version') or '?'}…")
+
+            def worker():
+                try:
+                    result = self.apply_update_fn(manifest) or {}
+                except Exception as exc:
+                    result = {"ok": False,
+                              "error": f"{type(exc).__name__}: {exc}"}
+                try:
+                    self.update_applied.emit(dict(result))
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True,
+                             name="wf-settings-apply").start()
+            return True
+
+        def _on_update_applied(self, result):
+            result = dict(result or {})
+            self._update_busy = False
+            self.btn_check_updates.setEnabled(True)
+            self.btn_update_apply.setText("Обновить и перезапустить")
+            if not result.get("ok") or result.get("error"):
+                self.btn_update_apply.setEnabled(True)
+                self.lbl_update_status.setText(
+                    "Не удалось обновить: "
+                    f"{result.get('error') or 'неизвестная ошибка'}.")
+                self.lbl_update_status.setStyleSheet(
+                    f"color:{color('warning')};")
+                return
+            version = (result.get("version")
+                       or self.update_info.get("version") or "?")
+            self.lbl_update_status.setText(
+                f"Обновление {version} установлено — "
+                "перезапускаю приложение…")
+            self.btn_update_apply.setVisible(False)
+            if callable(self.restart_fn):
+                try:
+                    self.restart_fn()
+                except Exception as exc:
+                    self.lbl_update_status.setText(
+                        "Обновление установлено, но перезапуск не удался "
+                        f"({type(exc).__name__}). Запустите приложение вручную.")
+
+        def test_notification(self):
+            """«Проверить уведомление»: ТЕСТ-запись/тост/трей без кулдаунов."""
+            kind = str(self.cmb_test_kind.currentData() or "market")
+            if not callable(self.on_test_notification):
+                self._set_status("Тест уведомлений недоступен в этой сборке.",
+                                 warn=True)
+                return False
+            try:
+                result = self.on_test_notification(kind) or {}
+            except Exception as exc:
+                self._set_status(f"тест: {exc}", warn=True)
+                return False
+            if isinstance(result, dict) and result.get("ok") is False:
+                self._set_status("Тест не отправлен: "
+                                 f"{result.get('error') or 'ошибка'}",
+                                 warn=True)
+                return False
+            self._set_status("ТЕСТ отправлен: история/тост/звук.")
+            return True
 
         def open_data(self):
             opener = self.on_open_data_dir
