@@ -646,7 +646,7 @@ def perform_action(record, unified=None, browser=None, events_panel=None,
         if kind == "order_bought":
             if unified is not None:
                 try:
-                    unified.show_tab(2)       # «Мои ордера»
+                    unified.show_tab(1)       # «Мои ордера»
                 except Exception:
                     pass
             ok = False
@@ -660,7 +660,7 @@ def perform_action(record, unified=None, browser=None, events_panel=None,
         # «перебили цену»: карточка предмета + правка МОЕГО ордера
         if unified is not None:
             try:
-                unified.show_tab(1)           # «Маркет»
+                unified.show_tab(0)           # «Маркет»
             except Exception:
                 pass
         opened = False
@@ -699,7 +699,7 @@ def perform_action(record, unified=None, browser=None, events_panel=None,
     if action == "events":
         if unified is not None:
             try:
-                unified.show_tab(3)           # «События»
+                unified.show_tab(2)           # «События»
             except Exception:
                 pass
         tier = record.get("tier") or payload.get("tier")
