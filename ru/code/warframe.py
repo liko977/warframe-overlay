@@ -60,6 +60,7 @@ import difflib
 import json
 import math
 import os
+import platform
 import re
 import sys
 import threading
@@ -72,7 +73,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.4"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -166,8 +167,9 @@ DEFAULT_CONFIG = {
 
     # ── сеть ────────────────────────────────────────────────────────────
     "request_timeout": 8,
-    "workers": 8,
+    "workers": 6,
     "price_ttl": 180,                # сек, кэш цен
+    "scan_price_ttl": 600,           # 0.6.4: TTL кэша цен сканера, сек
     "items_cache_ttl": 86400,        # сек, кэш списка предметов
     "ocr_languages": ["ru", "en"],   # русская + английская игра
 
@@ -218,7 +220,10 @@ DEFAULT_CONFIG = {
     "restore_game_focus": True,      # при закрытии вернуть фокус в игру
     "font_scale": 1.0,
     "overlay_opacity": 1.0,          # прозрачность окна/фона (0.4..1.0)
+    "currency_platinum_color": "#E7F1FF",  # цвет платины в UI
+    "currency_ducats_color": "#C9A66B",    # цвет дукатов в UI
     "show_summary": True,            # показывать блок «Итого» над плашками
+    "show_item_icons": True,         # иконки предметов WFCD в UI
 
     # ── игровой лог EE.log (только чтение, см. LOG_SPEC.md) ─────────────
     "log_enabled": True,             # читать EE.log «хвостом» как доп. источник
@@ -294,11 +299,108 @@ DEFAULT_CONFIG = {
 # ─────────────────────────────────────────────────────────────────────────
 #  Мелкие утилиты
 # ─────────────────────────────────────────────────────────────────────────
-def log(msg=""):
+def app_log_path():
+    return os.path.join(DATA_DIR, "app.log")
+
+
+_LOG_LOCK = threading.Lock()
+LOG_MAX_BYTES = 1024 * 1024
+LOG_BACKUPS = 3
+
+
+def _rotate_log(path):
     try:
-        print(msg, flush=True)
+        if os.path.getsize(path) < LOG_MAX_BYTES:
+            return
+        for index in range(LOG_BACKUPS - 1, 0, -1):
+            src = f"{path}.{index}"
+            dst = f"{path}.{index + 1}"
+            if os.path.exists(src):
+                try:
+                    os.replace(src, dst)
+                except Exception:
+                    pass
+        try:
+            os.replace(path, path + ".1")
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
     except Exception:
         pass
+
+
+def log(msg=""):
+    """Безопасный лог: app.log (ротация) + stdout, если он есть."""
+    text = str(msg)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        path = app_log_path()
+        with _LOG_LOCK:
+            _rotate_log(path)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(text + "\n")
+    except Exception:
+        pass
+    try:
+        stream = getattr(sys, "stdout", None)
+        if stream is not None:
+            print(text, flush=True)
+    except Exception:
+        pass
+
+
+def log_exception(context=""):
+    """Записать исключение с traceback в app.log (без падения)."""
+    try:
+        text = traceback.format_exc()
+    except Exception:
+        text = ""
+    log((context + "\n" if context else "") + text.rstrip())
+
+
+def startup_line():
+    try:
+        frozen = bool(getattr(sys, "frozen", False))
+        return (f"=== Warframe Price Overlay {APP_VERSION} | "
+                f"{'exe' if frozen else 'source'} | "
+                f"{platform.platform()} | python {platform.python_version()} ===")
+    except Exception:
+        return f"=== Warframe Price Overlay {APP_VERSION} ==="
+
+
+def startup_error_text(exc):
+    reason = f"{type(exc).__name__}: {exc}".strip()
+    return (f"Не удалось запустить: {reason}.\n"
+            f"Подробности в {app_log_path()}")
+
+
+def show_startup_error(exc):
+    """Тематический диалог для windowed-сборки; в offscreen — молча."""
+    try:
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return False
+        from PyQt5.QtWidgets import QApplication, QMessageBox
+        app = QApplication.instance()
+        created = app is None
+        if app is None:
+            app = QApplication([])
+        box = QMessageBox()
+        try:
+            box.setStyleSheet(ui_theme().dialog_qss())
+        except Exception:
+            pass
+        box.setWindowTitle("Warframe Price Overlay")
+        box.setIcon(QMessageBox.Critical)
+        box.setText(startup_error_text(exc))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+        if created:
+            app.quit()
+        return True
+    except Exception:
+        return False
 
 
 def enable_dpi_awareness():
@@ -397,17 +499,13 @@ def imwrite_unicode(path, img):
 
 
 def price_color(p):
+    """Цвет числа платины: единый семантический platinum (0.6.4)."""
     if not isinstance(p, (int, float)) or p <= 0:
         return "#8b95a5"
-    if p < 15:
-        return "#b9c3d1"
-    if p < 40:
-        return "#dbe3ee"
-    if p < 80:
-        return "#ffd75e"
-    if p < 150:
-        return "#ffa23a"
-    return "#ff6a3a"
+    try:
+        return ui_theme().currency_platinum()
+    except Exception:
+        return "#E7F1FF"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -429,9 +527,55 @@ def normalize_name(text):
     return t
 
 
+_BLUEPRINT_RE = re.compile(r"\b(?:черт[её]ж|чертеж|blueprint)\b", re.IGNORECASE)
+_QTY_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:\d+)\s*[xXхХ×]\s*|[xXхХ×]\s*(?:\d+)\s*)+")
+_OWNED_STATUS_RE = re.compile(
+    r"\s*(?:[-–—:]\s*)?(?:создано|изготовлено|скрафчено|в\s+наличии|"
+    r"crafted|owned)\s*[-:]?\s*\d*\s*$", re.IGNORECASE)
+
+
+def normalize_card_name(text):
+    """Нормализует строку карточки награды.
+
+    Возвращает ``(display, is_blueprint, key)``:
+    «2 X Чертёж: Форма» -> «Форма (Чертеж)», True, «форма чертеж»;
+    «Форма» -> «Форма», False, «форма».
+    """
+    raw = str(text or "").strip()
+    is_blueprint = bool(_BLUEPRINT_RE.search(raw))
+    t = _QTY_PREFIX_RE.sub(" ", raw)
+    # префикс «Чертёж:» / «Blueprint:» (иногда после количества)
+    t = re.sub(r"^\s*(?:черт[её]ж|чертеж|blueprint)\s*[:\-]?\s*", " ",
+               t, flags=re.IGNORECASE)
+    # если OCR поставил количество после префикса
+    t = _QTY_PREFIX_RE.sub(" ", t)
+    # суффикс «(чертёж)» / «Blueprint» уже учтён флагом
+    t = re.sub(r"[\(\[]\s*(?:черт[её]ж|чертеж|blueprint)\s*[\)\]]", " ",
+               t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+[:\-]?\s*(?:черт[её]ж|чертеж|blueprint)\s*$", " ",
+               t, flags=re.IGNORECASE)
+    # «Создано - 7» / «в наличии» — статус, не часть названия
+    t = _OWNED_STATUS_RE.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip(" :-")
+    t = re.sub(r"\s*:\s*", ": ", t)
+    if not t:
+        return "", is_blueprint, ""
+    display = f"{t} (Чертеж)" if is_blueprint else t
+    return display, is_blueprint, normalize_name(display)
+
+
+def _is_blueprint_item(key, info):
+    """Похож ли элемент каталога на blueprint-вариант."""
+    if "чертеж" in key or "blueprint" in key:
+        return True
+    return str((info or {}).get("slug") or "").endswith("_blueprint")
+
+
 def word_coverage(query, candidate):
-    """Доля слов запроса, которые нашлись в названии (с учётом опечаток OCR)."""
-    qw = [w for w in query.split() if len(w) > 2]
+    """Доля значимых слов запроса, которые нашлись в названии."""
+    qw = [w for w in query.split() if len(w) > 2
+          and w not in ("чертеж", "blueprint", "чертежи")]
     if not qw:
         return 0.0
     cw = candidate.split()
@@ -442,7 +586,8 @@ def word_coverage(query, candidate):
             r = difflib.SequenceMatcher(None, w, c).ratio()
             if r > best:
                 best = r
-        if best >= 0.8:
+        threshold = 0.9 if len(w) <= 5 else 0.8
+        if best >= threshold:
             hits += 1
     return hits / len(qw)
 
@@ -645,27 +790,54 @@ class MarketAPI:
     # ── поиск предмета ─────────────────────────────────────────────────
     def match(self, ocr_name):
         ocr_name = (ocr_name or "").strip()
-        key = normalize_name(ocr_name)
+        display, is_blueprint, key = normalize_card_name(ocr_name)
         if not key or not self.items:
             return None
-        hit = self.items.get(key)
-        if hit:
-            return dict(hit, score=1.0, query=key)
-        # вариант без «чертеж/blueprint/set» на конце
+        exact_keys = [key]
+        if is_blueprint:
+            if "чертеж" in key:
+                exact_keys.append(key.replace("чертеж", "blueprint"))
+            elif "blueprint" in key:
+                exact_keys.append(key.replace("blueprint", "чертеж"))
+        # запрос из одного служебного «чертеж/blueprint» ничего не значит
+        significant = [w for w in key.split()
+                       if len(w) > 2 and w not in ("чертеж", "blueprint")]
+        if not significant:
+            return None
+        for exact in exact_keys:
+            hit = self.items.get(exact)
+            if hit and (not is_blueprint or _is_blueprint_item(exact, hit)):
+                return dict(hit, score=1.0, query=key)
+        # вариант без «чертеж/blueprint/set» на конце — только для не-blueprint:
+        # для чертежа крафченный предмет не подставляем.
         variants = [key]
-        for suffix in (" blueprint", " set", " prime blueprint", " blueprint set",
-                       " чертеж", " набор"):
-            if key.endswith(suffix):
-                variants.append(key[: -len(suffix)].strip())
+        if not is_blueprint:
+            for suffix in (" blueprint", " set", " prime blueprint",
+                           " blueprint set", " чертеж", " набор"):
+                if key.endswith(suffix):
+                    variants.append(key[: -len(suffix)].strip())
         for v in variants:
             hit = self.items.get(v)
-            if hit:
+            if hit and (not is_blueprint or _is_blueprint_item(v, hit)):
                 return dict(hit, score=0.95, query=key)
+        # без слова «чертёж», но с именем, у которого есть только blueprint
+        # (например «Парис Прайм»): крафченный exact уже проверен выше.
+        if not is_blueprint:
+            for suffix in (" чертеж", " blueprint"):
+                candidate = f"{key}{suffix}"
+                hit = self.items.get(candidate)
+                if hit and _is_blueprint_item(candidate, hit):
+                    return dict(hit, score=0.92, query=key)
         fuzz = None
-        allow_set = ("комплект" in key or "набор" in key
-                     or key.endswith(" set") or " set " in key)
+        allow_set = (not is_blueprint and
+                     ("комплект" in key or "набор" in key
+                      or key.endswith(" set") or " set " in key))
         names = [k for k, v in self.items.items()
-                 if allow_set or not (v.get("slug") or "").endswith("_set")]
+                 if (allow_set or not (v.get("slug") or "").endswith("_set"))
+                 and (_is_blueprint_item(k, v) if is_blueprint
+                      else not _is_blueprint_item(k, v))]
+        if not names:
+            return None
         try:
             from rapidfuzz import fuzz as _fuzz, process
             fuzz = _fuzz
@@ -763,6 +935,10 @@ class MarketAPI:
             out["error"] = "не найден на рынке"
             return out
         out.update({"slug": m["slug"], "market_name": m["name"], "matched": True})
+        try:
+            out["en_name"] = self.en_name_by_slug(m["slug"])
+        except Exception:
+            out["en_name"] = None
         return self._fill_market(out, m["slug"])
 
     def name_by_slug(self, slug):
@@ -774,6 +950,20 @@ class MarketAPI:
         except Exception:
             pass
         return None
+
+    def en_name_by_slug(self, slug):
+        """Английское имя по слагу (для иконок WFCD)."""
+        try:
+            fallback = None
+            for v in (self.items or {}).values():
+                if not isinstance(v, dict) or v.get("slug") != slug:
+                    continue
+                if v.get("lang") == "en":
+                    return v.get("name")
+                fallback = fallback or v.get("name")
+            return fallback
+        except Exception:
+            return None
 
     def lookup_slug(self, slug, name=None):
         """То же, что lookup(), но по готовому slug.
@@ -858,7 +1048,7 @@ def prepare_ocr(img, variant="soft"):
     """Готовит картинку к распознаванию. Возвращает (картинка, коэффициент).
 
     soft     — лёгкий апскейл + шарпинг (лучше всего на реальных кадрах);
-    contrast — CLAHE + 3x (страховка для тёмных/шумных кадров).
+    contrast — CLAHE + 2x (страховка для тёмных/шумных кадров).
     """
     import cv2
     import numpy as np
@@ -868,9 +1058,9 @@ def prepare_ocr(img, variant="soft"):
     gray = _to_gray(img)
     if variant == "contrast":
         gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
-        scale = 3.0
-    else:
         scale = 2.0
+    else:
+        scale = 0.8
     up = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     return cv2.filter2D(up, -1, _SHARPEN), scale
 
@@ -883,24 +1073,44 @@ class OcrEngine:
         if not use_gpu:
             try:
                 import torch
-                torch.set_num_threads(max(1, min(os.cpu_count() or 4, 8)))
+                torch.set_num_threads(max(1, min(os.cpu_count() or 4, 6)))
+                try:
+                    torch.set_num_interop_threads(1)
+                except Exception:
+                    pass
             except Exception:
                 pass
         self.reader = easyocr.Reader(
             list(cfg.get("ocr_languages") or ["ru", "en"]),
             gpu=use_gpu, model_storage_directory=models_dir())
         log(f"EasyOCR готов за {time.time()-t:.1f} с")
+        self._warm_done = False
+
+    def _warm(self):
+        if self._warm_done:
+            return
         try:
             import numpy as np
             warm = np.zeros((40, 160, 3), dtype=np.uint8)
-            self.reader.readtext(warm, paragraph=False, canvas_size=400, mag_ratio=1.0)
+            self.reader.readtext(warm, paragraph=False, canvas_size=400,
+                                 mag_ratio=1.0)
         except Exception:
             pass
+        self._warm_done = True
+
+    def warmup_async(self):
+        """dummy-OCR в отдельном потоке, чтобы не задерживать старт UI."""
+        if self._warm_done:
+            return False
+        threading.Thread(target=self._warm, daemon=True,
+                         name="wf-ocr-warmup").start()
+        return True
 
     def read_proc(self, proc):
         try:
             return self.reader.readtext(proc, paragraph=False, mag_ratio=1.0,
-                                        canvas_size=1600, width_ths=0.7)
+                                        canvas_size=1280, width_ths=0.7,
+                                        decoder="greedy")
         except Exception as e:
             log(f"  OCR ошибка: {e}")
             return []
@@ -1072,6 +1282,9 @@ def _cards_from_words(words, cfg):
         name = join_words(groups.get(i, []))
         if not name:
             continue
+        name, _bp, _key = normalize_card_name(name)
+        if not name:
+            continue
         cards.append({"left": float(lefts[i]),
                       "top": float(cfg["card_top"]),
                       "name": name})
@@ -1080,7 +1293,7 @@ def _cards_from_words(words, cfg):
     return cards, note
 
 
-def detect_cards(base_img, cfg, ocr, debug=False, matcher=None):
+def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
     """
     Возвращает список карточек [{'left', 'top', 'name'}] для 1–4 наград.
 
@@ -1098,6 +1311,16 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None):
     crop = base_img[y0:y1, x0:x1]
     if crop.size == 0:
         return []
+    cache_key = ""
+    if cache is not None:
+        try:
+            cache_key = cache.image_key(crop)
+            cached = cache.ocr_get(cache_key)
+            if cached is not None:
+                log("  OCR: кэш того же экрана")
+                return [dict(card) for card in cached]
+        except Exception:
+            cache_key = ""
 
     name_top = cfg["card_top"] + cfg["name_offset_y"]
     name_bot = name_top + cfg["name_height"]
@@ -1139,9 +1362,109 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None):
         log(note)
     if not cards:
         return []
+    if cache is not None and cache_key:
+        try:
+            cache.ocr_set(cache_key, [dict(card) for card in cards])
+        except Exception:
+            pass
     if matcher:
         log(f"  OCR: {variant}, совпало {rank[0]}/{len(cards)}")
     return cards
+
+
+def read_owned_batch(full_img, sx, sy, cards, cfg, ocr, cache=None):
+    """Читает метки Crafted/N Owned всех карточек одним вызовом EasyOCR."""
+    import cv2
+    import numpy as np
+    if not cards:
+        return []
+    strips, segments = [], [None] * len(cards)
+    width = 0
+    for card in cards:
+        x0 = max(0, int(round(card["left"] * sx)) - 2)
+        x1 = min(full_img.shape[1],
+                 int(round((card["left"] + cfg["card_width"]) * sx)))
+        y0 = max(0, int(round(card["top"] * sy)))
+        y1 = min(full_img.shape[0],
+                 int(round((card["top"] + cfg.get("owned_strip_height", 40))
+                           * sy)))
+        if x1 - x0 < 20 or y1 - y0 < 10:
+            strips.append(None)
+            continue
+        crop = full_img[y0:y1, x0:x1]
+        if crop.ndim == 3 and crop.shape[2] == 4:
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGRA2GRAY)
+        elif crop.ndim == 3:
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = crop
+        strip = cv2.resize(gray, None, fx=1.25, fy=1.25,
+                           interpolation=cv2.INTER_CUBIC)
+        strips.append(strip)
+        width = max(width, strip.shape[1])
+    gap = 12
+    height = sum(s.shape[0] + gap for s in strips if s is not None)
+    if width <= 0 or height <= 0:
+        return [(None, None, None) for _ in cards]
+    canvas = np.zeros((height, width), dtype=np.uint8)
+    y = 0
+    for idx, strip in enumerate(strips):
+        if strip is None:
+            segments[idx] = None
+            continue
+        canvas[y:y + strip.shape[0], :strip.shape[1]] = strip
+        segments[idx] = (y, y + strip.shape[0])
+        y += strip.shape[0] + gap
+    key = ""
+    if cache is not None:
+        try:
+            key = cache.image_key(canvas)
+            cached = cache.ocr_get(key)
+            if cached is not None:
+                return [tuple(item) for item in cached]
+        except Exception:
+            key = ""
+    try:
+        res = ocr.reader.readtext(canvas, paragraph=False, mag_ratio=1.0,
+                                  canvas_size=1280, decoder="greedy")
+    except Exception as exc:
+        log(f"  OCR меток: батч не удался ({type(exc).__name__}), поштучно")
+        return [read_owned(full_img, sx, sy, card, cfg, ocr)
+                for card in cards]
+    parts = [[] for _ in cards]
+    for item in res:
+        try:
+            if len(item) >= 3:
+                bbox, text, conf = item[0], item[1], item[2]
+            else:
+                bbox, text, conf = None, item[1], item[2] if len(item) > 2 else 1
+            if conf is not None and float(conf) <= 0.25:
+                continue
+            if bbox:
+                ys = [float(point[1]) for point in bbox]
+                cy = (min(ys) + max(ys)) / 2.0
+            else:
+                # упрощённый фейк: делим результаты поровну по карточкам
+                cy = (len(parts) and
+                      (parts.index([]) if [] in parts else 0) *
+                      (height / max(1, len(cards)))) or 0
+        except Exception:
+            continue
+        for idx, segment in enumerate(segments):
+            if segment is not None and segment[0] <= cy <= segment[1]:
+                parts[idx].append(str(text))
+                break
+    out = []
+    for idx, values in enumerate(parts):
+        text = " ".join(values).strip().upper()
+        n, kind = parse_owned_label(text)
+        out.append((n, kind, text))
+    if cache is not None and key:
+        try:
+            cache.ocr_set(key, [tuple(item) for item in out])
+        except Exception:
+            pass
+    return out
 
 
 def read_owned(full_img, sx, sy, card, cfg, ocr):
@@ -1231,14 +1554,35 @@ def build_overlays():
             self.lbl_name = QLabel("")
             self.lbl_name.setStyleSheet("color:#cfd8e6; font-size:11px; font-weight:600;")
             self.lbl_name.setMaximumHeight(15)
+            self._last_data = None
+            self._icon_key = ""
+            self._icon_provider = item_icons_provider(cfg)
+            self.icon_label = QLabel()
+            self.icon_label.setFixedSize(32, 32)
+            self.icon_label.setStyleSheet("background: transparent;")
+            self.icon_label.setToolTip("Иконка предмета")
+            self.icon_badge = QLabel("Ч", self.icon_label)
+            self.icon_badge.setFixedSize(12, 12)
+            self.icon_badge.setAlignment(Qt.AlignCenter)
+            self.icon_badge.setStyleSheet(
+                "background:#f5c451; color:#17212e; font-size:8px;"
+                " font-weight:700; border-radius:2px;")
+            self.icon_badge.move(20, 0)
+            self.icon_badge.setVisible(False)
+            self._set_placeholder_icon()
 
             mid = QHBoxLayout()
             mid.setContentsMargins(0, 0, 0, 0)
             mid.setSpacing(6)
             self.lbl_price = QLabel("…")
-            self.lbl_price.setStyleSheet("font-size:25px; font-weight:700;")
+            self.lbl_price.setStyleSheet(
+                f"font-size:25px; font-weight:700; color:{theme.currency_platinum()};")
+            self.lbl_price.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_ducats = QLabel("")
-            self.lbl_ducats.setStyleSheet("color:#ffb35c; font-size:15px; font-weight:600;")
+            self.lbl_ducats.setStyleSheet(
+                f"color:{theme.currency_ducats()}; font-size:15px; "
+                "font-weight:600;")
+            self.lbl_ducats.setToolTip(theme.currency_tooltip("ducats"))
             self.lbl_ducats.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             mid.addWidget(self.lbl_price)
             mid.addStretch(1)
@@ -1256,15 +1600,110 @@ def build_overlays():
             bot.addStretch(1)
             bot.addWidget(self.lbl_sold)
 
-            lay.addWidget(self.lbl_name)
+            top = QHBoxLayout()
+            top.setContentsMargins(0, 0, 0, 0)
+            top.setSpacing(6)
+            top.addWidget(self.icon_label)
+            top.addWidget(self.lbl_name, 1)
+            lay.addLayout(top)
             lay.addLayout(mid)
             lay.addLayout(bot)
 
             outer.addWidget(self.frame)
             fs = float(cfg.get("font_scale", 1.0))
             self.setFixedSize(int(240 * fs), int(96 * fs))
+            try:
+                theme.on_currency_change(
+                    lambda _p, _d: self._on_currency_changed())
+            except Exception:
+                pass
+
+        def _on_currency_changed(self):
+            try:
+                self.lbl_price.setStyleSheet(
+                    f"font-size:25px; font-weight:700; "
+                    f"color:{theme.currency_platinum()};")
+                self.lbl_ducats.setStyleSheet(
+                    f"color:{theme.currency_ducats()}; font-size:15px; "
+                    "font-weight:600;")
+                self.lbl_price.setToolTip(theme.currency_tooltip("platinum"))
+                self.lbl_ducats.setToolTip(theme.currency_tooltip("ducats"))
+                if self._last_data:
+                    self.set_data(self._last_data)
+            except Exception:
+                pass
+
+        def _set_placeholder_icon(self):
+            provider = self._icon_provider
+            pix = provider.placeholder(32) if provider is not None else None
+            if pix is not None:
+                self.icon_label.setPixmap(pix)
+            enabled = bool(self.cfg.get("show_item_icons", True))
+            self.icon_label.setVisible(enabled)
+            self.icon_badge.setVisible(False)
+
+        def _request_icon(self, data):
+            provider = self._icon_provider
+            enabled = bool(self.cfg.get("show_item_icons", True))
+            if provider is None or not enabled:
+                self.icon_label.setVisible(False)
+                self.icon_badge.setVisible(False)
+                return
+            name = (data.get("en_name") or data.get("market_name")
+                    or data.get("name") or "")
+            slug = str(data.get("slug") or "")
+            game_ref = str(data.get("gameRef") or "")
+            image = provider.resolve(name=name, slug=slug,
+                                     en_name=data.get("en_name") or "",
+                                     game_ref=game_ref)
+            blueprint = False
+            try:
+                blueprint = bool(item_icons_module().is_blueprint(
+                    name, slug))
+            except Exception:
+                blueprint = False
+            self.icon_label.setVisible(True)
+            self.icon_badge.setVisible(blueprint)
+            self.icon_badge.raise_()
+            key = slug or name or (image or "unknown")
+            self._icon_key = key
+            if not image:
+                pix = provider.placeholder(32)
+                if pix is not None:
+                    self.icon_label.setPixmap(pix)
+                self.icon_badge.setVisible(blueprint)
+                return
+            self._set_placeholder_icon()
+            self.icon_label.setVisible(True)
+            self.icon_badge.setVisible(blueprint)
+            self.icon_badge.raise_()
+
+            def done(done_key, pixmap):
+                if done_key != self._icon_key:
+                    return
+                try:
+                    if pixmap is not None and not pixmap.isNull():
+                        self.icon_label.setPixmap(
+                            pixmap.scaled(32, 32, Qt.KeepAspectRatio,
+                                          Qt.SmoothTransformation))
+                except Exception:
+                    pass
+
+            try:
+                provider.request(key, image, callback=done, size=32)
+            except Exception:
+                pass
+
+        def apply_icon_setting(self):
+            enabled = bool(self.cfg.get("show_item_icons", True))
+            if not enabled:
+                self.icon_label.setVisible(False)
+                self.icon_badge.setVisible(False)
+            elif self._last_data:
+                self._request_icon(self._last_data)
 
         def set_data(self, d):
+            self._last_data = dict(d) if d else None
             if not d:
                 self.hide()
                 return
@@ -1275,6 +1714,10 @@ def build_overlays():
             if len(name) > 34:
                 name = name[:33] + "…"
             self.lbl_name.setText(name)
+            try:
+                self._request_icon(d)
+            except Exception:
+                self._set_placeholder_icon()
 
             owned_txt = d.get("owned") or ""
             self.lbl_owned.setVisible(bool(owned_txt))
@@ -1285,22 +1728,27 @@ def build_overlays():
                 f"color:{color}; font-size:10px; font-weight:600;")
 
             price = d.get("price")
+            platinum = theme.currency_platinum()
+            ducats = theme.currency_ducats()
             if d.get("pending"):
-                self.lbl_price.setText("<span style='color:#8fa1b8;'>…</span>")
+                self.lbl_price.setText(
+                    f"<span style='color:{theme.rgba(platinum, 0.70)};'>…</span>")
                 self.lbl_ducats.setText("")
                 self.lbl_sold.setText("<span style='color:#6f7b8c;'>запрашиваю</span>")
             elif isinstance(price, (int, float)) and price:
                 tilde = "~" if d.get("sell_offline") else ""
                 self.lbl_price.setText(
-                    f"<span style='color:{price_color(price)};'>{tilde}{int(price)}</span>"
-                    f"<span style='color:#7b8798; font-size:13px;'> p</span>")
+                    f"<span style='color:{platinum};'>{tilde}{int(price)}</span>"
+                    f"<span style='color:{theme.rgba(platinum, 0.72)}; "
+                    f"font-size:13px;'> p</span>")
                 du = d.get("ducats")
-                self.lbl_ducats.setText(f"◆ {du}" if du else "")
+                self.lbl_ducats.setText(f"◆ {int(du)} дк" if du else "")
                 online = d.get("sell_online", 0)
                 self.lbl_sold.setText(f"{online} онлайн" if online else "нет онлайн")
             elif d.get("matched"):
                 self.lbl_price.setText("<span style='color:#6c7789; font-size:15px;'>нет ордеров</span>")
-                self.lbl_ducats.setText(f"◆ {d['ducats']}" if d.get("ducats") else "")
+                self.lbl_ducats.setText(
+                    f"◆ {int(d['ducats'])} дк" if d.get("ducats") else "")
                 self.lbl_sold.setText("")
             else:
                 self.lbl_price.setText("<span style='color:#6c7789; font-size:15px;'>нет на рынке</span>")
@@ -1330,7 +1778,10 @@ def build_overlays():
             lay.setContentsMargins(14, 8, 14, 8)
             lay.setSpacing(1)
             self.lbl_total = QLabel("Итого: …")
-            self.lbl_total.setStyleSheet("font-size:21px; font-weight:700; color:#ffd75e;")
+            self.lbl_total.setStyleSheet(
+                f"font-size:21px; font-weight:700; "
+                f"color:{theme.currency_platinum()};")
+            self.lbl_total.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_best = QLabel(" ")
             self.lbl_best.setStyleSheet("font-size:11px; color:#9fb0c4;")
             lay.addWidget(self.lbl_total)
@@ -1338,8 +1789,26 @@ def build_overlays():
             outer.addWidget(f)
             fs = float(cfg.get("font_scale", 1.0))
             self.setFixedSize(int(380 * fs), int(66 * fs))
+            self._last_summary = None
+            try:
+                theme.on_currency_change(
+                    lambda _p, _d: self._on_currency_changed())
+            except Exception:
+                pass
+
+        def _on_currency_changed(self):
+            try:
+                self.lbl_total.setStyleSheet(
+                    f"font-size:21px; font-weight:700; "
+                    f"color:{theme.currency_platinum()};")
+                if self._last_summary is not None:
+                    data, final = self._last_summary
+                    self.set_summary(data, final=final)
+            except Exception:
+                pass
 
         def set_summary(self, data, final=False):
+            self._last_summary = ([dict(d) for d in (data or [])], bool(final))
             total, best = 0, None
             for d in data or []:
                 if not d:
@@ -1352,7 +1821,8 @@ def build_overlays():
             if final:
                 if total > 0:
                     self.lbl_total.setText(
-                        f"<span style='color:#ffd75e;'>Итого: {int(total)}p</span>")
+                        f"<span style='color:{theme.currency_platinum()};'>"
+                        f"Итого: {int(total)}p</span>")
                     self.lbl_best.setText(f"дороже всех: {best[1][:40]} ({int(best[0])}p)"
                                           if best else " ")
                     self.show()
@@ -1438,7 +1908,9 @@ def build_overlays():
 
             self.lbl_total = QLabel("Итого выбрано: 0p")
             self.lbl_total.setStyleSheet(
-                f"color:{theme.PALETTE['ducats']}; font-size:12px; font-weight:700;")
+                f"color:{theme.currency_platinum()}; font-size:12px; "
+                "font-weight:700;")
+            self.lbl_total.setToolTip(theme.currency_tooltip("platinum"))
             lay.addLayout(head)
             lay.addLayout(self.rows_box)
             if self.embedded:
@@ -1489,7 +1961,7 @@ def build_overlays():
             price = it.get("price")
             p = f"{int(price)}p" if isinstance(price, (int, float)) and price else "—"
             du = it.get("ducats")
-            tail = f"  ◆{du}" if du else ""
+            tail = f"  ◆{int(du)} дк" if du else ""
             return f"{name} — {p}{tail}"
 
         def _clear_rows(self):
@@ -3844,7 +4316,7 @@ def save_selected_list(cfg, items):
             if isinstance(price, (int, float)) and price:
                 total += price
             du = it.get("ducats")
-            tail = f"  ◆ {du}" if du else ""
+            tail = f"  ◆ {du} дк" if du else ""
             lines.append(f"{i}. {name} — {fmt_plat(price)}{tail}")
         lines.append("")
         lines.append(f"Итого: {int(total)}p")
@@ -4038,6 +4510,7 @@ _CHAT_CLIENT_MODULE = {"mod": None, "tried": False}
 _MARKET_STATUS_MODULE = {"mod": None, "tried": False}
 _BROWSER_TOKEN_MODULE = {"mod": None, "tried": False}
 _UPDATE_WATCHER_MODULE = {"mod": None, "tried": False}
+_ITEM_ICONS_MODULE = {"mod": None, "tried": False}
 
 #: Страховка, если login_mode.py нет рядом (старая сборка): флаг всё равно
 #: нужен guard-ам окон/хоткеев, чтобы не всплывать во время входа.
@@ -4212,6 +4685,25 @@ def update_watcher_module():
                               _UPDATE_WATCHER_MODULE)
 
 
+def item_icons_module():
+    """Иконки WFCD (item_icons.py); модуль опционален."""
+    return _load_local_module("item_icons.py", "item_icons",
+                              _ITEM_ICONS_MODULE)
+
+
+def item_icons_provider(cfg=None):
+    """Провайдер иконок с DATA_DIR и настройкой show_item_icons."""
+    mod = item_icons_module()
+    if mod is None:
+        return None
+    cfg = cfg or {}
+    try:
+        return mod.get_provider(
+            DATA_DIR, enabled=bool(cfg.get("show_item_icons", True)))
+    except Exception:
+        return None
+
+
 def login_in_progress():
     """Идёт ли сейчас вход на warframe.market (браузер пользователя)?"""
     mod = login_mode_module()
@@ -4301,7 +4793,9 @@ class _FallbackTheme:
         "window": "#0d131c", "panel": "#121a25", "card": "#17212e",
         "border": "#24344a", "text": "#e6edf6", "muted": "#93a1b5",
         "accent": "#4aa8ff", "success": "#43d17c", "warning": "#f5c451",
-        "danger": "#ff6b6b", "platinum": "#8fd0ff", "ducats": "#ffd75e",
+        "danger": "#ff6b6b", "platinum": "#E7F1FF", "ducats": "#C9A66B",
+        "currency_platinum": "#E7F1FF", "currency_ducats": "#C9A66B",
+        "currency_credits": "#9BC7A8",
         "hover": "#1e2a3a", "scroll": "#2a3a4e",
         "zebra": "rgba(255,255,255,0.03)", "grid": "#1f2b3a",
         "area": "rgba(74,168,255,0.18)",
@@ -4408,6 +4902,19 @@ class _FallbackTheme:
     @classmethod
     def price_qss(cls, color=None):
         return f"color:{color or cls.PALETTE['platinum']}; font-size:13px; font-weight:700;"
+
+    @classmethod
+    def currency_qss(cls, kind="platinum", px=None):
+        color = (cls.PALETTE.get("currency_ducats")
+                 if str(kind) == "ducats" else
+                 cls.PALETTE.get("currency_platinum"))
+        size = f" font-size:{int(px)}px;" if px else ""
+        return f"color:{color};{size} font-weight:700; background: transparent;"
+
+    @staticmethod
+    def currency_tooltip(kind="platinum"):
+        return ("Дукаты (warframe.market)" if str(kind) == "ducats"
+                else "Платина (warframe.market)")
 
 
 def ui_theme():
@@ -4787,6 +5294,12 @@ class Scanner:
         self.generation = 0
         self.watcher = None      # авто-режим: учит шаблон экрана
         self.last_results = None
+        try:
+            import scan_cache
+            self.cache = scan_cache.ScanCache(
+                price_ttl=float(cfg.get("scan_price_ttl", 600) or 600))
+        except Exception:
+            self.cache = None
 
     def request_scan(self):
         with self._lock:
@@ -4800,6 +5313,8 @@ class Scanner:
 
     def _run(self, gen):
         t0 = time.time()
+        perf = {"capture": 0.0, "ocr": 0.0, "match": 0.0,
+                "prices": 0.0, "render": 0.0}
         log("\n" + "─" * 60)
         log(f"Скан {datetime.datetime.now().strftime('%H:%M:%S')}")
         try:
@@ -4807,11 +5322,25 @@ class Scanner:
             attempts = max(1, int(self.cfg.get("scan_retries", 2)) + 1)
             delay = max(0, int(self.cfg.get("scan_retry_delay_ms", 350))) / 1000.0
             self.api.load_items()
-            matcher = lambda n: (self.api.match(n) or {}).get("score", 0.0)  # noqa: E731
+
+            def matcher(name):
+                cached = self.cache.match_get(name) if self.cache else None
+                if cached is not None:
+                    return cached
+                started = time.time()
+                score = (self.api.match(name) or {}).get("score", 0.0)
+                perf["match"] += time.time() - started
+                if self.cache:
+                    self.cache.match_set(name, score)
+                return score
+
             cards = []
+            owned = []
             for attempt in range(attempts):
+                started = time.time()
                 full, mon = grab(self.cfg)
                 base = to_base(full, self.cfg)
+                perf["capture"] += time.time() - started
                 sx = mon["width"] / float(self.cfg["base_width"])
                 sy = mon["height"] / float(self.cfg["base_height"])
                 if self.cfg.get("show_debug"):
@@ -4820,56 +5349,97 @@ class Scanner:
                                                      "last_screen.png"), base)
                     except Exception:
                         pass
+                started = time.time()
                 cards = detect_cards(base, self.cfg, self.ocr,
                                      debug=self.cfg.get("show_debug"),
-                                     matcher=matcher)
+                                     matcher=matcher, cache=self.cache)
+                perf["ocr"] += time.time() - started
                 if cards or attempt == attempts - 1:
                     break
                 log(f"  Карточек не видно — переснимаю через {int(delay * 1000)} мс")
                 time.sleep(delay)
 
-            # ── фаза 1: имена сразу ────────────────────────────────────
+            # ── фаза 1: имена сразу (метки Owned читаем позже) ─────────
             preliminary = []
-            for c in cards:
-                n, kind, _raw = read_owned(full, sx, sy, c, self.cfg, self.ocr)
-                if kind == "CRAFTED":
-                    label = "ИЗГОТОВЛЕНО"
-                elif n:
-                    label = f"{n} В НАЛИЧИИ"
-                else:
-                    label = ""
+            for idx, c in enumerate(cards):
+                n, kind, _raw = (None, None, "")
+                label = ""
                 log(f"  · {c['name']!r}   {label or '—'}")
                 preliminary.append({
-                    "name": c["name"], "owned": label, "owned_n": n or 0,
+                    "name": c["name"], "owned": label, "owned_n": 0,
                     "owned_kind": kind, "card_left": c["left"],
                     "price": None, "pending": True,
                     "matched": False, "sell_online": 0, "best_sell": None,
                     "best_buy": None, "ducats": None, "error": None,
                 })
             if gen == self.generation:
+                started = time.time()
                 self.mgr.updated.emit(preliminary)
+                perf["render"] += time.time() - started
             if not preliminary:
                 log("  Предметы не найдены — проверьте координаты (--calibrate)")
                 self.mgr.updated.emit([])
                 return
 
-            # ── фаза 2: цены параллельно ──────────────────────────────
+            # метки Crafted / N Owned — батчем после ранних плашек
+            started = time.time()
+            try:
+                owned = read_owned_batch(
+                    full, sx, sy, cards, self.cfg, self.ocr,
+                    cache=self.cache)
+            except Exception as exc:
+                log(f"  OCR меток: батч не удался "
+                    f"({type(exc).__name__}), поштучно")
+                owned = [read_owned(full, sx, sy, card, self.cfg, self.ocr)
+                         for card in cards]
+            perf["ocr"] += time.time() - started
+            for idx, c in enumerate(preliminary):
+                n, kind, _raw = (owned[idx] if idx < len(owned)
+                                 else (None, None, ""))
+                if kind == "CRAFTED":
+                    label = "ИЗГОТОВЛЕНО"
+                elif n:
+                    label = f"{n} В НАЛИЧИИ"
+                else:
+                    label = ""
+                c["owned"] = label
+                c["owned_n"] = n or 0
+                c["owned_kind"] = kind
+
+            # ── фаза 2: цены параллельно, дубликаты объединяем ────────
             results = [None] * len(preliminary)
+            unique = {}
+            for idx, p in enumerate(preliminary):
+                unique.setdefault(p["name"], []).append(idx)
+            pending = {}
+            for name, indexes in unique.items():
+                cached = self.cache.price_get(name) if self.cache else None
+                if cached is not None:
+                    for idx in indexes:
+                        results[idx] = dict(cached)
+                else:
+                    pending[name] = indexes
             t_api = time.time()
-            workers = max(1, min(int(self.cfg.get("workers", 8)), 8))
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                futs = {ex.submit(self.api.lookup, p["name"]): i
-                        for i, p in enumerate(preliminary)}
-                for fut in as_completed(futs):
-                    i = futs[fut]
-                    try:
-                        results[i] = fut.result()
-                    except Exception as e:
-                        log(f"  API: {preliminary[i]['name']}: {e}")
-                        results[i] = {"name": preliminary[i]["name"],
-                                      "price": None, "matched": False,
-                                      "error": "ошибка сети"}
-            log(f"  API: {time.time() - t_api:.1f} с")
+            workers = max(1, min(int(self.cfg.get("workers", 6)), 6))
+            if pending:
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futs = {ex.submit(self.api.lookup, name): name
+                            for name in pending}
+                    for fut in as_completed(futs):
+                        name = futs[fut]
+                        try:
+                            value = fut.result()
+                        except Exception as exc:
+                            log(f"  API: {name}: {exc}")
+                            value = {"name": name, "price": None,
+                                     "matched": False,
+                                     "error": "ошибка сети"}
+                        if self.cache:
+                            self.cache.price_set(name, value)
+                        for idx in pending[name]:
+                            results[idx] = dict(value)
+            perf["prices"] = time.time() - t_api
+            log(f"  API: {perf['prices']:.1f} с")
 
             final = []
             for p, r in zip(preliminary, results):
@@ -4885,7 +5455,9 @@ class Scanner:
             if gen != self.generation:
                 return
 
+            started = time.time()
             self.mgr.updated.emit(final)
+            perf["render"] += time.time() - started
             self._write_report(final)
             self._maybe_beep(final)
             if self.watcher is not None:
@@ -4894,10 +5466,16 @@ class Scanner:
             # здесь только запоминаем награды этой реликвии для меню
             self.last_results = final
             append_relic_block(self.cfg, final)
+            ocr_ms = max(0.0, perf["ocr"] - perf["match"]) * 1000
+            log("scan: capture={:.0f} ocr={:.0f} match={:.0f} "
+                "prices={:.0f} total={:.0f}".format(
+                    perf["capture"] * 1000, ocr_ms,
+                    perf["match"] * 1000, perf["prices"] * 1000,
+                    (time.time() - t0) * 1000))
             log(f"  Готово за {time.time() - t0:.1f} с")
         except Exception as e:
             log(f"ОШИБКА СКАНА: {type(e).__name__}: {e}")
-            traceback.print_exc()
+            log_exception("Скан: подробности")
         finally:
             with self._lock:
                 self.busy = False
@@ -4947,6 +5525,11 @@ def make_geometry(cfg):
 
 
 def run_gui(cfg):
+    # 0.6.4: цвета валют из config до создания плашек/панелей
+    try:
+        ui_theme().configure_currency_colors(cfg)
+    except Exception:
+        pass
     # Режим входа (login_mode.py) грузим первым: его общий флаг читают guard-ы
     # окон/хоткеев/плашек, а overlay_window.py и market_browser_login.py
     # импортируют его по имени (в сборке — через hiddenimports).
@@ -4954,6 +5537,16 @@ def run_gui(cfg):
     # ВАЖНО: EasyOCR/torch грузим ДО PyQt5. Если Qt инициализируется первым,
     # на Windows torch может не суметь загрузить c10.dll (WinError 1114).
     ocr = OcrEngine(cfg)
+    try:
+        ocr.warmup_async()
+    except Exception:
+        pass
+    try:
+        provider = item_icons_provider(cfg)
+        if provider is not None:
+            provider.refresh_index_async()
+    except Exception:
+        pass
     _, _, Manager, Qt = build_overlays()
     from PyQt5.QtCore import QObject, pyqtSignal
     from PyQt5.QtWidgets import QApplication
@@ -5522,6 +6115,18 @@ def run_gui(cfg):
             log(f"Трей: не удалось открыть окно ({type(e).__name__}: {e})")
 
     def _tray_stop():
+        for service, kwargs in ((chat_service, {}),
+                                (status_service, {"restore": False}),
+                                (events_ctl, {}),
+                                (auto_update_watcher, {})):
+            if service is None:
+                continue
+            try:
+                stop = getattr(service, "stop", None)
+                if callable(stop):
+                    stop(**kwargs)
+            except Exception:
+                pass
         if notify_poller is not None:
             try:
                 notify_poller.stop()
@@ -5973,6 +6578,27 @@ def run_gui(cfg):
 
     def _settings_side_effects(settings_cfg, _values):
         """Применить настройки к уже работающему приложению (без перезапуска)."""
+        # цвета валют: глобальная палитра + слушатели плашек/панелей
+        try:
+            ui_theme().set_currency_colors(
+                settings_cfg.get("currency_platinum_color"),
+                settings_cfg.get("currency_ducats_color"))
+        except Exception as e:
+            log(f"Настройки: цвета валют не применены "
+                f"({type(e).__name__}: {e})")
+        # иконки предметов: включение/выключение без перезапуска
+        try:
+            provider = item_icons_provider(settings_cfg)
+            if provider is not None:
+                provider.enabled = bool(settings_cfg.get("show_item_icons",
+                                                         True))
+            for card in list(getattr(manager, "cards", []) or []):
+                apply_icon = getattr(card, "apply_icon_setting", None)
+                if callable(apply_icon):
+                    apply_icon()
+        except Exception as e:
+            log(f"Настройки: иконки не переключены "
+                f"({type(e).__name__}: {e})")
         # уведомления: фоновый опрос включается/выключается на лету
         if notify_poller is not None and notify_tray is not None:
             try:
@@ -6343,32 +6969,47 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    raw = list(sys.argv[1:] if argv is None else argv)
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        stream = getattr(sys, "stdout", None)
+        if stream is not None:
+            stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    args = parse_args(argv)
-    enable_dpi_awareness()
-    cfg = load_config(args.config or CONFIG_PATH)
-    ensure_dirs(cfg)
-    if args.calibrate:
-        return run_calibrate(cfg)
-    if args.selftest:
-        return run_selftest(cfg, args.selftest)
-    if args.test_api:
-        return run_test_api(cfg, args.test_api)
     try:
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+        except Exception:
+            pass
+        log(startup_line())
+        if "--version" in raw:
+            line = f"WarframePriceOverlay {APP_VERSION}"
+            log(line)
+            try:
+                if getattr(sys, "stdout", None) is not None:
+                    print(line, flush=True)
+            except Exception:
+                pass
+            return 0
+        args = parse_args(raw)
+        enable_dpi_awareness()
+        cfg = load_config(args.config or CONFIG_PATH)
+        ensure_dirs(cfg)
+        if args.calibrate:
+            return run_calibrate(cfg)
+        if args.selftest:
+            return run_selftest(cfg, args.selftest)
+        if args.test_api:
+            return run_test_api(cfg, args.test_api)
         run_gui(cfg)
         return 0
-    except Exception:
-        traceback.print_exc()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log_exception(f"Ошибка запуска: {type(exc).__name__}: {exc}")
+        show_startup_error(exc)
         return 1
 
 
 if __name__ == "__main__":
-    code = main()
-    if code:
-        try:
-            input("\n[ПРОЦЕСС ЗАВЕРШЕН] Enter, чтобы закрыть окно...")
-        except Exception:
-            pass
+    sys.exit(main())
