@@ -737,7 +737,7 @@ def raise_process_window(pid, attempts=15, interval=0.4, sleep=None):
 
 def _default_http_json(url, timeout=2.0):
     request = urllib.request.Request(
-        url, headers={"User-Agent": "WarframePriceOverlay/1.0"})
+        url, headers={"User-Agent": "VoidFrameRU/1.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = response.read().decode("utf-8", "replace")
     return json.loads(data)
