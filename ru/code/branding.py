@@ -19,7 +19,7 @@ import sys
 APP_NAME = "VoidFrameRU"
 
 #: Версия релиза. Должна совпадать с ``warframe.APP_VERSION``.
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 #: Ассеты, которые обязаны попасть в сборку (prepare_build_ru/spec).
 BRAND_ASSETS = ("icon.ico", "tray.png", "tray@2x.png", "logo_256.png",
