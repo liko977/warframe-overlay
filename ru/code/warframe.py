@@ -75,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -1933,6 +1933,15 @@ def _cards_from_words(words, cfg, frames_found=None):
         name = join_words(groups.get(i, []))
         corrected = False
         if name:
+            try:
+                import card_text
+                name = card_text.clean_card_name(
+                    name, cfg.get("known_nicks") or ())
+                if not card_text.is_valid_card_text(name):
+                    name = ""
+            except Exception:
+                pass
+        if name:
             # 1.0.0: автокоррекция OCR по словарю ДО матчинга
             name, corrected = _ocr_fix_name(name, cfg)
             name, _bp, _key = normalize_card_name(name)
@@ -2125,6 +2134,10 @@ def init_scan_calibration(cfg, geom=None):
     geometry = mod.scan_geometry(cfg, width, height)
     mod.apply_geometry(cfg, geometry)
     log(mod.preset_log_line(geometry))
+    try:
+        log(mod.application_line(cfg, geometry))
+    except Exception:
+        pass
     if cfg.get("scan_calibration"):
         log("Калибровка: старая scan_calibration игнорируется (t78)")
     cfg["_scan_preset_logged"] = pid
@@ -2354,6 +2367,12 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
     # точечный повтор только для нераспознанных карточек
     retry_unrecognized_cards(base_img, cards, cfg_eff, ocr)
     if matcher:
+        # t85: имя валидно только при совпадении с каталогом
+        for card in cards:
+            n = str(card.get("name") or "")
+            if n and (matcher(n) or 0.0) < 0.60:
+                card["name"] = ""
+                card["unrecognized"] = True
         matched_now = sum(1 for c in cards if c.get("name")
                           and (matcher(c["name"]) or 0.0) >= 0.80)
     else:
@@ -7241,6 +7260,17 @@ class Scanner:
                     self._preset_warned = preset_id
                     log(f"Раскладка: распознано {named}/{len(preliminary)} "
                         "— попробуйте другой пресет")
+            named = sum(1 for d in preliminary if d.get("name"))
+            if named == 0:
+                preset = str(self.cfg.get("scan_preset") or "auto")
+                log("Награды не найдены — плашки скрыты "
+                    f"(распознано 0/{len(preliminary)}, "
+                    f"раскладка: {preset})")
+                try:
+                    self.mgr.hide_all()
+                except Exception:
+                    pass
+                return
             if gen == self.generation:
                 started = time.time()
                 self._plates_ms = (time.time() - t0) * 1000
