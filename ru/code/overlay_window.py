@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Единое окно «Warframe Overlay» с вкладками (стиль AlecaFrame).
+"""Единое окно «VoidFrameRU» с вкладками (стиль AlecaFrame).
 
 Одна кнопка (F8) открывает одно окно; внутри — вкладки «Маркет»,
 «Мои ордера», «События», «Дроп», «Чат». Редактор «Выбрано»
@@ -49,6 +49,21 @@ except Exception:         # pragma: no cover - без него прячем то
     login_mode = None
 
 import ui_theme as theme
+try:
+    import branding
+except Exception:                       # pragma: no cover — старая сборка
+    branding = None
+
+
+
+def _ui_error(context, exc=None, text="не удалось — подробности в app.log"):
+    """1.0.0: в статус — только человеческий текст, детали — в app.log."""
+    try:
+        import ui_safe
+        return ui_safe.human_error(context, exc, fallback=text)
+    except Exception:
+        return str(text)
+
 
 TAB_TITLES = ("Маркет", "Мои ордера", "События")
 DEFAULT_WIDTH = 1180
@@ -92,17 +107,18 @@ TOKEN_CHIP_TOOLTIP = {
 def build_overlay_window():
     """Фабрика класса единого окна (PyQt5 импортируется лениво)."""
     from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
-    from PyQt5.QtGui import QFont, QGuiApplication, QKeySequence, QPainter
+    from PyQt5.QtGui import (QColor, QFont, QGuiApplication, QKeySequence,
+                             QPainter)
     from PyQt5.QtWidgets import (QAbstractButton, QAbstractSlider,
                                  QAbstractSpinBox, QButtonGroup, QComboBox,
                                  QDialog, QFrame, QHBoxLayout, QLabel,
-                                 QLineEdit, QMenu, QPushButton, QShortcut,
-                                 QSizePolicy, QStackedWidget, QVBoxLayout,
-                                 QWidget)
+                                 QLineEdit, QMenu, QProgressBar, QPushButton,
+                                 QShortcut, QSizePolicy, QStackedWidget,
+                                 QVBoxLayout, QWidget)
 
     #: Виджеты в шапке, которые сами обрабатывают мышь: с них drag не стартует.
     INTERACTIVE = (QAbstractButton, QLineEdit, QComboBox, QAbstractSpinBox,
-                   QAbstractSlider)
+                   QAbstractSlider, QProgressBar)
 
     def make_font(size, bold=False):
         font = QFont(theme.FONT)
@@ -274,7 +290,7 @@ def build_overlay_window():
                      drops_widget=None, on_settings=None,
                      notifications_widget=None, chat_widget=None,
                      on_status_set=None, on_status_auto=None,
-                     on_status_profile=None):
+                     on_status_profile=None, on_icons_cancel=None):
             super().__init__(None, Qt.Window | Qt.FramelessWindowHint |
                              Qt.WindowStaysOnTopHint)
             self.cfg = cfg
@@ -308,6 +324,9 @@ def build_overlay_window():
             self.on_status_set = on_status_set
             self.on_status_auto = on_status_auto
             self.on_status_profile = on_status_profile
+            # 1.0.0: кнопка «Отмена» у прогресса загрузки пакета иконок
+            self.on_icons_cancel = on_icons_cancel
+            self._icons_progress = {"done": 0, "total": 0, "text": ""}
             self._status_auto = False
             self.hotkey_aliases = bool(hotkey_aliases)
             self.status_providers = list(status_providers or [])
@@ -343,7 +362,11 @@ def build_overlay_window():
             self._token_checking = False
             # (нужен ли сброс modality окна входа — ставит сам диалог)
             self.setAttribute(Qt.WA_TranslucentBackground)
-            self.setWindowTitle("Warframe Overlay")
+            self.app_version = str(getattr(branding, "APP_VERSION", "")
+                                   if branding is not None else "")
+            self.app_name = str(getattr(branding, "APP_NAME", "VoidFrameRU")
+                                if branding is not None else "VoidFrameRU")
+            self.setWindowTitle(f"{self.app_name} {self.app_version}".strip())
             self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
             self.resize(DEFAULT_WIDTH, DEFAULT_HEIGHT)
 
@@ -369,7 +392,7 @@ def build_overlay_window():
             header_lay = QHBoxLayout(self.header)
             header_lay.setContentsMargins(12, 7, 10, 7)
             header_lay.setSpacing(7)
-            self.lbl_title = _ElidedTitle("Warframe Overlay")
+            self.lbl_title = _ElidedTitle(self.app_name)
             self.lbl_title.setFont(make_font(theme.size("window"), True))
             self.lbl_title.setStyleSheet(f"color:{theme.PALETTE['text']};")
             self.lbl_title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -462,12 +485,50 @@ def build_overlay_window():
             self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
             self._settings_shortcut.activated.connect(self.open_settings)
 
+            # ── 1.0.0: прогресс загрузки пакета иконок в шапке ──────────
+            self.icons_progress = QWidget()
+            icons_lay = QHBoxLayout(self.icons_progress)
+            icons_lay.setContentsMargins(0, 0, 0, 0)
+            icons_lay.setSpacing(4)
+            self.lbl_icons_progress = QLabel("")
+            self.lbl_icons_progress.setFont(make_font(10))
+            self.lbl_icons_progress.setFixedHeight(24)
+            self.lbl_icons_progress.setStyleSheet(
+                f"color:{theme.PALETTE['muted']}; background:transparent;")
+            self.lbl_icons_progress.setToolTip("Скачивание пакета иконок")
+            self.bar_icons = QProgressBar()
+            self.bar_icons.setRange(0, 100)
+            self.bar_icons.setValue(0)
+            self.bar_icons.setTextVisible(False)
+            self.bar_icons.setFixedHeight(8)
+            self.bar_icons.setFixedWidth(90)
+            self.bar_icons.setStyleSheet(
+                "QProgressBar { background-color:%s; border:1px solid %s;"
+                " border-radius:4px; }"
+                " QProgressBar::chunk { background-color:%s;"
+                " border-radius:3px; }"
+                % (theme.PALETTE["card"], theme.PALETTE["border"],
+                   theme.PALETTE["accent"]))
+            self.btn_icons_cancel = QPushButton("×")
+            self.btn_icons_cancel.setFont(make_font(11))
+            self.btn_icons_cancel.setFixedSize(22, 22)
+            self.btn_icons_cancel.setStyleSheet(theme.button_qss(small=True))
+            self.btn_icons_cancel.setCursor(Qt.PointingHandCursor)
+            self.btn_icons_cancel.setToolTip(
+                "Отменить загрузку иконок (продолжится при следующем запуске)")
+            self.btn_icons_cancel.clicked.connect(self.cancel_icons)
+            icons_lay.addWidget(self.lbl_icons_progress)
+            icons_lay.addWidget(self.bar_icons)
+            icons_lay.addWidget(self.btn_icons_cancel)
+            self.icons_progress.hide()
+
             def add_header(widget):
                 header_lay.addWidget(widget, 0, Qt.AlignVCenter)
 
             add_header(self.lbl_title)
             add_header(self.btn_token)
             add_header(self.btn_status)
+            add_header(self.icons_progress)
             header_lay.addStretch(1)
             for widget in (self.lbl_status, self.btn_bell, self.btn_settings,
                            self.btn_refresh, self.btn_minimize,
@@ -766,8 +827,64 @@ def build_overlay_window():
                 self.on_settings()
                 return True
             except Exception as exc:
-                self.lbl_status.setText(f"настройки: {exc}")
+                self.lbl_status.setText(_ui_error(
+                    "настройки", exc, "настройки не открылись — "
+                    "подробности в app.log"))
                 return False
+
+        # ── 1.0.0: прогресс пакета иконок ──────────────────────────────
+        def set_icons_progress(self, done=0, total=0, text=""):
+            """Показать/обновить прогресс «Иконки: 1240 / 2500 (49%)»."""
+            try:
+                done = max(0, int(done))
+                total = max(0, int(total))
+            except Exception:
+                done, total = 0, 0
+            if not text:
+                percent = int(done * 100.0 / total) if total else 0
+                text = f"Иконки: {done} / {total} ({percent}%)"
+            self._icons_progress = {"done": done, "total": total,
+                                    "text": str(text)}
+            try:
+                self.lbl_icons_progress.setText(str(text))
+                percent = int(done * 100.0 / total) if total else 0
+                self.bar_icons.setRange(0, 100)
+                self.bar_icons.setValue(max(0, min(100, percent)))
+                self.icons_progress.show()
+            except Exception:
+                pass
+            return self.icons_progress
+
+        def icons_progress_text(self):
+            return str(self._icons_progress.get("text") or "")
+
+        def hide_icons_progress(self):
+            try:
+                self.icons_progress.hide()
+            except Exception:
+                pass
+            self._icons_progress = {"done": 0, "total": 0, "text": ""}
+            return True
+
+        def cancel_icons(self):
+            """Кнопка «×» у прогресса: прервать загрузку пакета иконок."""
+            try:
+                self.lbl_icons_progress.setText("Иконки: отмена…")
+            except Exception:
+                pass
+            if callable(self.on_icons_cancel):
+                try:
+                    self.on_icons_cancel()
+                    return True
+                except Exception as exc:
+                    try:
+                        self.lbl_status.setText(_ui_error(
+                            "иконки", exc, "иконки: не удалось отменить — "
+                            "подробности в app.log"))
+                    except Exception:
+                        pass
+                    return False
+            return False
 
         def open_notifications(self, record_id=None):
             """Колокольчик/клик по тосту: отдельное окно центра уведомлений."""
@@ -777,9 +894,21 @@ def build_overlay_window():
             try:
                 if self._notifications_dialog is None:
                     dialog = QDialog(self)
+                    dialog.setObjectName("notifDialog")
                     dialog.setWindowTitle("Уведомления")
                     dialog.setModal(False)
                     dialog.resize(620, 520)
+                    try:
+                        dialog.setStyleSheet(theme.notifications_qss())
+                        dialog.setAutoFillBackground(True)
+                        palette = dialog.palette()
+                        palette.setColor(palette.Window,
+                                         QColor(theme.PALETTE["panel"]))
+                        palette.setColor(palette.Base,
+                                         QColor(theme.PALETTE["panel"]))
+                        dialog.setPalette(palette)
+                    except Exception:
+                        pass
                     lay = QVBoxLayout(dialog)
                     lay.setContentsMargins(0, 0, 0, 0)
                     lay.addWidget(self.notifications_widget)
@@ -799,7 +928,9 @@ def build_overlay_window():
                         pass
                 return True
             except Exception as exc:
-                self.lbl_status.setText(f"уведомления: {exc}")
+                self.lbl_status.setText(_ui_error(
+                    "уведомления", exc, "уведомления не открылись — "
+                    "подробности в app.log"))
                 return False
 
         def _notifications_closed(self, _result=None):
@@ -882,8 +1013,6 @@ def build_overlay_window():
             status = str(status or "").lower()
             self._status = status
             text = labels.get(status, "—")
-            if self._status_auto and status:
-                text += " · авто"
             color = colors.get(status, theme.PALETTE["muted"])
             self.btn_status.setText(f"● {text}")
             self.btn_status.setStyleSheet(
@@ -895,11 +1024,9 @@ def build_overlay_window():
             return status
 
         def set_status_auto(self, enabled):
-            self._status_auto = bool(enabled)
-            self.btn_status.setToolTip(
-                "Статус warframe.market"
-                + (" · Авто (В игре, когда игра в фокусе)"
-                   if self._status_auto else ""))
+            """1.0.0: авто-режим статуса убран — только явные статусы."""
+            self._status_auto = False
+            self.btn_status.setToolTip("Статус warframe.market")
             if self._status:
                 self.set_market_status(self._status)
             return self._status_auto
@@ -912,7 +1039,9 @@ def build_overlay_window():
                 self.on_status_set(str(status), duration)
                 return True
             except Exception as exc:
-                self.lbl_status.setText(f"статус: {exc}")
+                self.lbl_status.setText(_ui_error(
+                    "статус", exc, "статус не изменился — "
+                    "подробности в app.log"))
                 return False
 
         def request_status_auto(self, enabled):
@@ -923,7 +1052,9 @@ def build_overlay_window():
                 self.on_status_auto(self._status_auto)
                 return True
             except Exception as exc:
-                self.lbl_status.setText(f"статус: {exc}")
+                self.lbl_status.setText(_ui_error(
+                    "статус", exc, "статус не изменился — "
+                    "подробности в app.log"))
                 return False
 
         def request_status_profile(self):
@@ -934,11 +1065,14 @@ def build_overlay_window():
                 self.on_status_profile()
                 return True
             except Exception as exc:
-                self.lbl_status.setText(f"профиль: {exc}")
+                self.lbl_status.setText(_ui_error(
+                    "профиль", exc, "профиль не открылся — "
+                    "подробности в app.log"))
                 return False
 
         def status_menu_labels(self):
-            return ["Онлайн", "В игре", "Невидимка", "Авто"]
+            """1.0.0: только явные статусы — пункта «Авто» больше нет."""
+            return ["Онлайн", "В игре", "Невидимка"]
 
         def open_status_menu(self):
             menu = QMenu(self)
@@ -957,11 +1091,6 @@ def build_overlay_window():
                         lambda _=False, s=status, d=seconds:
                         self.request_status(s, d))
             menu.addSeparator()
-            auto = menu.addAction("Авто (В игре, когда игра в фокусе)")
-            auto.setCheckable(True)
-            auto.setChecked(bool(self._status_auto))
-            auto.triggered.connect(
-                lambda checked: self.request_status_auto(bool(checked)))
             profile = menu.addAction("Открыть профиль на сайте")
             profile.triggered.connect(self.request_status_profile)
             menu.exec_(self.btn_status.mapToGlobal(
@@ -987,7 +1116,7 @@ def build_overlay_window():
                                   ("market", "маркет"))
                 if mapping.get(key))
             self.lbl_title.setToolTip(
-                ("Горячие клавиши — " + hints) if hints else "Warframe Overlay")
+                ("Горячие клавиши — " + hints) if hints else "VoidFrameRU")
             return True
 
         def show_tab(self, index):
@@ -1446,7 +1575,9 @@ def build_overlay_window():
                     return
                 dialog.exec_()
             except Exception as exc:
-                self.lbl_status.setText(f"окно входа: {exc}")
+                self.lbl_status.setText(_ui_error(
+                    "окно входа", exc, "окно входа не открылось — "
+                    "подробности в app.log"))
                 return
             self._after_login_dialog()
 
