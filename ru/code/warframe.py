@@ -73,7 +73,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.7.2"
+APP_VERSION = "0.7.3"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -364,11 +364,46 @@ def log_exception(context=""):
 def startup_line():
     try:
         frozen = bool(getattr(sys, "frozen", False))
+        lefts = [int(round(x)) for x in card_lefts(4, DEFAULT_CONFIG)]
         return (f"=== Warframe Price Overlay {APP_VERSION} | "
                 f"{'exe' if frozen else 'source'} | "
-                f"{platform.platform()} | python {platform.python_version()} ===")
+                f"{platform.platform()} | python {platform.python_version()} | "
+                f"data={DATA_DIR} | lefts={lefts} ===")
     except Exception:
         return f"=== Warframe Price Overlay {APP_VERSION} ==="
+
+
+def themed_message(parent, text, title="Warframe Overlay", warning=False):
+    """Тематический информационный диалог с видимой кнопкой «ОК»."""
+    try:
+        mod = market_browser_module()
+        if mod is None:
+            return None
+        cls = mod.build_market_browser().MessageDialog
+        dialog = cls(parent, str(text), warning=bool(warning), title=title)
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            dialog.exec_()
+        return dialog
+    except Exception:
+        return None
+
+
+def themed_confirm(parent, text, title="Warframe Overlay",
+                   confirm_text="Да", cancel_text="Отмена", danger=False):
+    """Тематическое подтверждение; Enter — да, Esc/Отмена — нет."""
+    try:
+        mod = market_browser_module()
+        if mod is None:
+            return False
+        cls = mod.build_market_browser().ConfirmDialog
+        dialog = cls(parent, str(text), confirm_text=confirm_text,
+                     cancel_text=cancel_text, danger=bool(danger),
+                     title=title)
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return False
+        return dialog.exec_() == 1
+    except Exception:
+        return False
 
 
 def startup_error_text(exc):
@@ -547,6 +582,55 @@ _OWNED_STATUS_RE = re.compile(
     r"crafted|owned)\s*[-:]?\s*\d*\s*$", re.IGNORECASE)
 
 
+#: Словарь частей для пост-правки OCR (fuzzy, rapidfuzz с фолбэком).
+PART_WORDS = ("Тетива", "Плечо", "Верхнее Плечо", "Нижнее Плечо",
+              "Приёмник", "Ствол", "Приклад", "Клинок", "Рукоять",
+              "Связь", "Каркас", "Нейрооптика", "Система", "Застёжка",
+              "Пряжка", "Ошейник")
+
+
+def fix_part_names(text):
+    """Исправить опечатки OCR в названиях частей по словарю."""
+    raw = str(text or "")
+    if not raw.strip():
+        return raw
+    known = {"праёчо": "Плечо", "праечо": "Плечо"}
+    try:
+        from rapidfuzz import fuzz, process
+    except Exception:
+        fuzz = None
+        process = None
+    tokens = raw.split(" ")
+    flat = [word.casefold() for word in PART_WORDS]
+    for index, token in enumerate(tokens):
+        base = token.strip(" .,:;()[]").casefold()
+        if len(base) < 4:
+            continue
+        if base in known:
+            tokens[index] = known[base]
+            continue
+        best = None
+        if process is not None:
+            try:
+                hit = process.extractOne(base, flat, scorer=fuzz.ratio)
+                if hit:
+                    best = (hit[1], PART_WORDS[flat.index(hit[0])])
+            except Exception:
+                best = None
+        else:
+            import difflib
+            for word, flat_word in zip(PART_WORDS, flat):
+                ratio = difflib.SequenceMatcher(None, base, flat_word).ratio() * 100
+                if best is None or ratio > best[0]:
+                    best = (ratio, word)
+        if best and best[0] >= 82:
+            canonical = best[1]
+            # сохраняем «(Чертеж)» и прочую пунктуацию вокруг слова
+            if token[:1].isupper() or base:
+                tokens[index] = canonical
+    return " ".join(tokens)
+
+
 def normalize_card_name(text):
     """Нормализует строку карточки награды.
 
@@ -570,6 +654,7 @@ def normalize_card_name(text):
     # «Создано - 7» / «в наличии» — статус, не часть названия
     t = _OWNED_STATUS_RE.sub(" ", t)
     t = re.sub(r"\s+", " ", t).strip(" :-")
+    t = fix_part_names(t)
     t = re.sub(r"\s*:\s*", ": ", t)
     if not t:
         return "", is_blueprint, ""
@@ -697,6 +782,83 @@ def pick_toast_record(result, duplicate=False):
         "item_thumb": item.get("thumb") or "",
         "item_icon": item.get("icon") or "",
     }
+
+
+def assess_set_price(part_price, set_price, parts_prices=None):
+    """Оценить, не является ли цена комплекта подозрительно низкой."""
+    try:
+        set_price = int(set_price)
+    except Exception:
+        set_price = None
+    values = []
+    for value in (parts_prices or []):
+        try:
+            values.append(int(value))
+        except Exception:
+            pass
+    try:
+        part_price = int(part_price) if part_price is not None else None
+    except Exception:
+        part_price = None
+    suspicious = False
+    reason = ""
+    total = sum(values)
+    if set_price is not None:
+        if set_price <= 1:
+            suspicious = True
+            reason = "цена ≤ 1p"
+        elif len(values) >= 2 and total > 0 and set_price < 0.6 * total:
+            suspicious = True
+            reason = f"комплект {set_price}p дешевле 60% частей ({total}p)"
+        elif values and set_price <= 1.5 * max(values):
+            suspicious = True
+            reason = f"комплект {set_price}p дешевле 1.5× части"
+    return {"price": set_price, "parts_sum": total,
+            "parts_count": len(values), "suspicious": suspicious,
+            "reason": reason}
+
+
+def format_set_price_tooltip(data):
+    """Tooltip цены комплекта: цена/продавец/статус/время + предупреждение."""
+    data = dict(data or {})
+    price = data.get("set_price")
+    if price is None:
+        return "цена комплекта неизвестна"
+    seller = str(data.get("set_seller") or "—")
+    if data.get("set_online"):
+        status = "онлайн"
+    elif data.get("set_offline"):
+        status = "offline"
+    else:
+        status = str(data.get("set_status") or "—")
+    stamp = data.get("set_updated") or data.get("checked_at")
+    try:
+        when = datetime.datetime.fromtimestamp(float(stamp)).strftime("%H:%M")
+    except Exception:
+        when = "—"
+    text = (f"мин. {int(price)}p · продавец {seller} · {status} · "
+            f"обновлено {when}")
+    if data.get("set_suspicious"):
+        text += ("\nподозрительно низкая цена — возможна ошибка продавца, "
+                 "проверьте на сайте")
+    return text
+
+
+def market_item_url(slug):
+    slug = str(slug or "").strip()
+    return f"https://warframe.market/items/{slug}" if slug else ""
+
+
+def open_market_page(slug):
+    """Открыть страницу предмета на warframe.market в браузере."""
+    url = market_item_url(slug)
+    if not url:
+        return False
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
 
 
 def set_slug_for_part(slug, name=""):
@@ -1038,6 +1200,29 @@ class MarketAPI:
             "tradable": None, "matched": False, "error": None,
         }
 
+    def _match_with_fallback(self, name):
+        """Матчинг имени; для чертежей пробуем базовое имя (Forma)."""
+        match = self.match(name)
+        if match:
+            return match, ""
+        raw = str(name or "")
+        variants = []
+        for variant in (
+                re.sub(r"[\(\[]\s*(?:черт[её]ж|чертеж|blueprint)\s*[\)\]]",
+                       " ", raw, flags=re.IGNORECASE),
+                re.sub(r"\b(?:черт[её]ж|чертеж|blueprint|bp)\b", " ", raw,
+                       flags=re.IGNORECASE),
+                re.sub(r"^\s*(?:черт[её]ж|чертеж|blueprint)\s*[:\-]?\s*", " ",
+                       raw, flags=re.IGNORECASE)):
+            variant = re.sub(r"\s+", " ", variant).strip(" :-")
+            if variant and variant.casefold() != raw.casefold():
+                variants.append(variant)
+        for variant in variants:
+            match = self.match(variant)
+            if match:
+                return match, variant
+        return None, ""
+
     def _fill_market(self, out, slug):
         """Дополняет запись ценой, дукатами и числом ордеров по готовому slug."""
         detail = self._detail(slug)
@@ -1061,6 +1246,9 @@ class MarketAPI:
             out["error"] = "нет списка предметов"
             return out
         m = self.match(ocr_name)
+        if not m:
+            fallback, _variant = self._match_with_fallback(ocr_name)
+            m = fallback
         if not m:
             out["error"] = "не найден на рынке"
             return out
@@ -1109,10 +1297,17 @@ class MarketAPI:
             out["error"] = "нет слага"
             return out
         self.load_items()
+        lookup_slug = slug
         market_name = self.name_by_slug(slug)
-        out.update({"slug": slug, "market_name": market_name or name or slug,
+        if not market_name and slug.endswith("_blueprint"):
+            base = slug[:-len("_blueprint")]
+            market_name = self.name_by_slug(base)
+            if market_name:
+                lookup_slug = base
+        out.update({"slug": lookup_slug,
+                    "market_name": market_name or name or slug,
                     "matched": True})
-        return self._fill_market(out, slug)
+        return self._fill_market(out, lookup_slug)
 
 
 def summarize_orders(orders):
@@ -1192,7 +1387,7 @@ def prepare_ocr(img, variant="soft"):
         gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
         scale = 2.0
     else:
-        scale = 0.8
+        scale = 1.5
     up = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     return cv2.filter2D(up, -1, _SHARPEN), scale
 
@@ -1344,7 +1539,8 @@ def score_layout(n, words, cfg):
     for i in range(n):
         ws = groups[i]
         if not ws:
-            score -= 5.0          # пустая карточка — сильный минус
+            # каноническая пустая позиция не должна «сжимать» ряд
+            score -= 0.2
             continue
         x0 = min(w["x0"] for w in ws)
         x1 = max(w["x1"] for w in ws)
@@ -1383,8 +1579,33 @@ def join_words(words):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _empty_cards(cfg, count=4):
+    slots = card_lefts(count, cfg)
+    return [{"left": float(left), "top": float(cfg["card_top"]),
+             "name": "", "unrecognized": True} for left in slots]
+
+
+def _expand_canonical_grid(groups, lefts, cfg):
+    """Если найденные lefts — слоты канонической сетки 4, вернуть её."""
+    slots = card_lefts(4, cfg)
+    mapping = {}
+    for index, left in enumerate(lefts):
+        slot = min(range(4), key=lambda i: abs(slots[i] - left))
+        if abs(slots[slot] - left) <= 12:
+            mapping[index] = slot
+    if len(mapping) < 2:
+        return None
+    groups4 = {i: [] for i in range(4)}
+    for index, words in groups.items():
+        slot = mapping.get(index)
+        if slot is None:
+            continue
+        groups4[slot].extend(words)
+    return slots, groups4
+
+
 def _cards_from_words(words, cfg):
-    """Превращает слова в список карточек (1..4) с названиями."""
+    """Превращает слова в карточки 1..4; пустые позиции сохраняются."""
     forced = int(cfg.get("force_cards") or 0)
     if forced:
         n_best = max(1, min(4, forced))
@@ -1396,7 +1617,7 @@ def _cards_from_words(words, cfg):
             groups[idx].append(w)
         note = f"  Карточек (принудительно): {n_best}"
     elif not words:
-        return [], "  На экране не найден текст наград"
+        return _empty_cards(cfg, 4), "  Нечитаемый кадр: 4 позиции «?»"
     else:
         best = None
         for n in (1, 2, 3, 4):
@@ -1404,25 +1625,71 @@ def _cards_from_words(words, cfg):
             if best is None or s > best[0]:
                 best = (s, n, lefts, groups)
         s, n_best, lefts, groups = best
-        if s < 0.4:
-            return [], f"  Не удалось разобрать раскладку (score={s:.2f})"
-        note = (f"  Карточек: {n_best}  (score={s:.2f}, "
-                f"lefts={[int(l) for l in lefts]})")
+        expanded = _expand_canonical_grid(groups, lefts, cfg)
+        if expanded is not None:
+            lefts, groups = expanded
+            n_best = 4
+            note = (f"  Карточек: 4 (каноническая сетка, "
+                    f"lefts={[int(l) for l in lefts]})")
+        else:
+            if s < 0.4 and not words:
+                return _empty_cards(cfg, 4), "  Нечитаемый кадр: 4 позиции «?»"
+            note = (f"  Карточек: {n_best}  (score={s:.2f}, "
+                    f"lefts={[int(l) for l in lefts]})")
 
     cards = []
     for i in range(n_best):
         name = join_words(groups.get(i, []))
-        if not name:
-            continue
-        name, _bp, _key = normalize_card_name(name)
-        if not name:
-            continue
+        if name:
+            name, _bp, _key = normalize_card_name(name)
         cards.append({"left": float(lefts[i]),
                       "top": float(cfg["card_top"]),
-                      "name": name})
-    if not cards:
-        return [], "  Текст найден, но не привязался к карточкам"
+                      "name": name,
+                      "unrecognized": not bool(name)})
     return cards, note
+
+
+def _retry_unrecognized_card(base_img, card, cfg, ocr):
+    """Точечный повтор OCR только кропа названия (апскейл 1.8 + контраст)."""
+    try:
+        import cv2
+        left = int(round(float(card.get("left") or 0)))
+        top = int(round(float(cfg["card_top"] + cfg["name_offset_y"])))
+        width = int(cfg["card_width"])
+        height = int(cfg["name_height"])
+        x0 = max(0, left - 4)
+        y0 = max(0, top - 8)
+        x1 = min(base_img.shape[1], left + width + 4)
+        y1 = min(base_img.shape[0], top + height + 8)
+        crop = base_img[y0:y1, x0:x1]
+        if crop.size == 0:
+            return ""
+        gray = _to_gray(crop)
+        gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
+        scale = 1.8
+        proc = cv2.resize(gray, None, fx=scale, fy=scale,
+                          interpolation=cv2.INTER_CUBIC)
+        res = ocr.read_proc(proc)
+        words = _word_boxes(res, {"left": x0, "top": y0}, scale)
+        return join_words(words)
+    except Exception:
+        return ""
+
+
+def retry_unrecognized_cards(base_img, cards, cfg, ocr):
+    """Повторный OCR только для карточек без имени (не весь кадр)."""
+    retried = 0
+    for card in cards:
+        if card.get("name"):
+            continue
+        retried += 1
+        text = _retry_unrecognized_card(base_img, card, cfg, ocr)
+        if text:
+            name, _bp, _key = normalize_card_name(text)
+            if name:
+                card["name"] = name
+                card["unrecognized"] = False
+    return retried
 
 
 def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
@@ -1442,7 +1709,7 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
     y1 = min(base_img.shape[0], int(band["top"] + band["height"]))
     crop = base_img[y0:y1, x0:x1]
     if crop.size == 0:
-        return []
+        return _empty_cards(cfg, 4)
     cache_key = ""
     if cache is not None:
         try:
@@ -1468,11 +1735,13 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
         matched, quality = 0, 0.0
         if matcher and cards:
             for c in cards:
+                if not c.get("name"):
+                    continue
                 s = matcher(c["name"]) or 0.0
                 if s >= 0.80:
                     matched += 1
                     quality += s
-        rank = (matched, round(quality, 3), len(cards), -idx)
+        rank = (len(cards), matched, round(quality, 3), -idx)
         if best is None or rank > best[0]:
             best = (rank, cards, variant, proc, words, note)
         if debug:
@@ -1494,13 +1763,27 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
         log(note)
     if not cards:
         return []
+    # точечный повтор только для нераспознанных карточек
+    retry_unrecognized_cards(base_img, cards, cfg, ocr)
+    if matcher:
+        matched_now = sum(1 for c in cards if c.get("name")
+                          and (matcher(c["name"]) or 0.0) >= 0.80)
+    else:
+        matched_now = sum(1 for c in cards if c.get("name"))
+    log(f"  наград: {len(cards)}, распознано {matched_now}")
+    for index, card in enumerate(cards, 1):
+        score = 0.0
+        if matcher and card.get("name"):
+            score = matcher(card["name"]) or 0.0
+        log(f"  карточка {index}: {card.get('name')!r} "
+            f"(score={score:.2f})")
     if cache is not None and cache_key:
         try:
             cache.ocr_set(cache_key, [dict(card) for card in cards])
         except Exception:
             pass
     if matcher:
-        log(f"  OCR: {variant}, совпало {rank[0]}/{len(cards)}")
+        log(f"  OCR: {variant}, совпало {matched_now}/{len(cards)}")
     return cards
 
 
@@ -1728,10 +2011,22 @@ def build_overlays():
             self.lbl_set.setTextFormat(Qt.RichText)
             self.lbl_set.setToolTip("Полный комплект")
             self.lbl_set.setVisible(False)
+            self.btn_set_market = QPushButton("↗")
+            self.btn_set_market.setFixedSize(18, 18)
+            market_font = QFont(self.font())
+            market_font.setPixelSize(10)
+            market_font.setBold(True)
+            self.btn_set_market.setFont(market_font)
+            self.btn_set_market.setStyleSheet(theme.button_qss(small=True))
+            self.btn_set_market.setCursor(Qt.PointingHandCursor)
+            self.btn_set_market.setToolTip("Открыть на маркете")
+            self.btn_set_market.clicked.connect(self._open_set_market)
+            self.btn_set_market.setVisible(False)
             set_row = QHBoxLayout()
             set_row.setContentsMargins(0, 1, 0, 0)
-            set_row.setSpacing(0)
+            set_row.setSpacing(4)
             set_row.addWidget(self.lbl_set)
+            set_row.addWidget(self.btn_set_market)
             set_row.addStretch(1)
 
             bot = QHBoxLayout()
@@ -1861,19 +2156,35 @@ def build_overlays():
             if price is None:
                 self.lbl_set.clear()
                 self.lbl_set.setVisible(False)
+                self.btn_set_market.setVisible(False)
                 return
             name = ((data or {}).get("set_name")
                     or (data or {}).get("set_slug") or "комплект")
-            platinum = theme.currency_platinum()
+            suspicious = bool((data or {}).get("set_suspicious"))
+            platinum = (theme.PALETTE["muted"] if suspicious
+                        else theme.currency_platinum())
+            mark = " (?)" if suspicious else ""
             self.lbl_set.setText(
                 '<span style="color:rgba(231,241,255,191);'
                 ' font-weight:400;">компл.</span> '
                 f'<span style="color:{platinum}; font-weight:700;">'
-                f'{int(price)} p</span>')
-            self.lbl_set.setToolTip(f"Полный комплект: {name}")
+                f'{int(price)} p{mark}</span>')
+            tip = format_set_price_tooltip(data)
+            if suspicious and (data or {}).get("set_suspect_reason"):
+                tip += "\n" + str((data or {}).get("set_suspect_reason"))
+            self.lbl_set.setToolTip(tip + f"\n{name}")
             self.lbl_set.setStyleSheet(
                 "background: transparent; font-size:12px;")
             self.lbl_set.setVisible(True)
+            self.btn_set_market.setVisible(True)
+            self.btn_set_market.setToolTip(
+                f"Открыть на маркете: {name}")
+
+        def _open_set_market(self):
+            data = self._last_data or {}
+            slug = (data.get("set_slug") or data.get("slug") or "")
+            if slug:
+                open_market_page(slug)
 
         def apply_set_setting(self):
             if self._last_data:
@@ -1891,6 +2202,8 @@ def build_overlays():
                                      else self._style_normal)
 
             name = (d.get("market_name") or d.get("name") or "").strip()
+            if d.get("unrecognized") or not name:
+                name = "?"
             if len(name) > 34:
                 name = name[:33] + "…"
             self.lbl_name.setText(name)
@@ -1911,7 +2224,12 @@ def build_overlays():
             price = d.get("price")
             platinum = theme.currency_platinum()
             ducats = theme.currency_ducats()
-            if d.get("pending"):
+            if d.get("unrecognized"):
+                self.lbl_price.setText(
+                    "<span style='color:#6c7789; font-size:15px;'>—</span>")
+                self.lbl_ducats.setText("")
+                self.lbl_sold.setText("")
+            elif d.get("pending"):
                 self.lbl_price.setText(
                     f"<span style='color:{theme.rgba(platinum, 0.70)};'>…</span>")
                 self.lbl_ducats.setText("")
@@ -2222,6 +2540,8 @@ def build_overlays():
             self.updated.connect(self._apply)
             #: какие карточки последнего скана уже отмечены «взятыми»
             self._picked_indices = set()
+            # результат последнего скана (для записи «выбрано» после Alt+1…4)
+            self.last_results = []
             #: время последнего скана и результат последнего Alt+1..4
             self.last_scan_ts = 0.0
             self.last_pick = {}
@@ -2432,15 +2752,17 @@ def build_overlays():
             item = dict(items[idx])
             name = item.get("market_name") or item.get("name") or "?"
             if self.market is None:
-                QMessageBox.warning(
-                    self.selected, "Продажа на warframe.market",
+                themed_message(
+                    self.selected,
                     "Модуль market_client.py не найден рядом с программой — "
-                    "продажа недоступна.\nAlt+Q, F8 и журнал работают как раньше.")
+                    "продажа недоступна.\nAlt+Q, F8 и журнал работают как раньше.",
+                    title="Продажа на warframe.market", warning=True)
                 return
             if not self._market_slug(item):
-                QMessageBox.information(
-                    self.selected, "Продажа на warframe.market",
-                    f"«{name}» не сопоставлен с warframe.market — продать нельзя.")
+                themed_message(
+                    self.selected,
+                    f"«{name}» не сопоставлен с warframe.market — продать нельзя.",
+                    title="Продажа на warframe.market")
                 return
             if not self.market.has_token() and not self._ask_token():
                 return
@@ -2449,9 +2771,10 @@ def build_overlays():
         def _on_token(self):
             """Кнопка «🔑» в шапке: вставить или заменить токен в любой момент."""
             if self.market is None:
-                QMessageBox.warning(
-                    self.selected, "Токен warframe.market",
-                    "Модуль market_client.py не найден рядом с программой.")
+                themed_message(
+                    self.selected,
+                    "Модуль market_client.py не найден рядом с программой.",
+                    title="Токен warframe.market", warning=True)
                 return
             self._ask_token(announce=True)
 
@@ -2477,11 +2800,12 @@ def build_overlays():
                 accepted = bool(dialog.exec_())
                 has_token = self.market.has_token()
                 if accepted and announce and has_token:
-                    QMessageBox.information(
-                        self.selected, "Токен сохранён",
+                    themed_message(
+                        self.selected,
                         "Токен warframe.market: "
                         f"{market_token_masked(self.market.token())}.\n"
-                        "Он хранится только в config.json на этом компьютере.")
+                        "Он хранится только в config.json на этом компьютере.",
+                        title="Токен сохранён")
                 return bool(accepted and has_token)
             except Exception as e:
                 log(f"  токен: окно не открылось ({type(e).__name__}: {e})")
@@ -2495,9 +2819,10 @@ def build_overlays():
                 dialog.exec_()
             except Exception as e:
                 log(f"  продажа: форма не открылась ({type(e).__name__}: {e})")
-                QMessageBox.warning(
-                    self.selected, "Продажа на warframe.market",
-                    f"Не удалось открыть форму продажи ({type(e).__name__}).")
+                themed_message(
+                    self.selected,
+                    f"Не удалось открыть форму продажи ({type(e).__name__}).",
+                    title="Продажа на warframe.market", warning=True)
 
         def is_visible(self):
             return any(w.isVisible() for w in self.cards)
@@ -3766,11 +4091,11 @@ def build_market_dialogs():
         def _save_clicked(self):
             token = self.edit_token.text().strip()
             if token and token != self._checked_token:
-                answer = QMessageBox.question(
-                    self, "Токен не проверен",
-                    "Токен ещё не проверен через /v2/me. Сохранить?",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if answer != QMessageBox.Yes:
+                answer = themed_confirm(
+                    self, "Токен ещё не проверен через /v2/me. Сохранить?",
+                    title="Токен не проверен",
+                    confirm_text="Сохранить", cancel_text="Отмена")
+                if not answer:
                     return False
             return self._save()
 
@@ -3778,16 +4103,18 @@ def build_market_dialogs():
             """Проверяет и сохраняет токен. True при успехе (без печати токена)."""
             token = self.edit_token.text().strip()
             if len(token) < 20:
-                QMessageBox.warning(
-                    self, "Токен warframe.market",
+                themed_message(
+                    self,
                     "Токен слишком короткий — скопируйте JWT целиком\n"
-                    "(обычно он длиной 200+ символов).")
+                    "(обычно он длиной 200+ символов).",
+                    title="Токен warframe.market", warning=True)
                 return False
             if not self.save_fn(self.cfg, token):
-                QMessageBox.warning(
-                    self, "Токен warframe.market",
+                themed_message(
+                    self,
                     "Не удалось сохранить токен в config.json — "
-                    "проверьте права на папку программы.")
+                    "проверьте права на папку программы.",
+                    title="Токен warframe.market", warning=True)
                 return False
             try:
                 self.client.set_token(token)
@@ -4170,7 +4497,8 @@ def build_market_dialogs():
                         rank=params["rank"], per_trade=params["per_trade"],
                         meta=params["meta"], subtype=params["subtype"])
                 except Exception as exc:
-                    QMessageBox.warning(self, "Проверка ордера", str(exc))
+                    themed_message(self, str(exc), title="Проверка ордера",
+                                   warning=True)
                     return
             details = f"{params['platinum']}p × {params['quantity']}"
             if params["rank"] is not None:
@@ -4179,12 +4507,13 @@ def build_market_dialogs():
                 details += f", лот {params['per_trade']}"
             action = ("Обновить" if self.order
                       else f"Создать {params['order_type']}-ордер")
-            answer = QMessageBox.question(
-                self, "Подтверждение",
+            answer = themed_confirm(
+                self,
                 f"{action} на warframe.market?\n\n"
                 f"{self.lbl_name.text()}\n{details}",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer != QMessageBox.Yes:
+                title="Подтверждение", confirm_text=action,
+                cancel_text="Отмена")
+            if not answer:
                 return
             self.btn_create.setEnabled(False)
             self.lbl_status.setText("обновляю ордер…" if self.order
@@ -4225,10 +4554,11 @@ def build_market_dialogs():
                 body = json.dumps(result.get("body") or {}, ensure_ascii=False, indent=2)
                 self.lbl_status.setText("режим проверки: ордер не отправлен")
                 self.btn_create.setEnabled(True)
-                QMessageBox.information(
-                    self, "Режим проверки (market_dry_run)",
+                themed_message(
+                    self,
                     "Ордер НЕ отправлен: включён market_dry_run.\n\n"
-                    f"Тело запроса:\n{body}")
+                    f"Тело запроса:\n{body}",
+                    title="Режим проверки (market_dry_run)")
                 return
             order = result.get("order") if isinstance(result.get("order"), dict) else result
             lines = ["Ордер обновлён на warframe.market." if self.order
@@ -4238,14 +4568,15 @@ def build_market_dialogs():
             if order.get("platinum"):
                 lines.append(f"{order['platinum']}p × {order.get('quantity', '?')}")
             self.lbl_status.setText("ордер обновлён" if self.order else "ордер создан")
-            QMessageBox.information(self, "Готово", "\n".join(lines))
+            themed_message(self, "\n".join(lines), title="Готово")
             self.accept()
 
         def _on_create_failed(self, message):
             self.lbl_status.setText(f"ордер не создан: {message}")
             self.lbl_status.setStyleSheet(theme.status_qss(stale=True))
             self.btn_create.setEnabled(True)
-            QMessageBox.warning(self, "Ордер не создан", str(message))
+            themed_message(self, str(message), title="Ордер не создан",
+                           warning=True)
 
         def _open_site(self):
             import webbrowser
@@ -5515,6 +5846,7 @@ class Scanner:
         self._lock = threading.Lock()
         self.busy = False
         self.generation = 0
+        self._pending_scan = False
         self.watcher = None      # авто-режим: учит шаблон экрана
         self.last_results = None
         try:
@@ -5527,12 +5859,27 @@ class Scanner:
     def request_scan(self):
         with self._lock:
             if self.busy:
-                log("Скан уже выполняется…")
+                if not self._pending_scan:
+                    self._pending_scan = True
+                    log("Alt+Q: скан уже идёт, повторю после него")
+                # повторные нажатия не спамят лог
                 return
             self.busy = True
+            self._pending_scan = False
             self.generation += 1
             gen = self.generation
         threading.Thread(target=self._run, args=(gen,), daemon=True).start()
+
+    def _drain_pending_scan(self):
+        """После текущего скана — ровно один отложенный (если был)."""
+        with self._lock:
+            pending = self._pending_scan
+            self._pending_scan = False
+        if pending:
+            log("  Скан: выполняю отложенный запрос (1)")
+            self.request_scan()
+            return True
+        return False
 
     def _run(self, gen):
         t0 = time.time()
@@ -5592,6 +5939,8 @@ class Scanner:
                     "name": c["name"], "owned": label, "owned_n": 0,
                     "owned_kind": kind, "card_left": c["left"],
                     "price": None, "pending": True,
+                    "unrecognized": bool(c.get("unrecognized")
+                                         or not c.get("name")),
                     "matched": False, "sell_online": 0, "best_sell": None,
                     "best_buy": None, "ducats": None, "error": None,
                 })
@@ -5701,6 +6050,41 @@ class Scanner:
                     d["set_price"] = info.get("price")
                     d["set_name"] = (info.get("market_name")
                                      or info.get("name") or set_slug)
+                    d["set_updated"] = time.time()
+                    d["set_online"] = bool(info.get("sell_online"))
+                    d["set_offline"] = bool(info.get("sell_offline"))
+                    d["set_status"] = ("онлайн" if d["set_online"]
+                                       else ("офлайн" if d["set_offline"]
+                                             else "—"))
+                    client = getattr(
+                        getattr(getattr(self, "mgr", None),
+                                "market_browser", None), "client", None)
+                    if client is not None:
+                        detail = lowest_sell_order(client, set_slug)
+                        if detail.get("seller"):
+                            d["set_seller"] = detail["seller"]
+                            d["set_online"] = bool(detail.get("online"))
+                            d["set_status"] = ("онлайн" if d["set_online"]
+                                               else "офлайн")
+
+            # подозрительно низкая цена комплекта: сравнить с частями сета
+            parts_by_set = {}
+            for d in final:
+                set_slug = str(d.get("set_slug") or "")
+                price = d.get("price")
+                if set_slug and isinstance(price, (int, float)) and price:
+                    parts_by_set.setdefault(set_slug, []).append(int(price))
+            for d in final:
+                set_slug = str(d.get("set_slug") or "")
+                if not set_slug or d.get("set_price") is None:
+                    continue
+                check = assess_set_price(
+                    d.get("price"), d.get("set_price"),
+                    parts_by_set.get(set_slug) or [])
+                d["set_suspicious"] = check["suspicious"]
+                d["set_suspect_reason"] = check["reason"]
+                d["set_parts_sum"] = check["parts_sum"]
+                d["set_parts_count"] = check["parts_count"]
 
             started = time.time()
             self.mgr.updated.emit(final)
@@ -5712,6 +6096,7 @@ class Scanner:
             # выбор пользователь добавляет сам (кнопка «+ добавить» в панели),
             # здесь только запоминаем награды этой реликвии для меню
             self.last_results = final
+            self.mgr.last_results = final
             append_relic_block(self.cfg, final)
             ocr_ms = max(0.0, perf["ocr"] - perf["match"]) * 1000
             log("scan: capture={:.0f} ocr={:.0f} match={:.0f} "
@@ -5727,6 +6112,7 @@ class Scanner:
             with self._lock:
                 self.busy = False
             log("─" * 60 + "\n")
+            self._drain_pending_scan()
 
     def _write_report(self, data):
         path = os.path.join(DATA_DIR, "last_rewards.txt")
@@ -6861,8 +7247,9 @@ def run_gui(cfg):
                 log(f"  Дроп: «взято» не записано ({type(e).__name__}: {e})")
             try:
                 mark_relic_selection(
-                    cfg, index,
-                    manager.last_results if manager is not None else [])
+                cfg, index,
+                (manager.last_results if manager is not None else [])
+                or (scanner.last_results if scanner is not None else []))
             except Exception as e:
                 log(f"  Журнал: «выбрано» не записано "
                     f"({type(e).__name__}: {e})")
