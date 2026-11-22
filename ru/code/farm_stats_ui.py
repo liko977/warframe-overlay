@@ -1006,6 +1006,7 @@ def build_drops_panel():
                     self.loot_lay.addWidget(head)
                 row = QFrame()
                 row.setObjectName("lootRow")
+                row.setFixedHeight(44)
                 row.setStyleSheet(theme.row_qss(name="lootRow", radius=4))
                 line = QHBoxLayout(row)
                 line.setContentsMargins(8, 3, 8, 3)
@@ -1016,7 +1017,7 @@ def build_drops_panel():
                 t.setFixedWidth(42)
                 t.setStyleSheet(theme.muted_qss(10))
                 t.setToolTip(pick_time_tooltip(drop, session) or when)
-                icon = _item_icon_label(self.cfg, drop, 24)
+                icon = _item_icon_label(self.cfg, drop, 34)
                 full_name = str(drop.get("picked_name") or "")
                 if not full_name:
                     try:
@@ -1067,8 +1068,10 @@ def build_drops_panel():
                 import item_icons
                 drop_chip = item_icons.part_chip_label(
                     str(drop.get("slug") or ""), full_name, row)
-                if drop_chip is not None:
-                    line.addWidget(drop_chip)
+                if drop_chip is not None and drop_chip.text():
+                    line.addWidget(drop_chip, 0, Qt.AlignVCenter)
+                elif drop_chip is not None:
+                    drop_chip.deleteLater()
                 line.addWidget(price)
                 line.addWidget(qty)
                 market = QPushButton("↗")
