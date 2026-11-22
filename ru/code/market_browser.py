@@ -1641,7 +1641,7 @@ def build_market_browser():
             ducats = meta.get("ducats")
             if ducats is not None:
                 self.badges_box.addWidget(
-                    badge_label(f"◆ {int(ducats)} дк", palette["ducats"],
+                    badge_label(f"{int(ducats)} дк", palette["ducats"],
                                 "#1a1400"))
             tax = meta.get("trading_tax")
             if tax is not None:
