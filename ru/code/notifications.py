@@ -29,6 +29,10 @@
 """
 
 import threading
+try:
+    import branding
+except Exception:                       # pragma: no cover — старая сборка
+    branding = None
 import time
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -767,24 +771,29 @@ def build_tray():
         MESSAGE_MS = 8000
 
         def __init__(self, cfg=None, on_open=None, on_updates=None,
-                     on_settings=None, on_exit=None, parent=None):
+                     on_settings=None, on_exit=None, on_about=None,
+                     parent=None):
             super().__init__(parent)
             self.cfg = dict(cfg or {})
             self.on_open = on_open
             self.on_updates = on_updates
             self.on_settings = on_settings
             self.on_exit = on_exit
+            self.on_about = on_about
+            self.app_name = str(getattr(branding, "APP_NAME", "VoidFrameRU")
+                                if branding is not None else "VoidFrameRU")
             self._shown = False
             self._available = False
             self.tray = QSystemTrayIcon(self)
             self.tray.setIcon(self._make_icon())
-            self.tray.setToolTip("Warframe Price Overlay")
+            self.tray.setToolTip(self.app_name)
             self.menu = QMenu()
             self._actions = {}
             for key, title, callback in (
                     ("open", "Открыть", on_open),
                     ("updates", "Проверить обновление", on_updates),
                     ("settings", "Настройки", on_settings),
+                    ("about", "О программе", on_about),
                     ("exit", "Выход", on_exit)):
                 action = self.menu.addAction(title)
                 if key == "settings":
@@ -810,7 +819,20 @@ def build_tray():
 
         @staticmethod
         def _make_icon():
-            """Иконка 32×32: тёмный квадрат с акцентом и «платиной»."""
+            """Иконка трея из assets/brand (tray.png/tray@2x.png) или запасная."""
+            try:
+                if branding is not None:
+                    tray = branding.brand_path("tray.png")
+                    tray2x = branding.brand_path("tray@2x.png")
+                    if tray:
+                        ico = QIcon(tray)
+                        if tray2x:
+                            from PyQt5.QtCore import QSize
+                            ico.addFile(tray2x, QSize(64, 64))
+                        if not ico.isNull():
+                            return ico
+            except Exception:
+                pass
             pix = QPixmap(32, 32)
             pix.fill(Qt.transparent)
             painter = QPainter(pix)
@@ -871,7 +893,7 @@ def build_tray():
             if not self._available:
                 return False
             try:
-                self.tray.showMessage(str(title or "Warframe Overlay"),
+                self.tray.showMessage(str(title or self.app_name),
                                       str(text or ""),
                                       QSystemTrayIcon.Information,
                                       int(self.MESSAGE_MS))
