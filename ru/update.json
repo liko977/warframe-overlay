@@ -1,13 +1,13 @@
 {
-  "version": "1.0.0",
-  "notes": "VoidFrameRU 1.0.0: новое имя и автоматический перенос данных из старой папки; пакет иконок предметов — скачивание один раз, офлайн-работа и недельное автообновление; калибровка скана под разрешение и масштаб интерфейса, геометрия WFInfo, 1–4 карточки без фантомов; словарь и автокоррекция OCR, русские названия в «Дропе» и реальное время; «Дроп» с сеансами (текущий/прошлый/позапрошлый), реликвиями из лога, последним дропом, суммой и доходом; иконки платины и дукатов, тёмное окно уведомлений и «Что нового», видимые кнопки диалогов; exe без консольного окна, ошибки пишутся в app.log. Подробности — в «Что нового» в приложении.",
-  "updated_at": "2026-11-22T16:30:53Z",
+  "version": "1.0.1",
+  "notes": "Исправлен сдвиг плашек при устаревшей калибровке скана; калибровка больше не захватывает окна приложения; «Сбросить калибровку» сразу применяет каноническую сетку.",
+  "updated_at": "2026-11-22T17:31:00Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "bc16a54a49a258b666e5d4fd5c67c2596708a3d132b3aa10751008de4e77cbf2",
+      "sha256": "02a023a30ed9eb47c3cc72ee48cd285f891de19c807c636e2cda6ff52468d2e9",
       "size": 2869
     },
     {
@@ -19,8 +19,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "c4b88f3d4f9e03df946c80c0f3afcac3ebd3ea3d2ecc703c917320fb7eef8c73",
-      "size": 9998
+      "sha256": "d69be4c3329143d9b22771a725669f121fa4b91d301ba6c7a697dc7de207b329",
+      "size": 10521
     },
     {
       "path": "chat_client.py",
@@ -175,8 +175,8 @@
     {
       "path": "scan_calibrate.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/scan_calibrate.py",
-      "sha256": "e75929a52a4f9f26f5985c89d04f2e7fb93919d16213b67df38f4a31474bd635",
-      "size": 51270
+      "sha256": "b53d0350d9d41cd9df7713c3970e057a6034f27ea6596cb603670216d68a95c0",
+      "size": 53796
     },
     {
       "path": "settings_ui.py",
@@ -211,8 +211,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "faf0b5331bacd317b2d32b27e0224ea2017b6fcbc9349e21d5b27941b9c98271",
-      "size": 440197
+      "sha256": "07f2730de0fe840ecb8d583edc77995f2428801ba8a00c25c61a654bcae5914b",
+      "size": 444110
     }
   ]
 }
