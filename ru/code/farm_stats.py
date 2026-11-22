@@ -266,6 +266,7 @@ class FarmStatsCollector:
                 "best_drop": best,
                 "drops": drops,
                 "marks": [],
+                "picks": [],
             })
             for mark in (s.get("marks") or []):
                 if not isinstance(mark, dict):
@@ -281,6 +282,52 @@ class FarmStatsCollector:
                     "at": _to_float(mark.get("at")
                                     or mark.get("picked_utc")),
                 })
+            sess = out["sessions"][-1]
+            # t77: новые picks; старые marks/picked_* мигрируем один раз
+            for pick in (s.get("picks") or []):
+                if not isinstance(pick, dict):
+                    continue
+                pname = str(pick.get("name") or "").strip()
+                if not pname:
+                    continue
+                sess["picks"].append({
+                    "name": pname,
+                    "price": _to_int(pick.get("price")),
+                    "slug": str(pick.get("slug") or ""),
+                    "at": _to_float(pick.get("at")) or 0.0,
+                    "index": _to_int(pick.get("index")),
+                    "tradable": pick.get("tradable"),
+                })
+            if not sess["picks"]:
+                for mark in sess["marks"]:
+                    sess["picks"].append({
+                        "name": mark["name"], "price": mark["price"],
+                        "slug": mark["slug"], "at": mark["at"],
+                        "index": _to_int(mark.get("index")),
+                        "tradable": mark.get("tradable"),
+                    })
+                for drop in drops:
+                    pname = str(drop.get("picked_name") or "").strip()
+                    if not pname:
+                        continue
+                    entry = {
+                        "name": pname,
+                        "price": _to_int(drop.get("picked_price")),
+                        "slug": str(drop.get("slug") or ""),
+                        "at": (_to_float(drop.get("picked_utc"))
+                               or _to_float(drop.get("utc"))
+                               or 0.0),
+                        "index": _to_int(drop.get("picked_index")),
+                        "tradable": drop.get("picked_tradable"),
+                    }
+                    if not any(
+                            str(x.get("name")) == entry["name"]
+                            and _to_int(x.get("price")) == entry["price"]
+                            and _to_int(x.get("index")) == entry["index"]
+                            and abs((_to_float(x.get("at")) or 0.0)
+                                    - entry["at"]) <= 10.0
+                            for x in sess["picks"]):
+                        sess["picks"].append(entry)
         # 1.0.0: счётчики открытий реликвий (EE.log).
         # У старых файлов этих полей нет — total восстанавливаем из сессий,
         # чтобы накопительный счётчик не обнулился при обновлении.
@@ -476,6 +523,7 @@ class FarmStatsCollector:
                 cur["best_drop"] = None
                 cur["last_rel_time"] = None
                 cur["marks"] = []
+                cur["picks"] = []
             self.data["relics_opened_session"] = 0
             self.data["last_relic_at"] = None
             self._cur_keys = set()
@@ -565,15 +613,38 @@ class FarmStatsCollector:
         self.save()
         self._notify()
 
-    def mark_picked(self, name, price=None, index=None, tradable=None):
-        """«Взято: <name>» у последнего дропа текущей игровой сессии.
+    def _add_pick_locked(self, sess, name, price=None, index=None,
+                         slug="", at=None, tradable=None):
+        """Добавить отметку в ``session['picks']`` (дедуп 10 с)."""
+        name = str(name or "").strip()
+        if not name:
+            return None
+        now = float(at if at is not None else self.clock())
+        price = _to_int(price)
+        index = _to_int(index)
+        picks = sess.setdefault("picks", [])
+        for old in reversed(picks):
+            if (str(old.get("name") or "") == name
+                    and _to_int(old.get("price")) == price
+                    and _to_int(old.get("index")) == index
+                    and abs(now - (_to_float(old.get("at")) or 0.0)) <= 10.0):
+                return old
+        pick = {
+            "name": name,
+            "price": price,
+            "slug": str(slug or ""),
+            "at": now,
+            "index": index,
+            "tradable": (None if tradable is None else bool(tradable)),
+        }
+        picks.append(pick)
+        self.logger(f"Дроп: отметка #{index if index is not None else 0} "
+                    f"«{name}» — {price if price is not None else '—'}p "
+                    f"(записей в лут: {len(picks)})")
+        return pick
 
-        Вызывается по Alt+1…4 (после OCR-скана наград). Пишет
-        ``picked_name``/``picked_price``/``picked_index`` (и
-        ``picked_tradable`` — 1.0.0: можно ли продать) в последний дроп
-        активной сессии и сохраняет ``farm_stats.json``. ``False`` — дропов
-        ещё нет (писать некуда).
-        """
+    def mark_picked(self, name, price=None, index=None, tradable=None):
+        """Alt+1…4: записать отметку ТОЛЬКО в ``session['picks']``."""
         name = str(name or "").strip()
         if not name:
             return False
@@ -585,27 +656,8 @@ class FarmStatsCollector:
                 sess = sessions[-1] if sessions else None
             if sess is None:
                 return False
-            drops = sess.get("drops") or []
-            if not drops:
-                return False
-            drop = drops[-1]
-            drop["picked_name"] = name
-            try:
-                drop["picked_price"] = (int(price)
-                                        if price is not None else None)
-            except Exception:
-                drop["picked_price"] = None
-            try:
-                drop["picked_index"] = (int(index)
-                                        if index is not None else None)
-            except Exception:
-                drop["picked_index"] = None
-            if tradable is None:
-                drop["picked_tradable"] = None
-            else:
-                drop["picked_tradable"] = bool(tradable)
-                drop["tradable"] = bool(tradable)
-            drop["picked_utc"] = float(self.clock())
+            self._add_pick_locked(sess, name, price=price, index=index,
+                                  at=self.clock(), tradable=tradable)
             self._recompute_session_locked(sess)
         self.save()
         self._notify()
@@ -613,7 +665,7 @@ class FarmStatsCollector:
 
     def record_pick(self, name, price=None, index=None, slug=None,
                     ts=None, tradable=None):
-        """Записать взятый лут, даже если EE.log ещё не дал дроп."""
+        """Записать отметку Alt+1…4 (только picks, без логового дропа)."""
         name = str(name or "").strip()
         if not name:
             return False
@@ -623,47 +675,38 @@ class FarmStatsCollector:
             sess = self._current_session_locked()
             if sess is None:
                 sess = self._new_session_locked(now)
-            drop = {
-                "rel_time": 0.0, "utc": now, "path": "",
-                "slug": slug, "name": name,
-                "price": (int(price) if price is not None else None),
-                "priced": price is not None,
-                "tradable": (None if tradable is None else bool(tradable)),
-                "picked_name": name,
-                "picked_price": (int(price) if price is not None else None),
-                "picked_index": (int(index) if index is not None else None),
-                "picked_tradable": (None if tradable is None
-                                    else bool(tradable)),
-                "picked_utc": now,
-            }
-            sess.setdefault("drops", []).append(drop)
+            self._add_pick_locked(sess, name, price=price, index=index,
+                                  slug=slug, at=now, tradable=tradable)
             self._recompute_session_locked(sess)
         self.save()
         self._notify()
         return True
 
     def picked_loot(self, limit=200):
-        """Взятые предметы (Alt+1…4), новые сверху."""
+        """Взятые предметы (Alt+1…4) из picks, новые сверху."""
         out = []
         order = 0
         with self._lock:
             for sess in self.data.get("sessions") or []:
                 started = sess.get("started_utc")
-                for drop in sess.get("drops") or []:
-                    name = str(drop.get("picked_name") or "").strip()
+                for pick in sess.get("picks") or []:
+                    name = str(pick.get("name") or "").strip()
                     if not name:
                         continue
                     order += 1
-                    item = copy.deepcopy(drop)
-                    item["picked_name"] = name
-                    item["picked_price"] = _to_int(drop.get("picked_price"))
-                    item["picked_utc"] = (_to_float(drop.get("picked_utc"))
-                                          or _to_float(drop.get("utc"))
-                                          or started or 0.0)
-                    item["session_started_utc"] = started
-                    item["_order"] = order
-                    out.append(item)
-        # при равном времени побеждает более поздняя запись (порядок добавления)
+                    at = (_to_float(pick.get("at")) or started or 0.0)
+                    out.append({
+                        "name": name,
+                        "picked_name": name,
+                        "picked_price": _to_int(pick.get("price")),
+                        "picked_utc": at,
+                        "picked_index": _to_int(pick.get("index")),
+                        "slug": str(pick.get("slug") or ""),
+                        "tradable": pick.get("tradable"),
+                        "picked_tradable": pick.get("tradable"),
+                        "session_started_utc": started,
+                        "_order": order,
+                    })
         out.sort(key=lambda d: (d.get("picked_utc") or 0.0,
                                 d.get("_order") or 0), reverse=True)
         for item in out:
@@ -855,6 +898,7 @@ class FarmStatsCollector:
             "best_drop": None,
             "drops": [],
             "marks": [],
+            "picks": [],
         }
         sessions.append(sess)
         self.data["relics_opened_session"] = 0
@@ -866,9 +910,25 @@ class FarmStatsCollector:
         return sess
 
     def _marks_of_session(self, sess):
-        """Отметки Alt+1…4 сеанса: ``[{name, price, slug, at}]``."""
-        marks = []
+        """Отметки Alt+1…4: только ``session['picks']`` (миграция старых)."""
+        picks = []
         started = _to_float(sess.get("started_utc")) or 0.0
+        for pick in sess.get("picks") or []:
+            name = str(pick.get("name") or "").strip()
+            if not name:
+                continue
+            picks.append({
+                "name": name,
+                "price": _to_int(pick.get("price")),
+                "slug": str(pick.get("slug") or ""),
+                "at": _to_float(pick.get("at")) or started,
+                "index": _to_int(pick.get("index")),
+                "tradable": pick.get("tradable"),
+            })
+        if picks:
+            picks.sort(key=lambda m: m.get("at") or 0.0)
+            return picks
+        # старые данные ещё не мигрированы: только picked_* / marks
         for drop in sess.get("drops") or []:
             name = str(drop.get("picked_name") or "").strip()
             if not name:
@@ -878,27 +938,34 @@ class FarmStatsCollector:
             if not at:
                 rel = _to_float(drop.get("rel_time"))
                 at = (started + rel) if (rel is not None and started) else 0.0
-            marks.append({
-                "name": name,
-                "price": _to_int(drop.get("picked_price")),
-                "slug": str(drop.get("slug") or ""),
-                "at": at,
-            })
+            picks.append({"name": name,
+                          "price": _to_int(drop.get("picked_price")),
+                          "slug": str(drop.get("slug") or ""),
+                          "at": at,
+                          "index": _to_int(drop.get("picked_index")),
+                          "tradable": drop.get("picked_tradable")})
         for mark in sess.get("marks") or []:
-            if not isinstance(mark, dict):
-                continue
             name = str(mark.get("name") or "").strip()
             if not name:
                 continue
-            if any(m["name"] == name and m["at"] == _to_float(mark.get("at"))
-                   for m in marks):
-                continue
-            marks.append({"name": name,
+            picks.append({"name": name,
                           "price": _to_int(mark.get("price")),
                           "slug": str(mark.get("slug") or ""),
-                          "at": _to_float(mark.get("at")) or started})
-        marks.sort(key=lambda m: m.get("at") or 0.0)
-        return marks
+                          "at": _to_float(mark.get("at")) or started,
+                          "index": _to_int(mark.get("index")),
+                          "tradable": mark.get("tradable")})
+        unique = []
+        for item in picks:
+            if any(str(x.get("name")) == str(item.get("name"))
+                   and _to_int(x.get("price")) == _to_int(item.get("price"))
+                   and _to_int(x.get("index")) == _to_int(item.get("index"))
+                   and abs((_to_float(x.get("at")) or 0.0)
+                           - (_to_float(item.get("at")) or 0.0)) <= 10.0
+                   for x in unique):
+                continue
+            unique.append(item)
+        unique.sort(key=lambda m: m.get("at") or 0.0)
+        return unique
 
     def completed_sessions(self, limit=None):
         """Завершённые сеансы, новые сверху (по ``ended_utc``)."""
