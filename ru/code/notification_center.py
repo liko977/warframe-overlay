@@ -327,6 +327,23 @@ class HistoryStore:
         self._records = []
         self.load()
 
+    def _safe_texts(self, title, text):
+        """Убрать traceback/исключения из текста уведомления (1.0.0)."""
+        try:
+            import ui_safe
+        except Exception:
+            return str(title or ""), str(text or "")
+        raw_title = str(title or "")
+        raw_text = str(text or "")
+        title = ui_safe.clean(raw_title, fallback="Уведомление", limit=120)
+        text = ui_safe.tooltip(raw_text, fallback="", limit=400)
+        if ui_safe.has_internal(raw_title) or ui_safe.has_internal(raw_text):
+            try:
+                self.logger("уведомление: внутренний текст скрыт из UI")
+            except Exception:
+                pass
+        return title, text
+
     # ── файл ─────────────────────────────────────────────────────────
     def load(self):
         try:
@@ -380,6 +397,9 @@ class HistoryStore:
     def add(self, kind, title, text="", action="", payload=None, ts=None,
             read=False):
         """Добавить запись (новые сверху, кап ``limit``) и сохранить."""
+        # 1.0.0: никакие traceback/исключения не должны попадать в тосты,
+        # историю и окно уведомлений — только человеческий текст.
+        title, text = self._safe_texts(title, text)
         record = _normalize_record({
             "id": uuid.uuid4().hex[:12],
             "ts": self.clock() if ts is None else ts,
@@ -871,6 +891,261 @@ def dispatch_notification(record, cfg=None, store=None, center=None,
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  UI: «Что нового» — карточка 2 последних патчей (1.0.0)
+# ─────────────────────────────────────────────────────────────────────────
+def _changelog_module():
+    """Модуль changelog.py (рядом с приложением) или None."""
+    try:
+        import changelog
+        return changelog
+    except Exception:
+        try:
+            import importlib.util
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "changelog.py")
+            if not os.path.isfile(path):
+                return None
+            spec = importlib.util.spec_from_file_location("changelog", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception:
+            return None
+
+
+def build_whats_new_card():
+    """Фабрика карточки «Что нового»: 2 последних патча, сверху центра.
+
+    Карточка — информация, а не уведомление: в ``HistoryStore`` не пишется и
+    бейдж не меняет. «Скрыть» запоминает версию в ``cfg["changelog_hidden_for"]``.
+    """
+    from PyQt5.QtCore import Qt, pyqtSignal
+    from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
+                                 QVBoxLayout, QWidget)
+
+    from ui_theme import PALETTE, button_qss
+
+    class _ClickLabel(QLabel):
+        clicked = pyqtSignal()
+
+        def mousePressEvent(self, event):     # noqa: N802 (Qt API)
+            if event.button() == Qt.LeftButton:
+                self.clicked.emit()
+            super().mousePressEvent(event)
+
+    class WhatsNewCard(QFrame):
+        """Компактная карточка «✓ Установлено обновление X» + патчи."""
+
+        MAX_BLOCK_H = 110
+
+        def __init__(self, cfg=None, current_version=None, patches=None,
+                     update_info=None, update_info_fn=None,
+                     on_open_updates=None, open_url=None, save_cfg=None,
+                     changelog_module=None, parent=None):
+            super().__init__(parent)
+            self.cfg = dict(cfg or {})
+            self.module = changelog_module or _changelog_module()
+            self.open_url = open_url
+            self.save_cfg = save_cfg
+            self.on_open_updates = on_open_updates
+            self.update_info_fn = update_info_fn
+            self.update_info = dict(update_info or {})
+            self.current = str(
+                current_version
+                or (getattr(self.module, "app_version", lambda: "")()
+                    if self.module is not None else "") or "").strip()
+            if patches is not None:
+                self.patches = list(patches)
+            elif self.module is not None:
+                try:
+                    self.patches = self.module.recent_patches(
+                        2, current_version=self.current)
+                except Exception:
+                    self.patches = []
+            else:
+                self.patches = []
+            self.hidden_for = str(
+                self.cfg.get("changelog_hidden_for") or "")
+            self.setObjectName("whatsNew")
+            self.setStyleSheet(
+                f"QFrame#whatsNew {{ background:{PALETTE['panel']};"
+                f" border:1px solid {PALETTE['border']};"
+                " border-radius:6px; }")
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(10, 6, 10, 8)
+            outer.setSpacing(4)
+            head = QHBoxLayout()
+            head.setSpacing(6)
+            self.lbl_title = QLabel("")
+            self.lbl_title.setWordWrap(True)
+            self.lbl_title.setStyleSheet(
+                f"color:{PALETTE['success']}; background:transparent;"
+                " font-weight:600;")
+            self.lbl_date = QLabel("")
+            self.lbl_date.setStyleSheet(
+                f"color:{PALETTE['muted']}; background:transparent;"
+                " font-size:9pt;")
+            head.addWidget(self.lbl_title, 1)
+            head.addWidget(self.lbl_date)
+            head.addStretch(0)
+            self.btn_all = QPushButton("Все изменения")
+            self.btn_all.setStyleSheet(button_qss(small=True))
+            self.btn_all.setCursor(Qt.PointingHandCursor)
+            self.btn_all.clicked.connect(self.open_changelog)
+            self.btn_hide = QPushButton("Скрыть")
+            self.btn_hide.setStyleSheet(button_qss(small=True))
+            self.btn_hide.setCursor(Qt.PointingHandCursor)
+            self.btn_hide.clicked.connect(self.hide_card)
+            head.addWidget(self.btn_all)
+            head.addWidget(self.btn_hide)
+            outer.addLayout(head)
+            self.body = QVBoxLayout()
+            self.body.setContentsMargins(0, 0, 0, 0)
+            self.body.setSpacing(2)
+            outer.addLayout(self.body)
+            self.blocks = []
+            self.lbl_update = _ClickLabel("")
+            self.lbl_update.setWordWrap(True)
+            self.lbl_update.setStyleSheet(
+                f"color:{PALETTE['accent']}; background:transparent;")
+            self.lbl_update.setCursor(Qt.PointingHandCursor)
+            self.lbl_update.clicked.connect(self._open_updates)
+            self.lbl_update.hide()
+            outer.addWidget(self.lbl_update)
+            self.render()
+            self.refresh_update()
+
+        # ── отрисовка ──────────────────────────────────────────────
+        def render(self):
+            while self.body.count():
+                item = self.body.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            self.blocks = []
+            notes_versions = list(self.patches or [])
+            if not notes_versions:
+                self.setVisible(False)
+                return False
+            for patch in notes_versions:
+                version = str(patch.get("version") or "").strip()
+                notes = [str(note) for note in (patch.get("notes") or [])
+                         if str(note).strip()][:3]
+                block = QWidget()
+                block.setMaximumHeight(self.MAX_BLOCK_H)
+                block_lay = QVBoxLayout(block)
+                block_lay.setContentsMargins(0, 0, 0, 0)
+                block_lay.setSpacing(0)
+                text = QLabel()
+                text.setWordWrap(True)
+                text.setStyleSheet(
+                    f"color:{PALETTE['text']}; background:transparent;")
+                version_html = version or "—"
+                if notes:
+                    body = "<br>".join(
+                        "• " + note.replace("<", "&lt;").replace(">", "&gt;")
+                        for note in notes)
+                    html = f"<b>{version_html}</b> — {body}"
+                else:
+                    html = f"<b>{version_html}</b> — нет заметок"
+                text.setText(html)
+                block_lay.addWidget(text)
+                self.body.addWidget(block)
+                self.blocks.append(block)
+            self.lbl_title.setText(
+                f"✓ Установлено обновление {self.current or '—'}")
+            date = ""
+            for patch in notes_versions:
+                if str(patch.get("version") or "").strip() == self.current:
+                    date = str(patch.get("date") or "")
+                    break
+            if not date and notes_versions:
+                date = str(notes_versions[0].get("date") or "")
+            self.lbl_date.setText(date)
+            self.lbl_date.setVisible(bool(date))
+            hidden = self.hidden_for == self.current
+            self.setVisible(not hidden)
+            return not hidden
+
+        def is_hidden_for_current(self):
+            return self.hidden_for == self.current
+
+        def is_card_shown(self):
+            """Показывать ли карточку (не зависит от видимости родителя)."""
+            return (not self.isHidden()) and bool(self.patches)
+
+        def refresh_update(self, update_info=None):
+            """Строка «Доступно обновление X → Настройки → Обновления»."""
+            if update_info is not None:
+                self.update_info = dict(update_info or {})
+            elif callable(self.update_info_fn):
+                try:
+                    self.update_info = dict(self.update_info_fn() or {})
+                except Exception:
+                    self.update_info = dict(self.update_info or {})
+            info = dict(self.update_info or {})
+            available = bool(info.get("available"))
+            version = str(info.get("version") or "").strip()
+            if available and version and version != self.current:
+                self.lbl_update.setText(
+                    f"Доступно обновление {version} → Настройки → Обновления")
+                self.lbl_update.show()
+                return True
+            self.lbl_update.hide()
+            return False
+
+        # ── действия ───────────────────────────────────────────────
+        def open_changelog(self):
+            url = ""
+            if self.module is not None:
+                url = str(getattr(self.module, "CHANGELOG_URL", "") or "")
+            opener = self.open_url
+            if not callable(opener):
+                try:
+                    import webbrowser
+                    opener = webbrowser.open
+                except Exception:
+                    opener = None
+            if callable(opener) and url:
+                try:
+                    opener(url)
+                    return url
+                except Exception:
+                    return ""
+            return ""
+
+        def hide_card(self):
+            """«Скрыть»: запомнить версию в config и свернуть карточку."""
+            self.hidden_for = self.current
+            self.cfg["changelog_hidden_for"] = self.current
+            if callable(self.save_cfg):
+                try:
+                    self.save_cfg({"changelog_hidden_for": self.current})
+                except Exception:
+                    pass
+            self.setVisible(False)
+            return True
+
+        def set_cfg(self, cfg):
+            self.cfg = dict(cfg or {})
+            self.hidden_for = str(
+                self.cfg.get("changelog_hidden_for") or "")
+            return self.render()
+
+        def _open_updates(self):
+            if callable(self.on_open_updates):
+                try:
+                    self.on_open_updates()
+                    return True
+                except Exception:
+                    return False
+            return False
+
+    return WhatsNewCard
+
+
+# ─────────────────────────────────────────────────────────────────────────
 #  UI: вкладка «Уведомления» в F8
 # ─────────────────────────────────────────────────────────────────────────
 def build_notification_center():
@@ -933,7 +1208,8 @@ def build_notification_center():
             self.lbl_badge = badge
             title = QLabel(str(record.get("title") or "Уведомление"))
             title.setFont(font(11, True))
-            title.setStyleSheet(f"color:{color('text')}; background:transparent;")
+            title.setStyleSheet(
+                f"color:{color('text')}; background:transparent;")
             self.lbl_title = title
             head.addWidget(badge)
             head.addWidget(title, 1)
@@ -983,12 +1259,21 @@ def build_notification_center():
         record_activated = pyqtSignal(dict)
         unread_changed = pyqtSignal(int, str)
 
-        def __init__(self, cfg, store, parent=None):
+        def __init__(self, cfg, store, parent=None, patches=None,
+                     update_info=None, update_info_fn=None,
+                     on_open_updates=None, open_url=None, save_cfg=None,
+                     whats_new_factory=None):
             super().__init__(parent)
             self.cfg = dict(cfg or {})
             self.store = store
             self.rows = {}
             self.setObjectName("notifCenter")
+            try:
+                self.setAttribute(Qt.WA_StyledBackground, True)
+                if theme is not None:
+                    self.setStyleSheet(theme.notifications_qss())
+            except Exception:
+                pass
             outer = QVBoxLayout(self)
             outer.setContentsMargins(10, 8, 10, 8)
             outer.setSpacing(6)
@@ -1016,10 +1301,35 @@ def build_notification_center():
             head.addWidget(self.btn_mark_all)
             head.addWidget(self.btn_clear)
             outer.addLayout(head)
+            # 1.0.0: карточка «Что нового» — сверху, информация (не запись)
+            self.whats_new = None
+            try:
+                factory = whats_new_factory or build_whats_new_card()
+                self.whats_new = factory(
+                    self.cfg, patches=patches, update_info=update_info,
+                    update_info_fn=update_info_fn,
+                    on_open_updates=on_open_updates, open_url=open_url,
+                    save_cfg=save_cfg)
+                outer.addWidget(self.whats_new)
+            except Exception:
+                self.whats_new = None
             self.scroll = QScrollArea()
+            self.scroll.setObjectName("notifScroll")
             self.scroll.setWidgetResizable(True)
-            self.scroll.setStyleSheet("QScrollArea { border:none; }")
+            self.scroll.setStyleSheet(
+                "QScrollArea { border:none; background:transparent; }")
+            try:
+                self.scroll.viewport().setObjectName("notifViewport")
+                self.scroll.viewport().setAttribute(
+                    Qt.WA_StyledBackground, True)
+            except Exception:
+                pass
             self.body_host = QWidget()
+            self.body_host.setObjectName("notifBody")
+            try:
+                self.body_host.setAttribute(Qt.WA_StyledBackground, True)
+            except Exception:
+                pass
             self.body = QVBoxLayout(self.body_host)
             self.body.setContentsMargins(0, 0, 0, 0)
             self.body.setSpacing(6)
@@ -1037,6 +1347,11 @@ def build_notification_center():
         # ── данные ───────────────────────────────────────────────────
         def set_cfg(self, cfg):
             self.cfg = dict(cfg or {})
+            if self.whats_new is not None:
+                try:
+                    self.whats_new.set_cfg(self.cfg)
+                except Exception:
+                    pass
             self.refresh()
 
         def refresh(self):
@@ -1050,6 +1365,7 @@ def build_notification_center():
             groups = self.store.grouped()
             for label, records in groups:
                 header = QLabel(label)
+                header.setObjectName("notifHeader")
                 header.setFont(font(10, True))
                 header.setStyleSheet(
                     f"color:{color('muted')}; background:transparent;"
@@ -1070,6 +1386,11 @@ def build_notification_center():
                 empty.setWordWrap(True)
                 self.body.addWidget(empty)
             self.body.addStretch(1)
+            if self.whats_new is not None:
+                try:
+                    self.whats_new.refresh_update()
+                except Exception:
+                    pass
             unread = self.store.unread_count()
             self.lbl_count.setText(
                 f"непрочитанных: {unread}" if unread else "всё прочитано")
@@ -1156,6 +1477,34 @@ def build_toast_stack():
         result.setBold(bool(bold))
         return result
 
+    TOAST_BG = "#0D1117"
+    TOAST_BORDER = "#4A7CA6"
+    TOAST_TITLE = "#E6E9EE"
+    TOAST_TEXT = "#9AA7B8"
+    TOAST_TIME = "#7F8B9E"
+    TOAST_RADIUS = 10
+    TOAST_ACCENTS = {
+        "loot": "#43D17C",
+        "chat": "#A07CD8",
+        "system": "#5E82A8",
+        "update": "#A0524E",
+        "market": "#C8A660",
+    }
+
+    def toast_accent(kind, category):
+        kind = canonical_kind(kind)
+        if kind in ("pick", "loot", "drop", "relic", "reward"):
+            return "loot"
+        if kind in ("update", "updates", "app_update",
+                    "update_available"):
+            return "update"
+        if (kind in ("price_drop", "order_bought", "order_sold", "market")
+                or category == CATEGORY_MARKET):
+            return "market"
+        if category == CATEGORY_CHAT:
+            return "chat"
+        return "system"
+
     class ToastWidget(QFrame):
         clicked = pyqtSignal(dict)
         finished = pyqtSignal(object)
@@ -1166,6 +1515,16 @@ def build_toast_stack():
             self.record = dict(record)
             style = kind_style(self.cfg, record.get("kind"))
             self.color = style["color"]
+            accent_kind = toast_accent(record.get("kind"),
+                                       style.get("category"))
+            self.accent_color = TOAST_ACCENTS[accent_kind]
+            self.accent_kind = accent_kind
+            try:
+                opacity = float(self.cfg.get("notify_toast_opacity", 0.95))
+            except Exception:
+                opacity = 0.95
+            self.opacity_value = max(0.6, min(1.0, opacity))
+            self._bg_alpha = int(round(self.opacity_value * 255))
             self.setObjectName("toast")
             self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint |
                                 Qt.WindowStaysOnTopHint)
@@ -1173,17 +1532,18 @@ def build_toast_stack():
             self.setAttribute(Qt.WA_TranslucentBackground, True)
             self.setAttribute(Qt.WA_DeleteOnClose, False)
             self.setFixedWidth(320)
-            self.setStyleSheet(
-                f"QFrame#toast {{ background:{color('panel')};"
-                f" border:1px solid {self.color}; border-radius:8px; }}")
+            self._apply_toast_style()
             layout = QHBoxLayout(self)
             layout.setContentsMargins(0, 0, 10, 0)
             layout.setSpacing(8)
             stripe = QFrame()
-            stripe.setFixedWidth(4)
+            stripe.setObjectName("toastStripe")
+            stripe.setFixedWidth(3)
             stripe.setStyleSheet(
-                f"background:{self.color}; border:none;"
-                " border-top-left-radius:8px; border-bottom-left-radius:8px;")
+                f"background:{self.accent_color}; border:none;"
+                " border-top-left-radius:10px;"
+                " border-bottom-left-radius:10px;")
+            self.stripe = stripe
             layout.addWidget(stripe)
             # иконка предмета с бейджем части (если запись о луте)
             try:
@@ -1197,11 +1557,28 @@ def build_toast_stack():
                 }
                 icon = market_browser.item_icon_label(
                     icon_item, 32, self.cfg, force=True)
-                if icon is not None:
+                if icon is not None and not icon.pixmap().isNull():
                     icon.show()
                     layout.addWidget(icon, 0, Qt.AlignVCenter)
+                    self.icon_widget = icon
+                else:
+                    circle = QLabel()
+                    circle.setFixedSize(32, 32)
+                    circle.setStyleSheet(
+                        f"background:{self.accent_color};"
+                        " border-radius:16px;")
+                    self.icon_widget = circle
+                    layout.addWidget(circle, 0, Qt.AlignVCenter)
             except Exception:
                 pass
+            if getattr(self, "icon_widget", None) is None:
+                circle = QLabel()
+                circle.setFixedSize(32, 32)
+                circle.setStyleSheet(
+                    f"background:{self.accent_color};"
+                    " border-radius:16px;")
+                self.icon_widget = circle
+                layout.addWidget(circle, 0, Qt.AlignVCenter)
             body = QVBoxLayout()
             body.setContentsMargins(8, 7, 0, 7)
             body.setSpacing(2)
@@ -1212,22 +1589,68 @@ def build_toast_stack():
             badge.setStyleSheet(
                 f"color:#0d131c; background:{self.color};"
                 " border-radius:5px; padding:1px 6px;")
-            title = QLabel(str(record.get("title") or "Уведомление"))
+            title_text = str(record.get("title") or "Уведомление")
+            title = QLabel("")
             title.setFont(font(11, True))
             title.setStyleSheet(f"color:{color('text')}; background:transparent;")
+            title.setMaximumWidth(190)
+            try:
+                from PyQt5.QtGui import QFontMetrics
+                title.setText(QFontMetrics(title.font()).elidedText(
+                    title_text, Qt.ElideRight, 190))
+            except Exception:
+                title.setText(title_text)
+            title.setToolTip(title_text)
             head.addWidget(badge)
             head.addWidget(title, 1)
             time_lbl = QLabel(format_clock(record.get("ts")))
-            time_lbl.setFont(font(9))
+            time_lbl.setFont(font(10))
             time_lbl.setStyleSheet(
-                f"color:{color('muted')}; background:transparent;")
+                f"color:{TOAST_TIME}; background:transparent;")
             head.addWidget(time_lbl)
             body.addLayout(head)
-            text = QLabel(str(record.get("text") or ""))
-            text.setFont(font(10))
-            text.setStyleSheet(f"color:{color('text')}; background:transparent;")
+            item_name = str(record.get("item_name")
+                            or record.get("name") or "")
+            try:
+                import item_icons as _ii
+                name_lbl = QLabel(item_name)
+                name_lbl.setFont(font(11, True))
+                name_lbl.setStyleSheet(
+                    f"color:{TOAST_TITLE}; background:transparent;")
+                if item_name:
+                    body.addWidget(name_lbl)
+                chip = _ii.part_chip_label(
+                    str(record.get("item_slug") or record.get("slug") or ""),
+                    item_name, self)
+                if chip is not None and chip.text():
+                    chip.show()
+                    body.addWidget(chip)
+                    if not getattr(self, "icon_badge", None):
+                        tw, th = _ii.part_badge_size(
+                            str(record.get("item_slug") or ""), item_name)
+                        bp = _ii.part_badge_pixmap(
+                            str(record.get("item_slug") or ""), item_name,
+                            tw, th)
+                        if bp is not None and self.icon_widget is not None:
+                            bad = QLabel(self.icon_widget)
+                            bad.setPixmap(bp)
+                            bad.setFixedSize(tw, th)
+                            bad.move(2, 32 - th - 2)
+                            bad.show()
+                            self.icon_badge = bad
+            except Exception:
+                pass
+            raw_text = str(record.get("text") or "")
+            text = QLabel(raw_text)
+            text.setFont(font(11))
+            text.setStyleSheet(
+                f"color:{TOAST_TEXT}; background:transparent;")
             text.setWordWrap(True)
+            text.setToolTip(raw_text)
+            text.setMaximumHeight(
+                3 * text.fontMetrics().lineSpacing() + 2)
             body.addWidget(text)
+            self.lbl_text = text
             layout.addLayout(body, 1)
             try:
                 seconds = float(self.cfg.get("notify_toast_sec", 6) or 6)
@@ -1242,13 +1665,30 @@ def build_toast_stack():
             self.setCursor(Qt.PointingHandCursor)
             try:
                 shadow = QGraphicsDropShadowEffect(self)
-                shadow.setBlurRadius(18)
-                shadow.setOffset(0, 4)
-                shadow.setColor(QColor(0, 0, 0, 160))
+                shadow.setBlurRadius(4)
+                shadow.setOffset(0, 2)
+                shadow.setColor(QColor(0, 0, 0, 55))
                 self.setGraphicsEffect(shadow)
             except Exception:
                 pass
             self.adjustSize()
+
+        def _apply_toast_style(self):
+            self.setStyleSheet(
+                f"QFrame#toast {{ background: rgba(13,17,23,"
+                f"{self._bg_alpha}); border:1px solid {TOAST_BORDER};"
+                f" border-radius:{TOAST_RADIUS}px; }}"
+                " QLabel { background: transparent; }")
+
+        def enterEvent(self, event):       # noqa: N802 (Qt API)
+            self._bg_alpha = 255
+            self._apply_toast_style()
+            super().enterEvent(event)
+
+        def leaveEvent(self, event):       # noqa: N802 (Qt API)
+            self._bg_alpha = int(round(self.opacity_value * 255))
+            self._apply_toast_style()
+            super().leaveEvent(event)
 
         def show_without_focus(self):
             self.show()
@@ -1380,6 +1820,7 @@ def notification_center_defaults():
     return {
         "notify_mode": "overlay",
         "notify_toast_sec": 6,
+        "notify_toast_opacity": 0.95,
         "notify_chat_color": DEFAULT_CHAT_COLOR,
         "notify_market_color": DEFAULT_MARKET_COLOR,
         "notify_price_color": DEFAULT_PRICE_COLOR,
