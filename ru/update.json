@@ -1,7 +1,7 @@
 {
-  "version": "0.7.2",
-  "notes": "«Дроп»: только выбранные награды (Alt+1…4), без строк EE.log; подсказки по вашим биндам",
-  "updated_at": "2026-11-21T23:48:08Z",
+  "version": "0.7.3",
+  "notes": "Цена комплекта: пометка подозрительно низких цен, tooltip с продавцом/временем, кнопка «Открыть на маркете»; карточки наград не теряются; очередь сканов; видимые кнопки в диалогах",
+  "updated_at": "2026-11-22T00:25:21Z",
   "min_launcher": "0.4.0",
   "files": [
     {
@@ -31,13 +31,13 @@
     {
       "path": "farm_stats_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/farm_stats_ui.py",
-      "sha256": "2f596c21d91fec068f511af3099b1970fb5625ec36c6c1112ca69f4849170cb4",
-      "size": 36742
+      "sha256": "87ec300131b637363a9a31a7a5d505de38736315e4c85bee4a9cd1d8f0b773ce",
+      "size": 37862
     },
     {
       "path": "item_icons.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/item_icons.py",
-      "sha256": "8101c565d5c090d2a73274ff4dd7e9be4949dab8e2b9f48bbae13c2e4355cc39",
+      "sha256": "5814d15dfa4d483f202590e64a4f0a99889c71ac7306ffe9b327da65e8f6e9fa",
       "size": 25296
     },
     {
@@ -61,8 +61,8 @@
     {
       "path": "market_browser.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_browser.py",
-      "sha256": "450558654c303d2d3c5b6b99ab4be921b839fc2c758dcb581f3c13ac666e52e8",
-      "size": 82536
+      "sha256": "3b947123cd628db9a28145aa792573e69801c1bdf8cee64a3a1fc97a914edb48",
+      "size": 82676
     },
     {
       "path": "market_browser_login.py",
@@ -139,8 +139,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "a05324056d51b03a4a586cfe4e87d45197abcbedb93d24f925be99bec21b3f65",
-      "size": 346882
+      "sha256": "588e3bc93805e2abc9f214ab06c1545ee085bfb4d25ea471c7b1ae0a36c92fe5",
+      "size": 363451
     }
   ]
 }
