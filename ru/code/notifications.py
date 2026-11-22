@@ -140,10 +140,11 @@ def _merged(cfg):
 def enabled_kinds(cfg):
     """Множество включённых типов событий из ``notify_events``.
 
-    Принимает список/кортеж/множество или строку через запятую. Пустое
-    значение = все события включены (совместимость со старой настройкой).
+    Принимает список/кортеж/множество или строку через запятую.
+    Отсутствующий/None ключ = все события (старый конфиг); пустой список =
+    ни одного (пользователь снял все галочки, t92).
     """
-    raw = (cfg or {}).get("notify_events", DEFAULT_CONFIG["notify_events"])
+    raw = (cfg or {}).get("notify_events")
     if isinstance(raw, str):
         items = [part.strip() for part in raw.split(",") if part.strip()]
     elif isinstance(raw, dict):
@@ -153,6 +154,8 @@ def enabled_kinds(cfg):
     else:
         items = []
     if not items:
+        if isinstance(raw, (list, tuple, set)):
+            return set()
         return set(ALL_KINDS)
     return {item.lower() for item in items}
 
@@ -160,6 +163,15 @@ def enabled_kinds(cfg):
 def kind_enabled(cfg, kind):
     """Включён ли конкретный тип события."""
     return str(kind or "").lower() in enabled_kinds(cfg)
+
+def events_summary(cfg):
+    """Строка лога: включённые/выключенные типы."""
+    enabled = [kind for kind in (cfg or {}).get(
+        "notify_events", DEFAULT_CONFIG["notify_events"])
+        if str(kind).lower() in enabled_kinds(cfg)]
+    disabled = [kind for kind in ALL_KINDS if kind not in enabled]
+    return (f"Уведомления: включены [{', '.join(enabled)}] "
+            f"(выключены: {', '.join(disabled) or '—'})")
 
 
 def cooldown_seconds(cfg):
@@ -304,6 +316,7 @@ class NotificationManager:
         self._cooldowns = {}       # ключ события -> время последнего показа
         self._seen = {}            # анти-дубли Баро/фиссур (dict как OrderedDict)
         self._orders_snapshot = None   # {order_id: quantity} sell
+        self._skipped = set()
         self.sent = []             # история отправленных (тесты/диагностика)
 
     # ── настройки ─────────────────────────────────────────────────────
@@ -342,7 +355,19 @@ class NotificationManager:
         self._cooldowns.clear()
         self._seen.clear()
         self._orders_snapshot = None
+        self._skipped.clear()
         self.sent.clear()
+
+    def apply_cfg(self, cfg):
+        """Применить новые настройки без перезапуска (t92)."""
+        self.cfg = _merged(cfg)
+        self._skipped.clear()
+        self.logger(events_summary(self.cfg))
+        return self.cfg
+
+    def should_notify(self, kind, subject="", force=False, now=None):
+        """Публичный алиас can_notify (t92)."""
+        return self.can_notify(kind, subject, force=force, now=now)
 
     # ── отправка ──────────────────────────────────────────────────────
     def can_notify(self, kind, subject="", force=False, now=None):
@@ -351,6 +376,12 @@ class NotificationManager:
             if not self.notify_enabled():
                 return False
             if not self.kind_enabled(kind):
+                key = str(kind or "")
+                if key not in self._skipped:
+                    self._skipped.add(key)
+                    self.logger(
+                        f"Уведомление {key} пропущено "
+                        "(выключено в настройках)")
                 return False
             if not self._focus_allows():
                 return False
