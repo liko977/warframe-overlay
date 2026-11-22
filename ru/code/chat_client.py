@@ -28,6 +28,15 @@ except Exception:                       # pragma: no cover
     theme = None
 
 
+def _safe_log(context, exc=None):
+    """Одна строка в app.log, без repr/traceback (1.0.0)."""
+    try:
+        import ui_safe
+        return ui_safe.log_internal(context, exc)
+    except Exception:
+        return str(context or "ошибка")
+
+
 HTTP_BASE = "https://api.warframe.market/v1"
 CHATS_PATH = "/im/chats"
 WS_URL = "wss://warframe.market/socket?platform=pc"
@@ -663,7 +672,7 @@ class _QtWebSocketTransport:
 # ─────────────────────────────────────────────────────────────────────────
 def build_chat_service():
     """Фабрика QObject-сервиса: сигналы списка/истории/новых сообщений."""
-    from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+    from PyQt5.QtCore import QObject, QTimer, Qt, pyqtSignal
 
     class ChatService(QObject):
         chats_ready = pyqtSignal(list)
@@ -672,6 +681,11 @@ def build_chat_service():
         status_changed = pyqtSignal(str)
         message_received = pyqtSignal(dict)
         message_sent = pyqtSignal(dict)
+        # 1.0.0: таймер резервного опроса запускается ТОЛЬКО в GUI-потоке.
+        # WS-поток эмитит сигнал → Qt доставляет queued-вызовом, без
+        # RuntimeError «cannot be started from another thread».
+        fallback_start = pyqtSignal()
+        fallback_stop = pyqtSignal()
 
         def __init__(self, cfg, token_fn=None, notify_fn=None,
                      login_check=None, http=None, socket_factory=None,
@@ -694,6 +708,29 @@ def build_chat_service():
             self._fallback = QTimer(self)
             self._fallback.setInterval(FALLBACK_POLL_SEC * 1000)
             self._fallback.timeout.connect(self.poll_once)
+            # 1.0.0: старт/стоп таймера — только через queued-сигналы, чтобы
+            # WS-поток не запускал QTimer «из другого потока».
+            self.fallback_start.connect(self._start_fallback,
+                                        Qt.QueuedConnection)
+            self.fallback_stop.connect(self._stop_fallback,
+                                       Qt.QueuedConnection)
+
+        def _start_fallback(self):
+            try:
+                if not self._fallback.isActive():
+                    self._fallback.start()
+                return True
+            except Exception as exc:
+                _safe_log("чат: резервный опрос не запущен", exc)
+                return False
+
+        def _stop_fallback(self):
+            try:
+                self._fallback.stop()
+                return True
+            except Exception as exc:
+                _safe_log("чат: резервный опрос не остановлен", exc)
+                return False
 
         # ── состояние ─────────────────────────────────────────────────
         def has_token(self):
@@ -729,15 +766,13 @@ def build_chat_service():
             self.socket.start()
             self.refresh_chats(force=True)
             if not self.socket.connected:
-                self._fallback.start()
+                self._start_fallback()
                 self._set_status(READ_ONLY_TEXT)
             return True
 
         def _on_socket_connected(self):
-            try:
-                self._fallback.stop()
-            except Exception:
-                pass
+            # вызывается из WS-потока: таймер трогаем только через сигнал
+            self.fallback_stop.emit()
             self._set_status("чат: на связи")
 
         def stop(self):
@@ -745,10 +780,7 @@ def build_chat_service():
             if self.socket is not None:
                 self.socket.stop()
                 self.socket = None
-            try:
-                self._fallback.stop()
-            except Exception:
-                pass
+            self.fallback_stop.emit()
             return True
 
         # ── HTTP в фоне ───────────────────────────────────────────────
@@ -846,7 +878,8 @@ def build_chat_service():
         def _on_socket_disconnected(self, status=""):
             if not self.socket or self.socket.stopped:
                 return
-            self._fallback.start()
+            # WS-поток → queued-сигнал → QTimer.start() в GUI-потоке
+            self.fallback_start.emit()
             self._set_status(READ_ONLY_TEXT)
 
         def chat_by_id(self, chat_id):
