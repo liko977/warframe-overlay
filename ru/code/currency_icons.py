@@ -113,8 +113,8 @@ def icon_path(currency, size=None, scale=None, big=False):
 
 
 # ── Qt: QPixmap и маленький QLabel ─────────────────────────────────────
-def pixmap(currency, size=None, scale=None, big=False):
-    """``QPixmap`` с иконкой (кэш) или ``None``."""
+def pixmap(currency, size=None, scale=None, big=False, exact=False):
+    """``QPixmap`` с иконкой (кэш) или ``None``; ``exact`` — точный size."""
     path = icon_path(currency, size=size, scale=scale, big=big)
     if not path:
         return None
@@ -127,10 +127,24 @@ def pixmap(currency, size=None, scale=None, big=False):
         pix = QPixmap(path)
         if pix.isNull():
             return None
+        if exact and size:
+            from PyQt5.QtCore import Qt
+            side = max(1, int(size))
+            pix = pix.scaled(side, side, Qt.KeepAspectRatio,
+                             Qt.SmoothTransformation)
+            if pix.isNull():
+                return None
         _pixmap_cache[key] = pix
         return pix
     except Exception:
         return None
+
+
+def currency_pixmap(currency, size, cfg=None):
+    """Единый helper: non-null QPixmap ровно size×size или None (t97)."""
+    if not enabled(cfg):
+        return None
+    return pixmap(currency, size=size, exact=True)
 
 
 def icon_label(currency, cfg=None, size=None, scale=None, big=False,
@@ -142,7 +156,7 @@ def icon_label(currency, cfg=None, size=None, scale=None, big=False,
     """
     if not enabled(cfg):
         return None
-    pix = pixmap(currency, size=size, scale=scale, big=big)
+    pix = currency_pixmap(currency, int(size or 16), cfg=cfg)
     if pix is None:
         return None
     try:
@@ -152,7 +166,7 @@ def icon_label(currency, cfg=None, size=None, scale=None, big=False,
         label.setPixmap(pix)
         label.setFixedSize(pix.width(), pix.height())
         label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet("background: transparent;")
+        label.setStyleSheet("background: transparent; border: none;")
         title = TITLES.get(str(currency or "").lower(), "")
         if title:
             label.setToolTip(title)
@@ -232,6 +246,7 @@ def clear_cache():
 
 
 __all__ = ["CURRENCIES", "SUFFIX", "TITLES", "SIZES", "INLINE_PX",
-           "asset_dir", "choose_size", "icon_path", "pixmap", "icon_label",
+           "asset_dir", "choose_size", "icon_path", "pixmap",
+           "currency_pixmap", "icon_label",
            "enabled", "html", "format_money", "with_suffix_text",
            "total_html", "clear_cache"]
