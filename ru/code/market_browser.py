@@ -258,6 +258,7 @@ def build_market_browser():
             buttons.addWidget(self.btn_cancel)
             buttons.addWidget(self.btn_confirm)
             layout.addLayout(buttons)
+            self.btn_cancel.setFocus()
 
     class _MessageDialog(_ThemedDialog):
         """Сообщение с видимой кнопкой «ОК» (замена QMessageBox в маркете)."""
@@ -1700,4 +1701,6 @@ def build_market_browser():
             return [w for w in self.orders_body.findChildren(QFrame)
                     if w.objectName() == "mRow"]
 
+    MarketBrowser.ConfirmDialog = _ConfirmDialog
+    MarketBrowser.MessageDialog = _MessageDialog
     return MarketBrowser
