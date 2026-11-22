@@ -101,6 +101,7 @@ _PART_EN = {
     "lower_limb": ("Нижнее плечо", "НП", "#6FA8C8"),
     "band": ("Застёжка", "Зас", "#8E7CB0"),
     "buckle": ("Застёжка", "Зас", "#8E7CB0"),
+    "guard": ("Эфес", "Эф", "#C8A660"),
 }
 _BADGE_CACHE = {}
 
@@ -276,18 +277,27 @@ def part_chip_html(value="", name=""):
 def part_chip_label(value="", name="", parent=None):
     """QLabel-чип: фон #262F40, текст цвета типа, radius 8, 9px bold."""
     try:
-        from PyQt5.QtWidgets import QLabel
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import QLabel, QSizePolicy
         style = part_style(value, name)
         label = QLabel(parent)
         if not style.get("is_part"):
             label.hide()
+            label.setParent(None)
             return label
-        label.setText(part_word(value, name) or style["type"])
+        text = part_word(value, name) or style["type"]
+        label.setText(text)
         label.setStyleSheet(
             f"background:#262F40; color:{style['color']};"
             " font-size:9px; font-weight:700; border-radius:8px;"
             " padding:2px 6px;")
-        label.setToolTip(part_word(value, name) or style["type"])
+        label.setToolTip(text)
+        label.setAlignment(Qt.AlignCenter)
+        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        label.setFixedHeight(18)
+        width = label.fontMetrics().horizontalAdvance(text) + 16
+        label.setMaximumWidth(max(24, width))
+        label.adjustSize()
         return label
     except Exception:
         return None
@@ -680,7 +690,12 @@ def bundle_pixmap(key):
                     _BUNDLE_CACHE["names"].setdefault(stem, name)
         except Exception:
             return None
-    name = _BUNDLE_CACHE["names"].get(slug)
+    name = ""
+    for candidate in library_candidates(slug):
+        name = _BUNDLE_CACHE["names"].get(candidate)
+        if name:
+            slug = candidate
+            break
     if not name:
         return None
     pix = _BUNDLE_CACHE["pix"].get(slug)
@@ -831,6 +846,25 @@ def library_status(base_dir=None):
             size = 0
     return {"files": files, "bytes": size, "have_pack": bool(count),
             "bundle": bool(path), "bundle_count": count}
+
+
+def library_candidates(slug):
+    """Кандидаты файла: точный → без *_blueprint → родитель/сет."""
+    key = str(slug or "").strip()
+    if not key:
+        return []
+    out = [key]
+    if key.endswith("_blueprint"):
+        out.append(key[:-len("_blueprint")])
+    try:
+        is_part, _badge, parent = part_info(key)
+    except Exception:
+        is_part, parent = False, ""
+    if is_part and parent:
+        out += [parent + "_set", parent]
+    # без дублей
+    seen = set()
+    return [x for x in out if x and not (x in seen or seen.add(x))]
 
 
 def is_set_item(slug="", name=""):
@@ -1099,11 +1133,12 @@ class ItemIconProvider:
         return os.path.join(self.icons_dir, safe + ext)
 
     def _find_disk(self, key):
-        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(key))[:120]
-        name = self._disk_files().get(safe)
-        if not name:
-            return ""
-        return os.path.join(self.icons_dir, name)
+        for candidate in library_candidates(key):
+            safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(candidate))[:120]
+            name = self._disk_files().get(safe)
+            if name:
+                return os.path.join(self.icons_dir, name)
+        return ""
 
     def _make_placeholder(self, size=32):
         try:
