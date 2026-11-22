@@ -65,6 +65,7 @@ import re
 import sys
 import threading
 import time
+_MODULE_TS = time.time()
 import traceback
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -73,7 +74,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
-APP_VERSION = "0.7.3"
+APP_NAME = "VoidFrameRU"
+APP_VERSION = "1.0.0"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -97,7 +99,11 @@ def _app_dir():
 
 
 def _pick_data_dir(app_dir):
-    """Папка для config.json / кэшей: рядом с программой, иначе LOCALAPPDATA/temp."""
+    """Папка данных: ``%LOCALAPPDATA%\\VoidFrameRU`` (1.0.0), затем запасные.
+
+    Старые каталоги (``WarframePriceOverlayRU``) больше не используются для
+    записи — оттуда данные копирует :mod:`data_migration` при первом запуске.
+    """
     env = os.environ.get("WF_DATA_DIR")
     if env:
         try:
@@ -105,11 +111,11 @@ def _pick_data_dir(app_dir):
             return env
         except Exception:
             pass
-    candidates = [app_dir,
-                  os.path.join(os.environ.get("LOCALAPPDATA") or
-                               os.path.expanduser("~"), "WarframePriceOverlay"),
+    local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    candidates = [os.path.join(local, APP_NAME),
+                  app_dir,
                   os.path.join(os.environ.get("TEMP") or os.path.expanduser("~"),
-                               "WarframePriceOverlay")]
+                               APP_NAME)]
     for d in candidates:
         try:
             os.makedirs(d, exist_ok=True)
@@ -180,18 +186,25 @@ DEFAULT_CONFIG = {
     "last_update_notified": "",      # одна нотификация на версию
 
     # ── экран / геометрия (координаты для 1920x1080) ────────────────────
+    # 1.0.0: цифры экрана наград перенесены из WFInfo (v9.8.2) — см.
+    # reward_geometry.py (единая точка правды) и WFINFO_RESEARCH.md §1.
     "monitor": 1,                    # 1 = основной монитор (mss)
     "base_width": 1920,
     "base_height": 1080,
-    "card_width": 240,               # ширина карточки
-    "card_pitch": 250,               # шаг между карточками
-    "cards_center_x": 965,           # центр ряда карточек
-    "card_top": 220,                 # верх карточки
-    "card_height": 250,
-    "name_offset_y": 140,            # текст названия = card_top + это
-    "name_height": 100,
-    "owned_strip_height": 40,        # шапка карточки: Crafted / N Owned
-    "scan_band": {"top": 340, "left": 300, "width": 1320, "height": 145},
+    "card_width": 242,               # ширина карточки (968/4, вплотную)
+    "card_pitch": 242,               # шаг между карточками (= ширине)
+    "cards_center_x": 960,           # центр ряда карточек = W/2
+    "card_top": 224,                 # верх карточки = H/2 - 316
+    "card_height": 235,              # высота карточки
+    "name_offset_y": 187,            # полоса названия = card_top + это (411)
+    "name_height": 48,               # высота полосы названия (до 2 строк)
+    "owned_strip_height": 30,        # шапка карточки: Crafted / N Owned
+    # OCR-полоса выведена ИЗ геометрии: полоса имён 411..459 + запас 15 px
+    "scan_band": {"left": 461, "top": 396, "width": 998, "height": 78},
+    # 1.0.0: UI scale игры (Flash.FlashDrawScale из EE.cfg); 0 = читать из игры
+    "ui_scaling": 0.0,
+    # 1.0.0: тема интерфейса для диагностики: "auto" или имя темы (19 тем)
+    "game_theme": "auto",
     "overlay_offset_y": 14,          # отступ плашки от низа карточки
     "overlay_layout": "bottom",      # "under_cards" | "bottom"
     "overlay_top": 830,              # для layout=bottom: верх плашек (y в базовых 1080)
@@ -225,6 +238,12 @@ DEFAULT_CONFIG = {
     "show_summary": True,            # показывать блок «Итого» над плашками
     "show_item_icons": True,         # иконки предметов WFCD в UI
     "overlay_show_set_price": True,   # «компл. N p» на карточке части
+    "currency_icons": True,           # 1.0.0: иконки платины/дукатов вместо «p»/«дк»
+    # ── пакет иконок предметов (1.0.0, см. icon_pack.py) ───────────────
+    "icons_pack_enabled": True,      # пакет иконок включён (кнопки в настройках)
+    "icons_allow_manual_download": True,  # 1.0.0: сеть только по кнопке
+    "icons_update_days": 7,          # автообновление пака раз в N дней (0 = выкл.)
+    "icons_rate_limit": 3.0,         # запросов/с к маркету (ToS: не более 3)
 
     # ── игровой лог EE.log (только чтение, см. LOG_SPEC.md) ─────────────
     "log_enabled": True,             # читать EE.log «хвостом» как доп. источник
@@ -268,6 +287,7 @@ DEFAULT_CONFIG = {
     # ── центр уведомлений в оверлее (t15) ──────────────────────────────
     "notify_mode": "overlay",        # overlay (свои тосты) | system (трей)
     "notify_toast_sec": 6,           # сколько висит свой тост
+    "notify_toast_opacity": 0.95,     # непрозрачность подложки тоста
     "notify_chat_color": "#4aa8ff",  # акцент чата
     "notify_market_color": "#43d17c",  # акцент «куплен ордер»
     "notify_price_color": "#f5c451",   # акцент «цена ниже моей»
@@ -276,6 +296,7 @@ DEFAULT_CONFIG = {
     "chat_url": "https://warframe.market/",  # пока чата в приложении нет
     "chat_enabled": True,             # вкладка «Чат» warframe.market
     "status_auto": False,             # авто ingame/online по фокусу игры
+    "status_mode": "online",          # 1.0.0: явный статус (авто-режим убран)
     "status_restore_online": True,    # при выходе вернуть «Онлайн»
     "status_poll_ms": 5000,           # период проверки фокуса в авто-режиме
 
@@ -365,15 +386,15 @@ def startup_line():
     try:
         frozen = bool(getattr(sys, "frozen", False))
         lefts = [int(round(x)) for x in card_lefts(4, DEFAULT_CONFIG)]
-        return (f"=== Warframe Price Overlay {APP_VERSION} | "
+        return (f"=== VoidFrameRU {APP_VERSION} | "
                 f"{'exe' if frozen else 'source'} | "
                 f"{platform.platform()} | python {platform.python_version()} | "
                 f"data={DATA_DIR} | lefts={lefts} ===")
     except Exception:
-        return f"=== Warframe Price Overlay {APP_VERSION} ==="
+        return f"=== VoidFrameRU {APP_VERSION} ==="
 
 
-def themed_message(parent, text, title="Warframe Overlay", warning=False):
+def themed_message(parent, text, title="VoidFrameRU", warning=False):
     """Тематический информационный диалог с видимой кнопкой «ОК»."""
     try:
         mod = market_browser_module()
@@ -388,7 +409,147 @@ def themed_message(parent, text, title="Warframe Overlay", warning=False):
         return None
 
 
-def themed_confirm(parent, text, title="Warframe Overlay",
+# ── 1.0.0: брендинг и миграция данных ──────────────────────────────────
+_BRANDING_MODULE = {"tried": False, "mod": None}
+_OCR_CORRECT_MODULE = {"tried": False, "mod": None}
+
+_CURRENCY_ICONS_MODULE = {"tried": False, "mod": None}
+
+
+def currency_icons_module():
+    """Модуль ``currency_icons.py`` (иконки платины/дукатов, 1.0.0)."""
+    return _load_local_module("currency_icons.py", "currency_icons",
+                              _CURRENCY_ICONS_MODULE)
+
+
+def currency_icon_html(currency, cfg=None, px=None):
+    """HTML-иконка валюты или текстовый суффикс «p»/«дк» (фолбэк)."""
+    suffix = "дк" if str(currency).lower() == "ducats" else "p"
+    mod = currency_icons_module()
+    if mod is None:
+        return suffix
+    try:
+        return mod.html(currency, cfg, px=px)
+    except Exception:
+        return suffix
+
+
+def currency_sep(icon):
+    """Разделитель: неразрывный для картинки, обычный пробел для «p»/«дк»."""
+    return "&#160;" if str(icon or "").startswith("<img") else " "
+
+
+def money_html(amount, currency="platinum", cfg=None):
+    """Сумма + иконка валюты (rich-text) с текстовым фолбэком."""
+    mod = currency_icons_module()
+    suffix = "дк" if str(currency).lower() == "ducats" else "p"
+    if mod is None:
+        try:
+            return f"{int(round(float(amount)))} {suffix}"
+        except Exception:
+            return f"{amount} {suffix}"
+    try:
+        return mod.format_money(amount, currency=currency, cfg=cfg)
+    except Exception:
+        return f"{amount} {suffix}"
+
+
+def currency_icon_label(currency, cfg=None, size=16, scale=None):
+    """Маленький QLabel с иконкой валюты (для полей ввода) или None."""
+    mod = currency_icons_module()
+    if mod is None:
+        return None
+    try:
+        return mod.icon_label(currency, cfg, size=size, scale=scale)
+    except Exception:
+        return None
+
+_DATA_MIGRATION_MODULE = {"tried": False, "mod": None}
+
+
+def branding_module():
+    """Модуль ``branding.py`` (имя/версия/пути к ассетам)."""
+    return _load_local_module("branding.py", "branding", _BRANDING_MODULE)
+
+
+def data_migration_module():
+    """Модуль ``data_migration.py`` (копирование данных старой версии)."""
+    return _load_local_module("data_migration.py", "data_migration",
+                              _DATA_MIGRATION_MODULE)
+
+
+def run_data_migration(data_dir=None, app_dir=None):
+    """Скопировать данные WarframePriceOverlayRU → VoidFrameRU при старте.
+
+    Не запускается, если каталог данных задан явно через ``WF_DATA_DIR``
+    (портативный режим/тесты): там данные уже лежат на месте.
+    """
+    if os.environ.get("WF_DATA_DIR"):
+        return {"migrated": False, "skipped": ["WF_DATA_DIR"]}
+    mod = data_migration_module()
+    if mod is None:
+        log("Данные: модуль миграции недоступен — работаю как есть")
+        return {"migrated": False, "errors": ["модуль недоступен"]}
+    try:
+        return mod.migrate_if_needed(data_dir or DATA_DIR,
+                                     app_dir or APP_DIR, logger=log) or {}
+    except Exception as exc:
+        log(f"Данные: миграция не выполнена ({type(exc).__name__})")
+        return {"migrated": False, "errors": [type(exc).__name__]}
+
+
+def app_icon():
+    """QIcon приложения из ``assets/brand/icon.ico`` (или None)."""
+    try:
+        from PyQt5.QtGui import QIcon
+    except Exception:
+        return None
+    mod = branding_module()
+    path = ""
+    if mod is not None:
+        try:
+            path = mod.brand_path("icon.ico")
+        except Exception:
+            path = ""
+    if not path:
+        return None
+    try:
+        icon = QIcon(path)
+        return icon if not icon.isNull() else None
+    except Exception:
+        return None
+
+
+def third_party_notices_path():
+    """Путь к THIRD_PARTY_NOTICES.md (исходники/_internal/_MEIPASS)."""
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+        roots.append(getattr(sys, "_MEIPASS", ""))
+    roots += [os.path.dirname(os.path.abspath(__file__)), os.getcwd()]
+    for root in roots:
+        if not root:
+            continue
+        path = os.path.join(root, "THIRD_PARTY_NOTICES.md")
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def show_about(parent=None):
+    """Пункт «О программе»: имя, версия и подсказка про данные/логи."""
+    text = (f"{APP_NAME} {APP_VERSION}\n\n"
+            "Русский оверлей цен warframe.market: скан наград, «Дроп», "
+            "маркет и чат.\n"
+            f"Данные: {DATA_DIR}\n"
+            f"Лог: {app_log_path()}\n\n"
+            "Сторонние компоненты и лицензии — см. THIRD_PARTY_NOTICES.md"
+            + (f"\n{third_party_notices_path()}"
+               if third_party_notices_path() else ""))
+    return themed_message(parent, text, title=f"О программе {APP_NAME}")
+
+
+def themed_confirm(parent, text, title="VoidFrameRU",
                    confirm_text="Да", cancel_text="Отмена", danger=False):
     """Тематическое подтверждение; Enter — да, Esc/Отмена — нет."""
     try:
@@ -407,8 +568,9 @@ def themed_confirm(parent, text, title="Warframe Overlay",
 
 
 def startup_error_text(exc):
-    reason = f"{type(exc).__name__}: {exc}".strip()
-    return (f"Не удалось запустить: {reason}.\n"
+    # 1.0.0: в диалоге — только тип ошибки; текст/трейс — в app.log
+    reason = type(exc).__name__ if exc is not None else "ошибка"
+    return (f"Не удалось запустить ({reason}).\n"
             f"Подробности в {app_log_path()}")
 
 
@@ -427,7 +589,7 @@ def show_startup_error(exc):
             box.setStyleSheet(ui_theme().dialog_qss())
         except Exception:
             pass
-        box.setWindowTitle("Warframe Price Overlay")
+        box.setWindowTitle("VoidFrameRU")
         box.setIcon(QMessageBox.Critical)
         box.setText(startup_error_text(exc))
         box.setStandardButtons(QMessageBox.Ok)
@@ -587,6 +749,33 @@ PART_WORDS = ("Тетива", "Плечо", "Верхнее Плечо", "Ниж
               "Приёмник", "Ствол", "Приклад", "Клинок", "Рукоять",
               "Связь", "Каркас", "Нейрооптика", "Система", "Застёжка",
               "Пряжка", "Ошейник")
+
+
+def ocr_correct_module():
+    """Модуль ``ocr_correct.py`` (автокоррекция OCR, 1.0.0)."""
+    return _load_local_module("ocr_correct.py", "ocr_correct",
+                              _OCR_CORRECT_MODULE)
+
+
+def _ocr_fix_name(name, cfg=None):
+    """Скорректировать распознанное название; вернуть ``(name, changed)``.
+
+    Без словаря/модуля возвращает исходное имя (фолбэк без падений).
+    """
+    text = str(name or "")
+    if not text:
+        return text, False
+    mod = ocr_correct_module()
+    if mod is None:
+        return text, False
+    try:
+        fixed, info = mod.correct_name(text, cfg=cfg, logger=log)
+    except Exception as exc:
+        log(f"OCR: корректор не сработал ({type(exc).__name__})")
+        return text, False
+    if fixed and fixed != text:
+        return fixed, bool(info.get("corrected"))
+    return text, False
 
 
 def fix_part_names(text):
@@ -758,19 +947,29 @@ def loot_sell_status(record, client, browser=None):
             "tooltip": "Выставить на продажу по цене рынка"}
 
 
-def pick_toast_record(result, duplicate=False):
-    """Запись эфемерного тоста лута (без HistoryStore)."""
+def pick_toast_record(result, duplicate=False, cfg=None):
+    """Запись эфемерного тоста лута (без HistoryStore).
+
+    ``cfg`` — конфиг приложения: если передан, цены показываются с иконками
+    валют (1.0.0); без него — прежний текстовый формат («12p»).
+    """
     result = dict(result or {})
     item = result.get("item") if isinstance(result.get("item"), dict) else {}
     name = str(result.get("name") or item.get("market_name")
                or item.get("name") or "предмет")
     price = result.get("price", item.get("price"))
+    ducats = item.get("ducats")
     text = name
     if isinstance(price, (int, float)) and price:
-        text += f" — {int(price)}p"
-    ducats = item.get("ducats")
+        if cfg is None:
+            text += f" — {int(price)}p"
+        else:
+            text += " — " + money_html(price, cfg=cfg)
     if isinstance(ducats, (int, float)) and ducats:
-        text += f" · дукаты: {int(ducats)}"
+        if cfg is None:
+            text += f" · дукаты: {int(ducats)}"
+        else:
+            text += " · дукаты: " + money_html(ducats, "ducats", cfg=cfg)
     return {
         "kind": "pick",
         "title": ("Уже в дропах" if duplicate else "Добавлено в Дропы"),
@@ -900,6 +1099,8 @@ class MarketAPI:
         self.items = {}             # norm_name -> {"slug", "name", "lang", "gameRef"}
         self.ref_to_slug = {}       # gameRef -> slug (для лог-пайплайна EE.log)
         self._loaded = False
+        #: 1.0.0: уже залогированные неторгуемые предметы (по slug/имени)
+        self._nontradable_logged = set()
 
     # ── HTTP ───────────────────────────────────────────────────────────
     def _get(self, url, retries=2):
@@ -1003,23 +1204,24 @@ class MarketAPI:
         log(f"Индекс путей предметов: {len(self.ref_to_slug)} (gameRef → slug)")
         return True
 
-    def load_items(self):
-        if self._loaded:
+    def load_items(self, force=False):
+        if self._loaded and not force:
             return True
-        # диск
+        # диск: кэш применяем сразу, даже если он старый (t60)
         try:
-            if os.path.exists(ITEMS_CACHE):
+            if not force and os.path.exists(ITEMS_CACHE):
                 with open(ITEMS_CACHE, "r", encoding="utf-8") as f:
                     d = json.load(f)
-                if time.time() - d.get("ts", 0) < self.cfg.get("items_cache_ttl", 86400):
-                    self.items = d.get("items") or {}
-                    if self.items:
-                        self._loaded = True
-                        self._restore_ref_index(d)
-                        log(f"База предметов: {len(self.items)} (кэш)")
-                        return True
+                self.items = d.get("items") or {}
+                if self.items:
+                    self._loaded = True
+                    self._restore_ref_index(d)
+                    log(f"База предметов: {len(self.items)} (кэш)")
+                    return True
         except Exception:
             pass
+        if not force:
+            return False
         # сеть
         try:
             data = self._get(ITEMS_ENDPOINT)
@@ -1047,7 +1249,9 @@ class MarketAPI:
                     if key and key not in items:
                         items[key] = {"slug": slug, "name": name, "lang": lang,
                                       "gameRef": game_ref,
-                                      "icon": icon, "thumb": thumb}
+                                      "icon": icon, "thumb": thumb,
+                                      # 1.0.0: флаг торговли из /v2/items
+                                      "tradable": it.get("tradable")}
             if items:
                 with self._lock:
                     self.items = items
@@ -1201,10 +1405,18 @@ class MarketAPI:
         }
 
     def _match_with_fallback(self, name):
-        """Матчинг имени; для чертежей пробуем базовое имя (Forma)."""
+        """Матчинг имени; базовое имя подставляем только НЕ для чертежей.
+
+        1.0.0: ``Forma Blueprint`` больше не даёт цену готовой ``Forma`` —
+        чертёж неторгуемый, поэтому фолбэк для blueprint-имён запрещён.
+        Для готовых предметов (без «чертёж/blueprint») фолбэк допустим.
+        """
         match = self.match(name)
         if match:
             return match, ""
+        _display, is_blueprint, _key = normalize_card_name(name)
+        if is_blueprint:
+            return None, ""
         raw = str(name or "")
         variants = []
         for variant in (
@@ -1223,21 +1435,79 @@ class MarketAPI:
                 return match, variant
         return None, ""
 
+    def _catalog_meta(self, slug):
+        """Метаданные предмета из каталога ``/v2/items`` (включая tradable)."""
+        try:
+            for item in (self.items or {}).values():
+                if isinstance(item, dict) and item.get("slug") == slug:
+                    return item
+        except Exception:
+            pass
+        return {}
+
+    def _is_tradable(self, slug):
+        """``True/False/None`` — флаг торговли из каталога или деталей."""
+        tradable = self._catalog_meta(slug).get("tradable")
+        if tradable is None:
+            tradable = (self._detail(slug) or {}).get("tradable")
+        return tradable
+
+    def _log_nontradable(self, name, slug=""):
+        """Одна строка на предмет: цена не запрашивается (без спама)."""
+        key = str(slug or name or "").strip().lower()
+        if not key or key in self._nontradable_logged:
+            return False
+        self._nontradable_logged.add(key)
+        log(f"{name or slug}: не торгуется, цена не запрашивается")
+        return True
+
     def _fill_market(self, out, slug):
-        """Дополняет запись ценой, дукатами и числом ордеров по готовому slug."""
-        detail = self._detail(slug)
+        """Дополняет запись ценой, дукатами и числом ордеров по готовому slug.
+
+        1.0.0: для неторгуемых предметов (``tradable: false``) цена = None,
+        ордера/дукаты не запрашиваются — в интерфейсе будет «—».
+        """
+        tradable = self._catalog_meta(slug).get("tradable")
+        detail = self._detail(slug) if tradable is not False else {}
+        if tradable is None:
+            tradable = (detail or {}).get("tradable")
+        out["tradable"] = tradable
+        if tradable is False:
+            self._log_nontradable(out.get("market_name") or out.get("name"),
+                                  slug)
+            out["ducats"] = None
+            out["best_sell"] = None
+            out["best_buy"] = None
+            out["sell_online"] = 0
+            out["buy_online"] = 0
+            out["sell_offline"] = False
+            out["price"] = None
+            return out
         if detail:
             out["ducats"] = detail.get("ducats")
-            out["tradable"] = detail.get("tradable")
-
         info = self._orders(slug)
         out["best_sell"] = info.get("best_sell")
         out["best_buy"] = info.get("best_buy")
         out["sell_online"] = info.get("sell_online", 0)
         out["buy_online"] = info.get("buy_online", 0)
         out["sell_offline"] = info.get("sell_offline", False)
-        out["price"] = out["best_sell"] if out["best_sell"] is not None else out["best_buy"]
+        out["price"] = (out["best_sell"] if out["best_sell"] is not None
+                        else out["best_buy"])
         return out
+
+    def refresh_items_async(self):
+        """t60: сетевая сверка каталога в фоне, без перезапуска."""
+        def worker():
+            try:
+                self.load_items(force=True)
+                log(f"База предметов: обновлена в фоне "
+                    f"({len(self.items)})")
+            except Exception as e:
+                log(f"База предметов: фоновая сверка не удалась "
+                    f"({type(e).__name__}: {e})")
+        threading.Thread(target=worker, daemon=True,
+                         name="wf-catalog-refresh").start()
+        return True
 
     def lookup(self, ocr_name):
         """Полная информация по распознанному названию."""
@@ -1252,7 +1522,8 @@ class MarketAPI:
         if not m:
             out["error"] = "не найден на рынке"
             return out
-        out.update({"slug": m["slug"], "market_name": m["name"], "matched": True})
+        out.update({"slug": m["slug"], "market_name": m["name"], "matched": True,
+                    "tradable": m.get("tradable")})
         try:
             out["en_name"] = self.en_name_by_slug(m["slug"])
         except Exception:
@@ -1297,17 +1568,14 @@ class MarketAPI:
             out["error"] = "нет слага"
             return out
         self.load_items()
-        lookup_slug = slug
-        market_name = self.name_by_slug(slug)
-        if not market_name and slug.endswith("_blueprint"):
-            base = slug[:-len("_blueprint")]
-            market_name = self.name_by_slug(base)
-            if market_name:
-                lookup_slug = base
-        out.update({"slug": lookup_slug,
-                    "market_name": market_name or name or slug,
-                    "matched": True})
-        return self._fill_market(out, lookup_slug)
+        # 1.0.0: slug не подменяем на базовый для чертежей — у чертежа своя
+        # (неторгуемая) запись; базовое имя используем только для показа.
+        market_name = self.name_by_slug(slug) or name or slug
+        out.update({"slug": slug,
+                    "market_name": market_name,
+                    "matched": True,
+                    "tradable": self._catalog_meta(slug).get("tradable")})
+        return self._fill_market(out, slug)
 
 
 def summarize_orders(orders):
@@ -1604,8 +1872,19 @@ def _expand_canonical_grid(groups, lefts, cfg):
     return slots, groups4
 
 
-def _cards_from_words(words, cfg):
-    """Превращает слова в карточки 1..4; пустые позиции сохраняются."""
+def _cards_from_words(words, cfg, frames_found=None):
+    """Превращает слова в карточки 1..4; пустые позиции сохраняются.
+
+    ``frames_found`` — сколько рамок нашёл детектор ``scan_calibrate`` (1–4)
+    для этого кадра. Если рамки найдены и образуют ровный ряд — раскладка
+    берётся по ним (2 карточки остаются двумя, без фантомных «?»). Если
+    детектор не смог (тени/анимация) — прежняя эвристика по словам.
+    """
+    frames = 0
+    try:
+        frames = int(frames_found or 0)
+    except Exception:
+        frames = 0
     forced = int(cfg.get("force_cards") or 0)
     if forced:
         n_best = max(1, min(4, forced))
@@ -1616,6 +1895,16 @@ def _cards_from_words(words, cfg):
                       key=lambda i: abs(w["cx"] - (lefts[i] + cfg["card_width"] / 2.0)))
             groups[idx].append(w)
         note = f"  Карточек (принудительно): {n_best}"
+    elif frames in (1, 2, 3, 4):
+        # источник истины — рамки детектора: 2 карточки = 2 позиции
+        n_best = frames
+        lefts = card_lefts(n_best, cfg)
+        groups = {i: [] for i in range(n_best)}
+        for w in words:
+            idx = min(range(n_best),
+                      key=lambda i: abs(w["cx"] - (lefts[i] + cfg["card_width"] / 2.0)))
+            groups[idx].append(w)
+        note = ""
     elif not words:
         return _empty_cards(cfg, 4), "  Нечитаемый кадр: 4 позиции «?»"
     else:
@@ -1640,12 +1929,20 @@ def _cards_from_words(words, cfg):
     cards = []
     for i in range(n_best):
         name = join_words(groups.get(i, []))
+        corrected = False
         if name:
+            # 1.0.0: автокоррекция OCR по словарю ДО матчинга
+            name, corrected = _ocr_fix_name(name, cfg)
             name, _bp, _key = normalize_card_name(name)
         cards.append({"left": float(lefts[i]),
                       "top": float(cfg["card_top"]),
                       "name": name,
+                      "ocr_corrected": bool(corrected),
                       "unrecognized": not bool(name)})
+    if not note:
+        texts = sum(1 for i in range(n_best) if groups.get(i))
+        note = (f"  Карточек: {n_best} (рамок: {frames}, текстов: {texts}, "
+                f"lefts={[int(l) for l in lefts]})")
     return cards, note
 
 
@@ -1692,23 +1989,288 @@ def retry_unrecognized_cards(base_img, cards, cfg, ocr):
     return retried
 
 
-def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
+# ─────────────────────────────────────────────────────────────────────────
+#  Калибровка скана (1.0.0, scan_calibrate.py): приоритет источников
+#  сохранённая калибровка > авто по кадру > встроенные цифры WFInfo > конфиг.
+# ─────────────────────────────────────────────────────────────────────────
+#: UI scale из EE.cfg читаем один раз на процесс (файл игры может меняться)
+_UI_SCALE_CACHE = {"value": None, "source": ""}
+
+
+def warframe_ui_scale(cfg=None, refresh=False):
+    """Масштаб интерфейса игры: ``(scale, источник)``.
+
+    Приоритет: ручной ``ui_scaling`` в config → ``Flash.FlashDrawScale``
+    из ``%LOCALAPPDATA%\\Warframe\\EE.cfg`` → 1.0 (100 %). Если EE.cfg нет
+    или ключа нет — пишем одну строку в app.log и считаем 100 %.
+    """
+    cfg = cfg or {}
+    try:
+        manual = float(cfg.get("ui_scaling") or 0)
+    except Exception:
+        manual = 0.0
+    if manual > 0:
+        return manual, "конфиг"
+    if not refresh and _UI_SCALE_CACHE["value"] is not None:
+        return _UI_SCALE_CACHE["value"], _UI_SCALE_CACHE["source"]
+    mod = reward_geometry_module()
+    scale, source = 1.0, "EE.cfg не найден"
+    if mod is not None:
+        try:
+            scale, found, path = mod.ui_scale_from_ee_cfg()
+            source = "EE.cfg" if found else "EE.cfg не найден"
+            if not found and path:
+                source = f"EE.cfg: ключа нет ({os.path.basename(path)})"
+        except Exception as e:
+            log(f"Масштаб интерфейса: EE.cfg не прочитан "
+                f"({type(e).__name__}: {e})")
+    _UI_SCALE_CACHE["value"] = scale
+    _UI_SCALE_CACHE["source"] = source
+    return scale, source
+
+
+def ui_scale_percent(scale):
+    try:
+        return f"{int(round(float(scale) * 100))}%"
+    except Exception:
+        return "100%"
+
+
+def log_ui_scale(cfg=None):
+    """Строка в app.log про масштаб интерфейса (один раз на запуск)."""
+    scale, source = warframe_ui_scale(cfg)
+    log(f"Масштаб интерфейса: {ui_scale_percent(scale)} ({source})")
+    return scale, source
+
+
+def wfinfo_geometry(ui_scale=None, cfg=None):
+    """Встроенная геометрия WFInfo для текущего UI scale."""
+    mod = reward_geometry_module()
+    if mod is None:
+        return None
+    ui = ui_scale if ui_scale else warframe_ui_scale(cfg)[0]
+    try:
+        return mod.geometry(ui)
+    except Exception as e:
+        log(f"Геометрия WFInfo: не собрана ({type(e).__name__}: {e})")
+        return None
+
+
+def apply_wfinfo_geometry(cfg, ui_scale=None):
+    """Применить встроенные цифры WFInfo (×UI scale) к конфигу на сессию."""
+    mod = reward_geometry_module()
+    if mod is None or not isinstance(cfg, dict):
+        return {}
+    ui = ui_scale if ui_scale else warframe_ui_scale(cfg)[0]
+    try:
+        values = mod.config_values(ui)
+    except Exception:
+        return {}
+    if not values:
+        return {}
+    cfg.update(values)
+    return values
+
+
+def detect_game_theme(cfg=None, image=None, ui_scale=None):
+    """Тема интерфейса по пробе кадра (или ручной выбор из настроек)."""
+    mod = game_themes_module()
+    if mod is None:
+        return {}
+    cfg = cfg or {}
+    ui = ui_scale if ui_scale else warframe_ui_scale(cfg)[0]
+    manual = cfg.get("game_theme") or "auto"
+    try:
+        result = mod.detect_theme(image, ui=ui, manual=manual)
+    except Exception as e:
+        log(f"Тема: не определена ({type(e).__name__}: {e})")
+        return {"theme": "AUTO", "manual": False}
+    try:
+        log(mod.log_line(result))
+    except Exception:
+        pass
+    return result
+
+
+def scan_calibration_line(geometry, source="конфиг", geom=None):
+    """Строка для app.log: «Калибровка: lefts=[…] pitch=… scale=…×…»."""
+    mod = scan_calibrate_module()
+    if mod is None:
+        return f"Калибровка: (источник: {source})"
+    geometry = dict(geometry or {})
+    try:
+        sx = float((geom or {}).get("sx") or geometry.get("ui_scale") or 1.0)
+        sy = float((geom or {}).get("sy") or geometry.get("ui_scale") or 1.0)
+        geometry.setdefault("ui_scale", round(sx, 3))
+    except Exception:
+        sx = sy = 1.0
+    try:
+        return mod.log_line(geometry, source=source, ui_scale=sx)
+    except Exception as e:
+        return f"Калибровка: строка лога не собрана ({type(e).__name__}: {e})"
+
+
+def init_scan_calibration(cfg, geom=None):
+    """Старт: применить сохранённую калибровку (если она есть в config)."""
+    mod = scan_calibrate_module()
+    if mod is None:
+        return None
+    try:
+        saved = mod.normalize_calibration(cfg.get("scan_calibration"))
+    except Exception as e:
+        log(f"Калибровка: сохранённая запись не читается ({type(e).__name__})")
+        return None
+    if not saved:
+        return None
+    try:
+        applied = mod.apply_geometry(cfg, saved)
+    except Exception as e:
+        log(f"Калибровка: не применилась ({type(e).__name__}: {e})")
+        return None
+    if applied:
+        log(scan_calibration_line(saved, "конфиг", geom))
+    return saved
+
+
+def scan_geometry_effective(cfg, frame=None, calib_cache=None,
+                            ui_scale=None):
+    """Геометрия для текущего кадра: ``(cfg_eff, geometry|None, источник)``.
+
+    Приоритет (1.0.0): сохранённая калибровка (t4) → авто-определение по
+    кадру (t4, кэш на сессию) → встроенные цифры WFInfo × UI scale →
+    ручной конфиг. Сохранённую калибровку ставит ``init_scan_calibration``.
+    """
+    mod = scan_calibrate_module()
+    saved = None
+    if mod is not None:
+        try:
+            saved = mod.normalize_calibration(cfg.get("scan_calibration"))
+        except Exception:
+            saved = None
+    if saved is not None:
+        return cfg, None, "конфиг"
+    if mod is not None and frame is not None:
+        hint = wfinfo_geometry(ui_scale, cfg) if reward_geometry_module() else None
+        try:
+            geometry, source = mod.resolve_geometry(
+                cfg, frame=frame, expected=0, cache=calib_cache, hint=hint)
+        except Exception as e:
+            log(f"Калибровка: авто-определение не удалось "
+                f"({type(e).__name__}: {e})")
+            geometry, source = None, "конфиг"
+        if geometry and source == "авто":
+            try:
+                applied = mod.apply_geometry(dict(cfg), geometry)
+            except Exception:
+                applied = {}
+            if applied:
+                cfg_eff = dict(cfg)
+                cfg_eff.update(applied)
+                return cfg_eff, geometry, "авто"
+    # встроенные цифры WFInfo (под текущий UI scale) — точнее старых констант
+    rg = reward_geometry_module()
+    if rg is not None:
+        ui = ui_scale if ui_scale else warframe_ui_scale(cfg)[0]
+        try:
+            values = rg.config_values(ui)
+        except Exception:
+            values = {}
+        if values:
+            cfg_eff = dict(cfg)
+            cfg_eff.update(values)
+            try:
+                geometry = rg.geometry(ui)
+            except Exception:
+                geometry = None
+            return cfg_eff, geometry, "wfinfo"
+    return cfg, None, "конфиг"
+
+
+def save_scan_calibration(cfg, payload):
+    """Сохранить ``scan_calibration`` в config.json и применить на лету."""
+    payload = dict(payload or {})
+    if not payload:
+        return {"ok": False, "error": "пустая калибровка"}
+    cfg["scan_calibration"] = dict(payload)
+    mod = scan_calibrate_module()
+    if mod is not None:
+        try:
+            mod.apply_geometry(cfg, mod.normalize_calibration(payload) or payload)
+        except Exception as e:
+            log(f"Калибровка: не применилась на лету "
+                f"({type(e).__name__}: {e})")
+    saved = save_config_keys(cfg, {"scan_calibration": dict(payload)})
+    log(scan_calibration_line(payload, "конфиг"))
+    if not saved:
+        return {"ok": False, "error": "config.json не записан"}
+    return {"ok": True, "scan_calibration": dict(payload)}
+
+
+def _calibration_check_scan(cfg, geometry):
+    """«Проверить» в мастере: снимок + пробный скан названий (без цен)."""
+    mod = scan_calibrate_module()
+    if mod is None:
+        return {"ok": False, "error": "модуль сканирования недоступен"}
+    try:
+        full, _mon = grab(cfg)
+        base = to_base(full, cfg)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    cfg_eff = dict(cfg)
+    try:
+        mod.apply_geometry(cfg_eff, geometry)
+    except Exception:
+        pass
+    try:
+        ocr = OcrEngine(cfg)
+    except Exception as exc:
+        return {"ok": False, "error": f"OCR: {type(exc).__name__}"}
+    try:
+        cards = detect_cards(base, cfg_eff, ocr)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    names = [c.get("name") or "?" for c in cards]
+    return {"ok": True, "names": names, "cards": len(cards)}
+
+
+def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
+                 calib_cache=None, calib_out=None, info_out=None):
     """
     Возвращает список карточек [{'left', 'top', 'name'}] для 1–4 наград.
 
     Делает один проход OCR, а если названия плохо узнаются — второй,
     с другим контрастом; берёт тот вариант, где больше совпадений с
     базой предметов (matcher — функция name -> score 0..1).
+
+    1.0.0: если сохранённой калибровки нет, геометрия карточек определяется
+    по кадру (``scan_calibrate.detect_geometry``) с кэшем на сессию
+    (``calib_cache``). Если найденное число карточек не совпало с
+    распознанным — авто не применяется, работаем по конфигу. Итог решения —
+    в ``calib_out`` (``geometry``/``source``/``confirmed``).
     """
     import cv2
 
-    band = dict(cfg["scan_band"])
+    ui_scale = warframe_ui_scale(cfg)[0]
+    cfg_eff, geometry, source = scan_geometry_effective(
+        cfg, base_img, calib_cache, ui_scale=ui_scale)
+    # t31: число найденных рамок — источник истины для раскладки 1/2/3/4
+    frames_found = 0
+    if source == "авто" and isinstance(geometry, dict):
+        try:
+            frames_found = int(geometry.get("frames_found") or 0)
+        except Exception:
+            frames_found = 0
+    band = dict(cfg_eff["scan_band"])
     x0 = max(0, int(band["left"]))
     y0 = max(0, int(band["top"]))
     x1 = min(base_img.shape[1], int(band["left"] + band["width"]))
     y1 = min(base_img.shape[0], int(band["top"] + band["height"]))
     crop = base_img[y0:y1, x0:x1]
     if crop.size == 0:
+        if calib_out is not None:
+            calib_out.clear()
+            calib_out.update({"geometry": None, "source": "конфиг",
+                              "confirmed": False})
         return _empty_cards(cfg, 4)
     cache_key = ""
     if cache is not None:
@@ -1717,20 +2279,30 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
             cached = cache.ocr_get(cache_key)
             if cached is not None:
                 log("  OCR: кэш того же экрана")
+                if calib_out is not None:
+                    calib_out.clear()
+                    calib_out.update({"geometry": geometry, "source": source,
+                                      "confirmed": geometry is not None})
                 return [dict(card) for card in cached]
         except Exception:
             cache_key = ""
 
-    name_top = cfg["card_top"] + cfg["name_offset_y"]
-    name_bot = name_top + cfg["name_height"]
+    name_top = cfg_eff["card_top"] + cfg_eff["name_offset_y"]
+    name_bot = name_top + cfg_eff["name_height"]
+    # окно фильтра — с запасом под оба варианта геометрии (конфиг и калибровка)
+    cfg_top = cfg["card_top"] + cfg["name_offset_y"]
+    cfg_bot = cfg_top + cfg["name_height"]
+    window_lo = min(name_top, cfg_top) - 60
+    window_hi = max(name_bot, cfg_bot) + 60
 
     best = None      # (rank, cards, variant, proc, words)
     for idx, variant in enumerate(("soft", "contrast")):
         proc, scale = prepare_ocr(crop, variant)
         res = ocr.read_proc(proc)
         words = _word_boxes(res, {"left": x0, "top": y0}, scale)
-        words = [w for w in words if name_top - 30 <= w["cy"] <= name_bot + 20]
-        cards, note = _cards_from_words(words, cfg)
+        words = [w for w in words if window_lo <= w["cy"] <= window_hi]
+        cards, note = _cards_from_words(words, cfg_eff,
+                                  frames_found=frames_found)
 
         matched, quality = 0, 0.0
         if matcher and cards:
@@ -1759,12 +2331,42 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
             break
 
     rank, cards, variant, proc, words, note = best
+    if source == "авто" and geometry is not None \
+            and len(geometry.get("lefts") or []) != len(cards):
+        # авто-геометрия не подтвердилась распознаванием — по конфигу
+        log(f"  Калибровка: авто не подтвердилось (боксов "
+            f"{len(geometry.get('lefts') or [])}, карточек {len(cards)}) — "
+            "работаю по конфигу")
+        if calib_cache is not None:
+            try:
+                mod = scan_calibrate_module()
+                if mod is not None:
+                    mod.clear_cache(calib_cache)
+            except Exception:
+                pass
+        geometry = None
+        source = "конфиг"
+        frames_found = 0
+        cfg_eff = cfg
+        cards, note = _cards_from_words(words, cfg, frames_found=frames_found)
     if note:
         log(note)
+    if calib_out is not None:
+        calib_out.clear()
+        calib_out.update({"geometry": geometry, "source": source,
+                          "confirmed": geometry is not None,
+                          "frames_found": frames_found})
+    if info_out is not None:
+        info_out.clear()
+        info_out.update({"frames_found": frames_found,
+                         "layout": len(cards),
+                         "texts": sum(1 for c in cards
+                                      if not c.get("unrecognized")),
+                         "source": source})
     if not cards:
         return []
     # точечный повтор только для нераспознанных карточек
-    retry_unrecognized_cards(base_img, cards, cfg, ocr)
+    retry_unrecognized_cards(base_img, cards, cfg_eff, ocr)
     if matcher:
         matched_now = sum(1 for c in cards if c.get("name")
                           and (matcher(c["name"]) or 0.0) >= 0.80)
@@ -1787,22 +2389,27 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None):
     return cards
 
 
-def read_owned_batch(full_img, sx, sy, cards, cfg, ocr, cache=None):
-    """Читает метки Crafted/N Owned всех карточек одним вызовом EasyOCR."""
+def read_owned_batch(full_img, sx, sy, cards, cfg, ocr, cache=None,
+                     origin=(0, 0)):
+    """Читает метки Crafted/N Owned всех карточек одним вызовом EasyOCR.
+
+    ``origin`` — экранное смещение окна 1920×1080 (равномерный масштаб, 16:9 → 0).
+    """
     import cv2
     import numpy as np
     if not cards:
         return []
+    ox, oy = int(origin[0]), int(origin[1])
     strips, segments = [], [None] * len(cards)
     width = 0
     for card in cards:
-        x0 = max(0, int(round(card["left"] * sx)) - 2)
+        x0 = max(0, int(round(card["left"] * sx)) + ox - 2)
         x1 = min(full_img.shape[1],
-                 int(round((card["left"] + cfg["card_width"]) * sx)))
-        y0 = max(0, int(round(card["top"] * sy)))
+                 int(round((card["left"] + cfg["card_width"]) * sx)) + ox)
+        y0 = max(0, int(round(card["top"] * sy)) + oy)
         y1 = min(full_img.shape[0],
-                 int(round((card["top"] + cfg.get("owned_strip_height", 40))
-                           * sy)))
+                 int(round((card["top"] + cfg.get("owned_strip_height", 30))
+                           * sy)) + oy)
         if x1 - x0 < 20 or y1 - y0 < 10:
             strips.append(None)
             continue
@@ -1844,7 +2451,7 @@ def read_owned_batch(full_img, sx, sy, cards, cfg, ocr, cache=None):
                                   canvas_size=1280, decoder="greedy")
     except Exception as exc:
         log(f"  OCR меток: батч не удался ({type(exc).__name__}), поштучно")
-        return [read_owned(full_img, sx, sy, card, cfg, ocr)
+        return [read_owned(full_img, sx, sy, card, cfg, ocr, origin=origin)
                 for card in cards]
     parts = [[] for _ in cards]
     for item in res:
@@ -1882,19 +2489,21 @@ def read_owned_batch(full_img, sx, sy, cards, cfg, ocr, cache=None):
     return out
 
 
-def read_owned(full_img, sx, sy, card, cfg, ocr):
+def read_owned(full_img, sx, sy, card, cfg, ocr, origin=(0, 0)):
     """Метка Crafted / N Owned в шапке карточки (читается с полного разрешения).
 
     Читаем всю верхнюю полосу карточки и без allowlist: на маленьком шрифте
     со свечением он только мешает (проверено на реальном кадре с 3 наградами).
     """
     import cv2
-    x0 = max(0, int(round(card["left"] * sx)) - 2)
+    ox, oy = int(origin[0]), int(origin[1])
+    x0 = max(0, int(round(card["left"] * sx)) + ox - 2)
     x1 = min(full_img.shape[1],
-             int(round((card["left"] + cfg["card_width"]) * sx)))
-    y0 = max(0, int(round(card["top"] * sy)))
+             int(round((card["left"] + cfg["card_width"]) * sx)) + ox)
+    y0 = max(0, int(round(card["top"] * sy)) + oy)
     y1 = min(full_img.shape[0],
-             int(round((card["top"] + cfg.get("owned_strip_height", 40)) * sy)))
+             int(round((card["top"] + cfg.get("owned_strip_height", 30)) * sy))
+             + oy)
     if x1 - x0 < 20 or y1 - y0 < 10:
         return None, None, None
     crop = full_img[y0:y1, x0:x1]
@@ -1969,6 +2578,7 @@ def build_overlays():
             self.lbl_name = QLabel("")
             self.lbl_name.setStyleSheet("color:#cfd8e6; font-size:11px; font-weight:600;")
             self.lbl_name.setMaximumHeight(15)
+            self.part_chip = item_icons_module().part_chip_label("", "")
             self._last_data = None
             self._icon_key = ""
             self._icon_provider = item_icons_provider(cfg)
@@ -1977,12 +2587,10 @@ def build_overlays():
             self.icon_label.setStyleSheet("background: transparent;")
             self.icon_label.setToolTip("Иконка предмета")
             self.icon_badge = QLabel("Ч", self.icon_label)
-            self.icon_badge.setFixedSize(16, 12)
+            self.icon_badge.setFixedSize(34, 18)
             self.icon_badge.setAlignment(Qt.AlignCenter)
-            self.icon_badge.setStyleSheet(
-                "background:#f5c451; color:#17212e; font-size:7px;"
-                " font-weight:700; border-radius:2px;")
-            self.icon_badge.move(15, 0)
+            self.icon_badge.setStyleSheet("background:transparent;")
+            self.icon_badge.move(2, 14)
             self.icon_badge.setVisible(False)
             self._set_placeholder_icon()
 
@@ -2047,6 +2655,13 @@ def build_overlays():
             top.addWidget(self.icon_label)
             top.addWidget(self.lbl_name, 1)
             lay.addLayout(top)
+            chip_row = QHBoxLayout()
+            chip_row.setContentsMargins(0, 0, 0, 0)
+            chip_row.setSpacing(6)
+            if self.part_chip is not None:
+                chip_row.addWidget(self.part_chip)
+            chip_row.addStretch(1)
+            lay.addLayout(chip_row)
             lay.addLayout(mid)
             lay.addLayout(set_row)
             lay.addLayout(bot)
@@ -2107,7 +2722,18 @@ def build_overlays():
                 badge = ""
                 blueprint = False
             self.icon_label.setVisible(True)
-            self.icon_badge.setText(badge or "Ч")
+            badge_pix = None
+            try:
+                bw, bh = item_icons_module().part_badge_size(slug, name)
+                badge_pix = item_icons_module().part_badge_pixmap(
+                    slug, name, bw, bh)
+            except Exception:
+                badge_pix = None
+            if badge_pix is not None:
+                self.icon_badge.setPixmap(badge_pix)
+                self.icon_badge.setFixedSize(bw, bh)
+            else:
+                self.icon_badge.setText(badge or "Ч")
             self.icon_badge.setVisible(blueprint)
             self.icon_badge.raise_()
             key = slug or name or (image or "unknown")
@@ -2164,11 +2790,12 @@ def build_overlays():
             platinum = (theme.PALETTE["muted"] if suspicious
                         else theme.currency_platinum())
             mark = " (?)" if suspicious else ""
+            set_icon = currency_icon_html("platinum", self.cfg, px=10)
             self.lbl_set.setText(
                 '<span style="color:rgba(231,241,255,191);'
                 ' font-weight:400;">компл.</span> '
                 f'<span style="color:{platinum}; font-weight:700;">'
-                f'{int(price)} p{mark}</span>')
+                f'{int(price)}{currency_sep(set_icon)}{set_icon}{mark}</span>')
             tip = format_set_price_tooltip(data)
             if suspicious and (data or {}).get("set_suspect_reason"):
                 tip += "\n" + str((data or {}).get("set_suspect_reason"))
@@ -2202,11 +2829,37 @@ def build_overlays():
                                      else self._style_normal)
 
             name = (d.get("market_name") or d.get("name") or "").strip()
+            raw_name = name
             if d.get("unrecognized") or not name:
                 name = "?"
             if len(name) > 34:
                 name = name[:33] + "…"
-            self.lbl_name.setText(name)
+            try:
+                from PyQt5.QtGui import QFontMetrics
+                _fm = QFontMetrics(self.lbl_name.font())
+                self.lbl_name.setText(_fm.elidedText(
+                    name, Qt.ElideRight, 220))
+                self.lbl_name.setToolTip(name)
+            except Exception:
+                self.lbl_name.setText(name)
+            try:
+                chip_style = item_icons_module().part_style(
+                    str(d.get("slug") or ""), raw_name)
+                if getattr(self, "part_chip", None) is not None:
+                    if chip_style.get("is_part"):
+                        self.part_chip.setText(
+                            item_icons_module().part_word(
+                                str(d.get("slug") or ""), raw_name)
+                            or chip_style["type"])
+                        self.part_chip.setStyleSheet(
+                            "background:#262F40; font-size:9px;"
+                            f" font-weight:700; color:{chip_style['color']};"
+                            " border-radius:8px; padding:2px 6px;")
+                        self.part_chip.setVisible(True)
+                    else:
+                        self.part_chip.setVisible(False)
+            except Exception:
+                pass
             try:
                 self._request_icon(d)
             except Exception:
@@ -2224,7 +2877,18 @@ def build_overlays():
             price = d.get("price")
             platinum = theme.currency_platinum()
             ducats = theme.currency_ducats()
-            if d.get("unrecognized"):
+            # 1.0.0: подсказки сбрасываем для каждого состояния
+            self.lbl_price.setToolTip(theme.currency_tooltip("platinum"))
+            self.lbl_ducats.setToolTip(theme.currency_tooltip("ducats"))
+            if d.get("tradable") is False:
+                # неторгуемый предмет: цены нет, дукаты/онлайн не выводим
+                self.lbl_price.setText(
+                    "<span style='color:#6c7789; font-size:15px;'>—</span>")
+                self.lbl_price.setToolTip("не торгуется на warframe.market")
+                self.lbl_ducats.setText("")
+                self.lbl_ducats.setToolTip("")
+                self.lbl_sold.setText("")
+            elif d.get("unrecognized"):
                 self.lbl_price.setText(
                     "<span style='color:#6c7789; font-size:15px;'>—</span>")
                 self.lbl_ducats.setText("")
@@ -2236,18 +2900,29 @@ def build_overlays():
                 self.lbl_sold.setText("<span style='color:#6f7b8c;'>запрашиваю</span>")
             elif isinstance(price, (int, float)) and price:
                 tilde = "~" if d.get("sell_offline") else ""
+                icon = currency_icon_html("platinum", self.cfg, px=10)
+                sep = currency_sep(icon)
                 self.lbl_price.setText(
                     f"<span style='color:{platinum};'>{tilde}{int(price)}</span>"
-                    f"<span style='color:{theme.rgba(platinum, 0.72)}; "
-                    f"font-size:13px;'> p</span>")
+                    f"{sep}<span style='color:{theme.rgba(platinum, 0.72)}; "
+                    f"font-size:13px;'>{icon}</span>")
                 du = d.get("ducats")
-                self.lbl_ducats.setText(f"◆ {int(du)} дк" if du else "")
+                if du:
+                    d_icon = currency_icon_html("ducats", self.cfg, px=10)
+                    self.lbl_ducats.setText(
+                        f"◆ {int(du)}{currency_sep(d_icon)}{d_icon}")
+                else:
+                    self.lbl_ducats.setText("")
                 online = d.get("sell_online", 0)
                 self.lbl_sold.setText(f"{online} онлайн" if online else "нет онлайн")
             elif d.get("matched"):
                 self.lbl_price.setText("<span style='color:#6c7789; font-size:15px;'>нет ордеров</span>")
-                self.lbl_ducats.setText(
-                    f"◆ {int(d['ducats'])} дк" if d.get("ducats") else "")
+                if d.get("ducats"):
+                    d_icon = currency_icon_html("ducats", self.cfg, px=10)
+                    self.lbl_ducats.setText(
+                        f"◆ {int(d['ducats'])}{currency_sep(d_icon)}{d_icon}")
+                else:
+                    self.lbl_ducats.setText("")
                 self.lbl_sold.setText("")
             else:
                 self.lbl_price.setText("<span style='color:#6c7789; font-size:15px;'>нет на рынке</span>")
@@ -2258,6 +2933,8 @@ def build_overlays():
     class _SummaryOverlay(QWidget):
         def __init__(self, cfg):
             super().__init__()
+            # t45/t46: cfg — по ссылке (настройки меняются на лету)
+            self.cfg = cfg if isinstance(cfg, dict) else {}
             self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint |
                                 Qt.Tool | Qt.WindowTransparentForInput |
                                 Qt.WindowDoesNotAcceptFocus)
@@ -2286,7 +2963,7 @@ def build_overlays():
             lay.addWidget(self.lbl_total)
             lay.addWidget(self.lbl_best)
             outer.addWidget(f)
-            fs = float(cfg.get("font_scale", 1.0))
+            fs = float(self.cfg.get("font_scale", 1.0))
             self.setFixedSize(int(380 * fs), int(66 * fs))
             self._last_summary = None
             try:
@@ -2294,6 +2971,14 @@ def build_overlays():
                     lambda _p, _d: self._on_currency_changed())
             except Exception:
                 pass
+
+        def apply_cfg(self, cfg):
+            """1.0.0 (t46): актуальные настройки отображения без копий."""
+            self.cfg = dict(cfg or {})
+            if self._last_summary is not None:
+                data, final = self._last_summary
+                self.set_summary(data, final=final)
+            return self
 
         def _on_currency_changed(self):
             try:
@@ -2319,11 +3004,14 @@ def build_overlays():
                         best = (p, d.get("market_name") or d.get("name") or "?")
             if final:
                 if total > 0:
+                    icon = currency_icon_html("platinum", self.cfg, px=10)
+                    sep = currency_sep(icon)
                     self.lbl_total.setText(
                         f"<span style='color:{theme.currency_platinum()};'>"
-                        f"Итого: {int(total)}p</span>")
-                    self.lbl_best.setText(f"дороже всех: {best[1][:40]} ({int(best[0])}p)"
-                                          if best else " ")
+                        f"Итого: {int(total)}{sep}{icon}</span>")
+                    self.lbl_best.setText(
+                        f"дороже всех: {best[1][:40]} ({int(best[0])}{sep}"
+                        f"{icon})" if best else " ")
                     self.show()
                 else:
                     self.lbl_total.setText("Итого: —")
@@ -2497,6 +3185,10 @@ def build_overlays():
                 b_sell.setToolTip("Продать на warframe.market")
                 b_edit.setToolTip("Изменить предмет")
                 b_del.setToolTip("Удалить из списка")
+                if it.get("tradable") is False:
+                    # неторгуемый: продать нельзя
+                    b_sell.setEnabled(False)
+                    b_sell.setToolTip("предмет не продаётся")
                 b_sell.clicked.connect(lambda _=False, i=idx: self.sell_requested.emit(i))
                 b_edit.clicked.connect(lambda _=False, i=idx: self.edit_requested.emit(i))
                 b_del.clicked.connect(lambda _=False, i=idx: self.remove_requested.emit(i))
@@ -2549,8 +3241,9 @@ def build_overlays():
         def _place_selected(self):
             g = self.geom
             w, h = self.selected.width(), self.selected.height()
-            x = int(self.cfg.get("selected_left", 20) * g["sx"])
-            y = int(self.cfg.get("selected_top", 700) * g["sy"])
+            # 1.0.0: равномерный масштаб + смещение окна (16:9 → ox=oy=0)
+            x = int(self.cfg.get("selected_left", 20) * g["sx"]) + int(g.get("ox", 0))
+            y = int(self.cfg.get("selected_top", 700) * g["sy"]) + int(g.get("oy", 0))
             x = max(0, min(x, g["width"] - w))
             y = max(0, min(y, g["height"] - h))
             self.selected.move(x, y)
@@ -2704,18 +3397,20 @@ def build_overlays():
             card = cards[index]
             name = self._reward_name(card)
             price = card.get("price")
+            tradable = card.get("tradable")
             price_text = (f"{int(price)}p"
                           if isinstance(price, (int, float)) and price else "—")
             already = index in self._picked_indices
-            if not already:
-                already = any(self._same_reward(item, card)
-                              for item in self.selected.items)
             if already:
                 self._picked_indices.add(index)
                 return self._pick_message(f"уже добавлено: {name} — {price_text}",
                                           ok=True, index=index, added=False,
                                           item=card, name=name, price=price,
+                                          tradable=tradable,
                                           reason="duplicate")
+            # 1.0.0: разные позиции с одинаковым именем — разные награды
+            # (две «Форма (Чертеж)» = количество 2), поэтому проверяем
+            # только номер карточки, а не имя.
             self.selected.add(card)
             self._picked_indices.add(index)
             # окно/панель не открываем принудительно: Alt+1..4 нажимают в игре,
@@ -2723,7 +3418,8 @@ def build_overlays():
             self._save_selected()
             return self._pick_message(f"добавлено: {name} — {price_text}",
                                       ok=True, index=index, added=True,
-                                      item=card, name=name, price=price)
+                                      item=card, name=name, price=price,
+                                      tradable=tradable)
 
         # ── продажа на warframe.market (только по кнопке) ──────────────
         def _market_slug(self, item):
@@ -2841,10 +3537,12 @@ def build_overlays():
             """x_base/y_base — позиция под карточкой, above_base — над карточкой."""
             g = self.geom
             w, h = widget.width(), widget.height()
-            x = int(x_base * g["sx"])
-            y = int(y_base * g["sy"])
+            # 1.0.0: равномерный масштаб + смещение окна базы (16:9 → 0)
+            ox, oy = int(g.get("ox", 0)), int(g.get("oy", 0))
+            x = int(x_base * g["sx"]) + ox
+            y = int(y_base * g["sy"]) + oy
             if y + h > g["height"] and above_base is not None:
-                y = int(above_base * g["sy"]) - h - int(6 * g["sy"])
+                y = int(above_base * g["sy"]) + oy - h - int(6 * g["sy"])
             x = max(0, min(x, g["width"] - w))
             y = max(0, min(y, g["height"] - h))
             widget.move(x, y)
@@ -2896,13 +3594,17 @@ def build_overlays():
                 shown += 1
             if shown:
                 if self.cfg.get("show_summary", True):
+                    self.summary.cfg = self.cfg
                     self.summary.set_summary(data, final=any(
                         isinstance(d.get("price"), (int, float))
                         for d in data if d))
                     cx = self.cfg["cards_center_x"]
                     self.summary.move(
-                        max(0, int(cx * self.geom["sx"] - self.summary.width() / 2)),
-                        int(self.cfg.get("summary_top", 84) * self.geom["sy"]))
+                        max(0, int(cx * self.geom["sx"]
+                                   + self.geom.get("ox", 0)
+                                   - self.summary.width() / 2)),
+                        int(self.cfg.get("summary_top", 84) * self.geom["sy"]
+                            + self.geom.get("oy", 0)))
                     self.summary.raise_()
                 else:
                     # «Итого» выключено в настройках (F8 → Настройки)
@@ -3674,25 +4376,188 @@ def _hotkey_variants(value):
     return [key] if key else []
 
 
-def register_hotkey(keyboard_module, key, action, suppress=True):
-    """Зарегистрировать клавишу в латинской и русской раскладках."""
-    key = _hotkey_canon(key)
-    if not key or action is None:
+def _keyboard_variants(value, keyboard_module=None):
+    """Имена для ``keyboard``: только поддерживаемые (без кириллицы)."""
+    try:
+        mod = settings_ui_module()
+        if mod is not None and hasattr(mod, "keyboard_hotkey_variants"):
+            return mod.keyboard_hotkey_variants(value, keyboard_module)
+    except Exception:
+        pass
+    key = _hotkey_canon(value)
+    if not key:
+        return []
+    base = key.split("+")[-1]
+    if base.isascii() and (base.isalnum() or base in ";.,/-='`"):
+        return [key]
+    return []
+
+
+#: уже залогированные пропуски, чтобы не писать одно и то же на каждый старт
+_HOTKEY_SKIP_LOGGED = set()
+
+
+def _log_hotkey_skip(key, canonical=""):
+    """ОДНА понятная строка на неподдерживаемый кириллический вариант."""
+    text = str(key or "").strip()
+    if not text or text in _HOTKEY_SKIP_LOGGED:
         return False
+    _HOTKEY_SKIP_LOGGED.add(text)
+    suffix = f" (физическая клавиша {canonical})" if canonical else ""
+    log(f"Хоткей {text} не поддерживается — использую скан-код{suffix}")
+    return True
+
+
+def _scan_codes_for(keyboard_module, key_name):
+    """Скан-коды физической клавиши (``keyboard.key_to_scan_codes`` + OEM-карта)."""
+    fn = getattr(keyboard_module, "key_to_scan_codes", None)
+    if callable(fn):
+        try:
+            codes = tuple(int(code) for code in fn(key_name))
+            if codes:
+                return codes
+        except Exception:
+            pass
+    # keyboard не знает некоторые OEM-клавиши по имени ([ ] ' \ и т.п.),
+    # но их скан-коды (set 1) стабильны на Windows — нужны для RU-раскладки
+    return tuple(_OEM_SCAN_CODES.get(str(key_name or "").lower(), ()))
+
+
+#: OEM-клавиши US-раскладки → скан-коды set 1 (для fallback по hook)
+_OEM_SCAN_CODES = {
+    "[": (26,), "]": (27,), ";": (39,), "'": (40,), ",": (51,),
+    ".": (52,), "/": (53,), "\\": (43,), "-": (12,), "=": (13,),
+    "`": (41,),
+}
+
+
+def _mod_pressed(keyboard_module, name):
+    fn = getattr(keyboard_module, "is_pressed", None)
+    if not callable(fn):
+        return False
+    try:
+        return bool(fn(name))
+    except Exception:
+        return False
+
+
+#: сколько помнить последнее срабатывание (антидребезг повторов клавиши), сек
+_HOTKEY_REPEAT_SEC = 0.25
+
+
+def install_scan_code_hotkeys(keyboard_module, bindings, logger=None,
+                              clock=None, throttle=None):
+    """Резервная регистрация хоткеев по скан-кодам (RU-раскладка).
+
+    ``bindings`` — ``[(combo, action), ...]``; ``keyboard.hook`` получает
+    события клавиатуры, мы сравниваем ``scan_code`` физической клавиши и
+    зажатые модификаторы. Нужна, когда ``keyboard.add_hotkey`` не понимает
+    имя клавиши (например, кириллицу или необычную пунктуацию).
+
+    Возвращает число привязок; при отсутствии ``hook`` — 0.
+    """
+    import time as _time
+    hook = getattr(keyboard_module, "hook", None)
+    if not callable(hook):
+        return 0
+    clock = clock or _time.monotonic
+    throttle = _HOTKEY_REPEAT_SEC if throttle is None else float(throttle)
+    targets = {}
+    for combo, action in bindings or []:
+        if not callable(action):
+            continue
+        canon = _hotkey_canon(combo)
+        if not canon:
+            continue
+        parts = canon.split("+")
+        mods = frozenset(part for part in parts[:-1]
+                         if part in ("ctrl", "alt", "shift", "win"))
+        base = parts[-1]
+        for code in _scan_codes_for(keyboard_module, base):
+            targets.setdefault((mods, int(code)), action)
+    if not targets:
+        return 0
+    state = {"last": {}}
+
+    def on_event(event):
+        try:
+            if str(getattr(event, "event_type", "down")) not in ("down", ""):
+                return
+            code = int(getattr(event, "scan_code", -1))
+            pressed = frozenset(
+                name for name in ("ctrl", "alt", "shift", "win")
+                if _mod_pressed(keyboard_module, name))
+            action = targets.get((pressed, code))
+            if action is None:
+                return
+            now = clock()
+            key = (pressed, code)
+            last = state["last"].get(key, -1e9)
+            if now - last < throttle:
+                return
+            state["last"][key] = now
+            action()
+        except Exception as exc:
+            log(f"Хоткей по скан-коду: действие не выполнено "
+                f"({type(exc).__name__})")
+
+    try:
+        hook(on_event)
+    except Exception as exc:
+        log(f"Хоткей по скан-коду: hook не установлен "
+            f"({type(exc).__name__})")
+        return 0
+    if callable(logger):
+        try:
+            logger(f"Хоткеи: {len(targets)} привязок через скан-коды")
+        except Exception:
+            pass
+    return len(targets)
+
+
+def register_hotkey(keyboard_module, key, action, suppress=True):
+    """Зарегистрировать клавишу (RU-раскладка — по физической клавише).
+
+    1.0.0: кириллические имена в ``keyboard.add_hotkey`` не передаём —
+    библиотека не умеет с ними работать (``ValueError: Key 'й' is not
+    mapped``). Канонизация уже переводит ``alt+й`` в ``alt+q`` (физическая
+    клавиша), поэтому хоткей работает при любой раскладке; если backend не
+    понимает и латинское имя — регистрируем через ``keyboard.hook`` и
+    скан-коды. Любая ошибка — одной строкой в app.log, без repr.
+    """
+    canonical = _hotkey_canon(key)
+    if not canonical or action is None:
+        return False
+    raw = str(key or "").strip()
+    ru_variants = [variant for variant in _hotkey_variants(canonical)
+                   if variant != canonical]
+    logged = False
+    if ru_variants:
+        logged = _log_hotkey_skip(raw or canonical, canonical)
     ok = False
-    for variant in _hotkey_variants(key):
+    for variant in _keyboard_variants(canonical, keyboard_module):
         try:
             try:
-                keyboard_module.add_hotkey(variant, action,
-                                           suppress=suppress)
+                keyboard_module.add_hotkey(variant, action, suppress=suppress)
             except TypeError:
                 # старые/упрощённые заглушки keyboard без suppress
                 keyboard_module.add_hotkey(variant, action)
             ok = True
-        except Exception as exc:
-            log(f"Хоткей {variant} не зарегистрирован "
-                f"({type(exc).__name__}: {exc})")
-    return ok
+        except Exception:
+            # 1.0.0: без repr/многострочных трейсов — попробуем скан-код
+            ok = False
+    if ok:
+        return True
+    installed = install_scan_code_hotkeys(keyboard_module,
+                                          [(canonical, action)])
+    if installed:
+        if not logged:
+            _log_hotkey_skip(raw or canonical, canonical)
+        return True
+    if not logged:
+        log(f"Хоткей {raw or canonical} не зарегистрирован — "
+            "клавиатура недоступна (см. app.log)")
+    return False
 
 
 def add_hotkey_events(cfg, keyboard_module, action):
@@ -3794,7 +4659,7 @@ def build_market_dialogs():
                     "message": "токен не введён"}
         headers = {"Authorization": f"Bearer {token}",
                    "Accept": "application/json",
-                   "User-Agent": "WarframePriceOverlayRU/0.6.1"}
+                   "User-Agent": "VoidFrameRU/0.6.1"}
         url = "https://api.warframe.market/v2/me"
         if not callable(http_get):
             import urllib.error
@@ -4217,7 +5082,11 @@ def build_market_dialogs():
             self.spin_price = QSpinBox()
             self.spin_price.setRange(0, 900000)
             self.spin_price.setSpecialValueText("не задана")
-            self.spin_price.setSuffix(" p")
+            # 1.0.0: «p» — текстом только если иконки валют выключены/нет ассетов
+            self._price_currency_icon = currency_icon_label("platinum", cfg,
+                                                            size=16)
+            self.spin_price.setSuffix("" if self._price_currency_icon
+                                      is not None else " p")
             default_price = (self.prefill_price
                              if isinstance(self.prefill_price, (int, float))
                              else (self.order.get("platinum")
@@ -4253,7 +5122,18 @@ def build_market_dialogs():
             self.chk_visible = QCheckBox("виден на сайте (visible)")
             self.chk_visible.setChecked(bool(self.order.get("visible", True))
                                         if self.order else True)
-            form.addRow("Цена", self.spin_price)
+            if self._price_currency_icon is not None:
+                from PyQt5.QtWidgets import QHBoxLayout as _QHBoxLayout
+                from PyQt5.QtWidgets import QWidget as _QWidget
+                price_box = _QWidget()
+                price_line = _QHBoxLayout(price_box)
+                price_line.setContentsMargins(0, 0, 0, 0)
+                price_line.setSpacing(4)
+                price_line.addWidget(self.spin_price, 1)
+                price_line.addWidget(self._price_currency_icon, 0)
+                form.addRow("Цена", price_box)
+            else:
+                form.addRow("Цена", self.spin_price)
             form.addRow("Количество", self.spin_quantity)
             form.addRow(self.lbl_rank, self.spin_rank)
             form.addRow(self.lbl_pertrade, self.spin_pertrade)
@@ -4729,11 +5609,27 @@ def grab(cfg):
 
 
 def to_base(img, cfg):
+    """Кадр → внутренние 1920×1080 без растяжения (1.0.0).
+
+    Масштаб ``min(W/1920, H/1080)`` и центральная вырезка 1920×1080 —
+    как ``ScreenScaling`` в WFInfo: 16:10/21:9/4:3 больше не «сплющивают»
+    карточки. Для 16:9 результат прежний.
+    """
     import cv2
+    mod = reward_geometry_module()
+    if mod is not None:
+        try:
+            base, _sc, _x0, _y0 = mod.to_base_uniform(
+                img, int(cfg["base_width"]), int(cfg["base_height"]))
+            if base is not None and base.size:
+                return base
+        except Exception as e:
+            log(f"Кадр: равномерный масштаб не удался ({type(e).__name__}: {e})")
     bh, bw = int(cfg["base_height"]), int(cfg["base_width"])
     if img.shape[1] == bw and img.shape[0] == bh:
         return img
-    interp = cv2.INTER_AREA if (img.shape[1] > bw or img.shape[0] > bh) else cv2.INTER_CUBIC
+    interp = (cv2.INTER_AREA if (img.shape[1] > bw or img.shape[0] > bh)
+              else cv2.INTER_CUBIC)
     return cv2.resize(img, (bw, bh), interpolation=interp)
 
 
@@ -4812,7 +5708,7 @@ def reset_relic_log(cfg):
         return path
     try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write("Warframe Price Overlay — журнал реликвий\n")
+            f.write("VoidFrameRU — журнал реликвий\n")
             f.write(f"Запуск: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n")
             f.write("Файл пересоздаётся при каждом запуске программы.\n")
             f.write("=" * 56 + "\n")
@@ -5065,6 +5961,10 @@ _MARKET_STATUS_MODULE = {"mod": None, "tried": False}
 _BROWSER_TOKEN_MODULE = {"mod": None, "tried": False}
 _UPDATE_WATCHER_MODULE = {"mod": None, "tried": False}
 _ITEM_ICONS_MODULE = {"mod": None, "tried": False}
+_ICON_PACK_MODULE = {"mod": None, "tried": False}
+_SCAN_CALIBRATE_MODULE = {"mod": None, "tried": False}
+_REWARD_GEOMETRY_MODULE = {"mod": None, "tried": False}
+_GAME_THEMES_MODULE = {"mod": None, "tried": False}
 
 #: Страховка, если login_mode.py нет рядом (старая сборка): флаг всё равно
 #: нужен guard-ам окон/хоткеев, чтобы не всплывать во время входа.
@@ -5245,17 +6145,329 @@ def item_icons_module():
                               _ITEM_ICONS_MODULE)
 
 
+_ICON_BUNDLE_STATE = {"ensured": False}
+
+
 def item_icons_provider(cfg=None):
-    """Провайдер иконок с DATA_DIR и настройкой show_item_icons."""
+    """Провайдер иконок: DATA_DIR → bundle-архив → (только вручную) сеть."""
     mod = item_icons_module()
     if mod is None:
         return None
     cfg = cfg or {}
+    if not _ICON_BUNDLE_STATE.get("ensured"):
+        _ICON_BUNDLE_STATE["ensured"] = True
+        try:
+            mod.ensure_bundle(DATA_DIR, logger=log)
+            info = mod.library_status(DATA_DIR)
+            log(f"Иконки: библиотека {info.get('files', 0)} файлов "
+                f"(комплект: {'да' if info.get('bundle') else 'нет'}), "
+                "сеть за иконками выключена")
+        except Exception as e:
+            log(f"Иконки: bundle не распакован ({type(e).__name__}: {e})")
     try:
         return mod.get_provider(
-            DATA_DIR, enabled=bool(cfg.get("show_item_icons", True)))
+            DATA_DIR, enabled=bool(cfg.get("show_item_icons", True)),
+            auto_download=False)
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Пакет иконок предметов (1.0.0, icon_pack.py): скачивание один раз,
+#  работа офлайн, автообновление раз в icons_update_days дней.
+# ─────────────────────────────────────────────────────────────────────────
+_ICON_PACK_STATE = {"pack": None}
+
+
+def icon_pack_module():
+    """Загрузчик пакета иконок (icon_pack.py); модуль опционален."""
+    return _load_local_module("icon_pack.py", "icon_pack", _ICON_PACK_MODULE)
+
+
+def scan_calibrate_module():
+    """Авто-калибровка скана (scan_calibrate.py); модуль опционален."""
+    return _load_local_module("scan_calibrate.py", "scan_calibrate",
+                              _SCAN_CALIBRATE_MODULE)
+
+
+def reward_geometry_module():
+    """Геометрия экрана наград из WFInfo (reward_geometry.py)."""
+    return _load_local_module("reward_geometry.py", "reward_geometry",
+                              _REWARD_GEOMETRY_MODULE)
+
+
+def game_themes_module():
+    """Темы интерфейса и проба (game_themes.py из данных WFInfo)."""
+    return _load_local_module("game_themes.py", "game_themes",
+                              _GAME_THEMES_MODULE)
+
+
+def icon_pack_manager(cfg=None):
+    """Единственный загрузчик пака для DATA_DIR (или None, если модуля нет)."""
+    mod = icon_pack_module()
+    if mod is None:
+        return None
+    cfg = cfg or {}
+    pack = _ICON_PACK_STATE.get("pack")
+    if pack is None:
+        try:
+            rate = float(cfg.get("icons_rate_limit", 3.0) or 3.0)
+        except Exception:
+            rate = 3.0
+        try:
+            pack = mod.IconPack(DATA_DIR, logger=log, app_version=APP_VERSION,
+                                rate=rate)
+        except Exception as e:
+            log(f"Иконки: загрузчик пака не создан ({type(e).__name__}: {e})")
+            return None
+        _ICON_PACK_STATE["pack"] = pack
+    return pack
+
+
+def reset_icon_pack():
+    """Сбросить синглтон загрузчика (тесты/смена DATA_DIR)."""
+    _ICON_PACK_STATE["pack"] = None
+    mod = icon_pack_module()
+    if mod is not None:
+        try:
+            mod.reset_pack()
+        except Exception:
+            pass
+
+
+def icons_status(cfg=None):
+    """Сводка состояния пака иконок для настроек/прогресса."""
+    pack = icon_pack_manager(cfg)
+    if pack is None:
+        return {"available": False, "have_pack": False, "files": 0,
+                "bytes": 0, "running": False}
+    try:
+        info = dict(pack.status())
+    except Exception as e:
+        return {"available": False, "have_pack": False, "files": 0,
+                "bytes": 0, "running": False,
+                "error": f"{type(e).__name__}: {e}"}
+    info["available"] = True
+    return info
+
+
+_ICON_REDRAW = {"fn": None}
+
+
+def set_icon_redraw_callback(fn):
+    """t54: зарегистрировать перерисовку видимых иконок после пака."""
+    _ICON_REDRAW["fn"] = fn if callable(fn) else None
+    return True
+
+
+def _icons_after(result, cfg=None):
+    """После скачивания/очистки: провайдер перечитывает манифест пака."""
+    try:
+        provider = item_icons_provider(cfg)
+        if provider is not None:
+            provider.reload_pack()
+            provider.clear_cache()
+    except Exception as e:
+        log(f"Иконки: провайдер не перечитал пак ({type(e).__name__}: {e})")
+    fn = _ICON_REDRAW.get("fn")
+    if callable(fn):
+        try:
+            fn()
+        except Exception as e:
+            log(f"Иконки: перерисовка не удалась ({type(e).__name__}: {e})")
+    return dict(result or {})
+
+
+def icons_download(cfg=None, on_progress=None, on_done=None, force=False,
+                   blocking=False):
+    """Скачать пак иконок (по умолчанию — в фоне, окно не блокируется)."""
+    pack = icon_pack_manager(cfg)
+    if pack is None:
+        return {"ok": False, "error": "модуль icon_pack.py не найден"}
+    if pack.running:
+        return {"ok": False, "busy": True, "error": "загрузка уже идёт"}
+
+    def worker():
+        result = pack.download(progress=on_progress, force=force)
+        _icons_after(result, cfg)
+        if callable(on_done):
+            try:
+                on_done(result)
+            except Exception:
+                pass
+        return result
+
+    if blocking:
+        return worker()
+    threading.Thread(target=worker, daemon=True,
+                     name="wf-icon-pack").start()
+    return {"ok": True, "started": True}
+
+
+def icons_update(cfg=None, on_progress=None, on_done=None, blocking=False):
+    """Сверить каталог и докачать только новые/изменённые иконки."""
+    pack = icon_pack_manager(cfg)
+    if pack is None:
+        return {"ok": False, "error": "модуль icon_pack.py не найден"}
+    if pack.running:
+        return {"ok": False, "busy": True, "error": "загрузка уже идёт"}
+
+    def worker():
+        result = pack.update(progress=on_progress)
+        _icons_after(result, cfg)
+        if callable(on_done):
+            try:
+                on_done(result)
+            except Exception:
+                pass
+        return result
+
+    if blocking:
+        return worker()
+    threading.Thread(target=worker, daemon=True,
+                     name="wf-icon-pack-update").start()
+    return {"ok": True, "started": True}
+
+
+def icons_clear(cfg=None):
+    """Удалить пак иконок (кнопка «Очистить кэш иконок»)."""
+    pack = icon_pack_manager(cfg)
+    if pack is None:
+        return {"ok": False, "error": "модуль icon_pack.py не найден"}
+    if pack.running:
+        return {"ok": False, "error": "идёт загрузка — дождитесь окончания"}
+    result = pack.clear()
+    _icons_after(result, cfg)
+    log("Иконки: кэш очищен по кнопке в настройках")
+    # t54: если пак включён — сразу скачать заново
+    try:
+        if bool((cfg or {}).get("icons_pack_enabled", True)):
+            icons_download(cfg)
+            result = dict(result or {})
+            result["redownload_started"] = True
+    except Exception as e:
+        log(f"Иконки: повторная загрузка не запущена "
+            f"({type(e).__name__}: {e})")
+    return result
+
+
+def icons_cancel(cfg=None):
+    """Прервать фоновую загрузку пака (кнопка «Отмена» в шапке)."""
+    pack = icon_pack_manager(cfg)
+    if pack is None:
+        return False
+    if pack.running:
+        pack.request_cancel()
+        log("Иконки: запрошена отмена загрузки")
+        return True
+    return False
+
+
+def icon_pack_progress_bridge(callback):
+    """Мост «фоновый поток загрузчика → GUI-поток» для прогресса иконок.
+
+    Возвращает QObject с ``emit_progress(payload)`` или ``None``, если Qt
+    недоступен. Слот — метод самого QObject (создан в GUI-потоке), поэтому
+    AutoConnection доставляет сигнал в GUI-поток: виджеты можно трогать
+    только там, а загрузчик живёт в отдельном потоке.
+    """
+    try:
+        from PyQt5.QtCore import QObject, pyqtSignal
+    except Exception:
+        return None
+
+    class _IconPackProgress(QObject):
+        progress = pyqtSignal(dict)
+
+        def __init__(self):
+            super().__init__()
+            self._callback = callback
+            self.progress.connect(self._deliver)
+
+        def _deliver(self, payload):
+            if callable(self._callback):
+                try:
+                    self._callback(dict(payload or {}))
+                except Exception:
+                    pass
+
+        def emit_progress(self, payload):
+            self.progress.emit(dict(payload or {}))
+            return True
+
+    try:
+        return _IconPackProgress()
+    except Exception:
+        return None
+
+
+def icons_autostart(cfg=None, on_progress=None, on_done=None):
+    """Первый запуск: пака нет → качаем в фоне (не блокирует окно)."""
+    cfg = cfg or {}
+    if not cfg.get("icons_pack_enabled", True):
+        return False
+    return False
+    pack = icon_pack_manager(cfg)
+    if pack is None or pack.running:
+        return False
+    try:
+        if not pack.needs_download():
+            return False
+    except Exception:
+        return False
+    log("Иконки: пака нет — начинаю скачивание в фоне (не более 3 запросов/с)")
+    result = icons_download(cfg, on_progress=on_progress, on_done=on_done)
+    return bool(result.get("started"))
+
+
+def icons_update_watcher(cfg=None, on_progress=None, on_done=None,
+                         stop_event=None, interval=3600, first_delay=20):
+    """Фоновая сверка пака: раз в ``icons_update_days`` дней (0 — выкл)."""
+    cfg = cfg or {}
+    return False
+    try:
+        first_delay = float(first_delay)
+    except Exception:
+        first_delay = 20.0
+    try:
+        interval = max(60.0, float(interval))
+    except Exception:
+        interval = 3600.0
+
+    def worker():
+        delay = max(1.0, first_delay)
+        while True:
+            # ждём порцию, но просыпаемся, чтобы уважать stop_event
+            waited = 0.0
+            while waited < delay:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                time.sleep(min(5.0, delay - waited))
+                waited += 5.0
+            if stop_event is not None and stop_event.is_set():
+                return
+            try:
+                days = int(cfg.get("icons_update_days", 7) or 0)
+                pack = icon_pack_manager(cfg)
+                if days > 0 and pack is not None and not pack.running \
+                        and pack.needs_update(days):
+                    log(f"Иконки: автообновление (раз в {days} дн.)")
+                    result = pack.update(progress=on_progress)
+                    _icons_after(result, cfg)
+                    if callable(on_done):
+                        try:
+                            on_done(result)
+                        except Exception:
+                            pass
+            except Exception as e:
+                log(f"Иконки: автообновление не удалось "
+                    f"({type(e).__name__}: {e})")
+            delay = interval
+
+    thread = threading.Thread(target=worker, daemon=True,
+                              name="wf-icon-pack-watch")
+    thread.start()
+    return thread
 
 
 def login_in_progress():
@@ -5849,6 +7061,14 @@ class Scanner:
         self._pending_scan = False
         self.watcher = None      # авто-режим: учит шаблон экрана
         self.last_results = None
+        # 1.0.0: кэш авто-калибровки на сессию (не пересчитываем каждый скан)
+        self._calib_cache = {}
+        self._calib_logged = False
+        # 1.0.0: UI scale игры и тема интерфейса (данные WFInfo)
+        self._ui_scale, self._ui_source = warframe_ui_scale(cfg)
+        self._theme_checked = False
+        self.detected_theme = {}
+        self._init_wfinfo_geometry()
         try:
             import scan_cache
             self.cache = scan_cache.ScanCache(
@@ -5856,7 +7076,68 @@ class Scanner:
         except Exception:
             self.cache = None
 
+    def _init_wfinfo_geometry(self):
+        """Сессия: подставить точные цифры WFInfo (×UI scale), если нет
+        сохранённой калибровки t4. Старые конфиги при этом не сбрасываются."""
+        cfg = self.cfg
+        mod = scan_calibrate_module()
+        saved = None
+        if mod is not None:
+            try:
+                saved = mod.normalize_calibration(cfg.get("scan_calibration"))
+            except Exception:
+                saved = None
+        if saved is not None:
+            return False
+        values = apply_wfinfo_geometry(cfg, self._ui_scale)
+        if not values:
+            return False
+        geometry = wfinfo_geometry(self._ui_scale, cfg)
+        if geometry:
+            log(scan_calibration_line(geometry, "wfinfo", self.geom))
+        return True
+
+    def _apply_scan_calibration(self, info):
+        """Авто-геометрия подтверждена: фиксируем в cfg на сессию + лог."""
+        info = dict(info or {})
+        if not info.get("confirmed"):
+            return False
+        geometry = dict(info.get("geometry") or {})
+        if not geometry.get("lefts"):
+            return False
+        source = str(info.get("source") or "авто")
+        if source != "авто":
+            # встроенные цифры WFInfo уже применены на старте сессии
+            return False
+        mod = scan_calibrate_module()
+        if mod is None:
+            return False
+        try:
+            applied = mod.apply_geometry(self.cfg, geometry)
+        except Exception as e:
+            log(f"Калибровка: не применилась ({type(e).__name__}: {e})")
+            return False
+        if not applied:
+            return False
+        if not self._calib_logged:
+            self._calib_logged = True
+            log(scan_calibration_line(geometry, "авто", self.geom))
+        return True
+
+    def attach_ocr(self, engine):
+        self.ocr = engine
+        with self._lock:
+            pending = self._pending_scan
+        if pending:
+            log("OCR: готов — выполняю отложенный Alt+Q")
+            self.request_scan()
+
     def request_scan(self):
+        if self.ocr is None:
+            with self._lock:
+                self._pending_scan = True
+            log("Alt+Q: готовлю распознавание… (модель ещё загружается)")
+            return
         with self._lock:
             if self.busy:
                 if not self._pending_scan:
@@ -5906,13 +7187,23 @@ class Scanner:
 
             cards = []
             owned = []
+            calib_info = {}
             for attempt in range(attempts):
                 started = time.time()
                 full, mon = grab(self.cfg)
                 base = to_base(full, self.cfg)
                 perf["capture"] += time.time() - started
-                sx = mon["width"] / float(self.cfg["base_width"])
-                sy = mon["height"] / float(self.cfg["base_height"])
+                sx = float(self.geom.get("sx") or 1.0)
+                sy = float(self.geom.get("sy") or 1.0)
+                # 1.0.0: тема интерфейса — один раз за сессию (данные WFInfo)
+                if not self._theme_checked:
+                    self._theme_checked = True
+                    try:
+                        self.detected_theme = detect_game_theme(
+                            self.cfg, base, ui_scale=self._ui_scale)
+                    except Exception as e:
+                        log(f"Тема: не определена "
+                            f"({type(e).__name__}: {e})")
                 if self.cfg.get("show_debug"):
                     try:
                         imwrite_unicode(os.path.join(self.cfg["debug_dir"],
@@ -5922,12 +7213,16 @@ class Scanner:
                 started = time.time()
                 cards = detect_cards(base, self.cfg, self.ocr,
                                      debug=self.cfg.get("show_debug"),
-                                     matcher=matcher, cache=self.cache)
+                                     matcher=matcher, cache=self.cache,
+                                     calib_cache=self._calib_cache,
+                                     calib_out=calib_info)
                 perf["ocr"] += time.time() - started
                 if cards or attempt == attempts - 1:
                     break
                 log(f"  Карточек не видно — переснимаю через {int(delay * 1000)} мс")
                 time.sleep(delay)
+            # авто-геометрия подтверждена — фиксируем на сессию (и логируем)
+            self._apply_scan_calibration(calib_info)
 
             # ── фаза 1: имена сразу (метки Owned читаем позже) ─────────
             preliminary = []
@@ -5946,6 +7241,7 @@ class Scanner:
                 })
             if gen == self.generation:
                 started = time.time()
+                self._plates_ms = (time.time() - t0) * 1000
                 self.mgr.updated.emit(preliminary)
                 perf["render"] += time.time() - started
             if not preliminary:
@@ -5958,11 +7254,14 @@ class Scanner:
             try:
                 owned = read_owned_batch(
                     full, sx, sy, cards, self.cfg, self.ocr,
-                    cache=self.cache)
+                    cache=self.cache,
+                    origin=(self.geom.get("ox", 0), self.geom.get("oy", 0)))
             except Exception as exc:
                 log(f"  OCR меток: батч не удался "
                     f"({type(exc).__name__}), поштучно")
-                owned = [read_owned(full, sx, sy, card, self.cfg, self.ocr)
+                owned = [read_owned(full, sx, sy, card, self.cfg, self.ocr,
+                                    origin=(self.geom.get("ox", 0),
+                                            self.geom.get("oy", 0)))
                          for card in cards]
             perf["ocr"] += time.time() - started
             for idx, c in enumerate(preliminary):
@@ -5983,35 +7282,18 @@ class Scanner:
             unique = {}
             for idx, p in enumerate(preliminary):
                 unique.setdefault(p["name"], []).append(idx)
-            pending = {}
-            for name, indexes in unique.items():
-                cached = self.cache.price_get(name) if self.cache else None
-                if cached is not None:
-                    for idx in indexes:
-                        results[idx] = dict(cached)
-                else:
-                    pending[name] = indexes
             t_api = time.time()
-            workers = max(1, min(int(self.cfg.get("workers", 6)), 6))
-            if pending:
-                with ThreadPoolExecutor(max_workers=workers) as ex:
-                    futs = {ex.submit(self.api.lookup, name): name
-                            for name in pending}
-                    for fut in as_completed(futs):
-                        name = futs[fut]
-                        try:
-                            value = fut.result()
-                        except Exception as exc:
-                            log(f"  API: {name}: {exc}")
-                            value = {"name": name, "price": None,
-                                     "matched": False,
-                                     "error": "ошибка сети"}
-                        if self.cache:
-                            self.cache.price_set(name, value)
-                        for idx in pending[name]:
-                            results[idx] = dict(value)
+            resolved = resolve_prices_parallel(
+                self.api, list(unique.keys()), cache=self.cache,
+                workers=int(self.cfg.get("workers", 4) or 4),
+                timeout=2.5, logger=log)
+            for name, indexes in unique.items():
+                value = resolved.get(name) or {
+                    "name": name, "price": None, "matched": False,
+                    "error": "нет цены"}
+                for idx in indexes:
+                    results[idx] = dict(value)
             perf["prices"] = time.time() - t_api
-            log(f"  API: {perf['prices']:.1f} с")
 
             final = []
             for p, r in zip(preliminary, results):
@@ -6026,6 +7308,18 @@ class Scanner:
 
             if gen != self.generation:
                 return
+
+            # 1.0.0: метрика OCR — видно эффект словаря на чужих ПК
+            try:
+                recognized = sum(1 for c in cards
+                                 if not c.get("unrecognized"))
+                corrected_n = sum(1 for c in cards if c.get("ocr_corrected"))
+                matched_n = sum(1 for d in final if d.get("matched"))
+                log(f"OCR: распознано {recognized}/4, "
+                    f"скорректировано {corrected_n}, "
+                    f"матч {matched_n}/4")
+            except Exception:
+                pass
 
             # цена комплекта для карточек-частей (в «Итого» не входит)
             for d in final:
@@ -6104,6 +7398,13 @@ class Scanner:
                     perf["capture"] * 1000, ocr_ms,
                     perf["match"] * 1000, perf["prices"] * 1000,
                     (time.time() - t0) * 1000))
+            log("Скан: capture={:.0f} ocr={:.0f} match={:.0f} "
+                "prices={:.0f} render={:.0f} total={:.0f}".format(
+                    perf["capture"] * 1000, ocr_ms,
+                    perf["match"] * 1000, perf["prices"] * 1000,
+                    perf["render"] * 1000, (time.time() - t0) * 1000))
+            log(f"Alt+Q: плашки за {getattr(self, '_plates_ms', 0):.0f} мс, "
+                f"цены за {perf['prices'] * 1000:.0f} мс")
             log(f"  Готово за {time.time() - t0:.1f} с")
         except Exception as e:
             log(f"ОШИБКА СКАНА: {type(e).__name__}: {e}")
@@ -6147,17 +7448,50 @@ class Scanner:
 #  Режимы: GUI / калибровка / самопроверка
 # ─────────────────────────────────────────────────────────────────────────
 def make_geometry(cfg):
+    """Геометрия монитора: равномерный масштаб ``min(W/1920, H/1080)`` (1.0.0).
+
+    ``sx/sy`` — масштаб базы (было растяжение W/1920, H/1080), ``ox/oy`` —
+    экранное смещение окна 1920×1080 внутри кадра (для 16:9 = 0). Плашки и
+    «Итого» ставятся как ``x_base * sx + ox``.
+    """
     mon = monitor_info(cfg)
+    base_w = int(cfg["base_width"])
+    base_h = int(cfg["base_height"])
+    mod = reward_geometry_module()
+    if mod is not None:
+        try:
+            sc, x0, y0 = mod.base_origin(mon["width"], mon["height"],
+                                         base_w, base_h)
+        except Exception as e:
+            log(f"Геометрия экрана: масштаб не посчитан "
+                f"({type(e).__name__}: {e})")
+            sc = min(mon["width"] / float(base_w),
+                     mon["height"] / float(base_h))
+            x0 = y0 = 0
+    else:
+        sc = min(mon["width"] / float(base_w), mon["height"] / float(base_h))
+        x0 = y0 = 0
     return {
-        "sx": mon["width"] / float(cfg["base_width"]),
-        "sy": mon["height"] / float(cfg["base_height"]),
+        "sx": sc,
+        "sy": sc,
+        "ox": int(round(x0 * sc)),
+        "oy": int(round(y0 * sc)),
+        "sc": sc,
         "width": mon["width"],
         "height": mon["height"],
         "monitor": mon,
     }
 
 
+_STARTUP = {"t0": _MODULE_TS, "catalog_ms": 0.0, "gui_ms": 0.0,
+            "total_ms": 0.0, "import_ms": 0.0, "ocr_ms": 0.0,
+            "ocr_ready": False, "ocr_logged": False}
+
+
 def run_gui(cfg):
+    _start = time.time()
+    _STARTUP["t0"] = _MODULE_TS
+    _STARTUP["import_ms"] = (_start - _MODULE_TS) * 1000
     # 0.6.4: цвета валют из config до создания плашек/панелей
     try:
         ui_theme().configure_currency_colors(cfg)
@@ -6167,13 +7501,8 @@ def run_gui(cfg):
     # окон/хоткеев/плашек, а overlay_window.py и market_browser_login.py
     # импортируют его по имени (в сборке — через hiddenimports).
     login_mode_module()
-    # ВАЖНО: EasyOCR/torch грузим ДО PyQt5. Если Qt инициализируется первым,
-    # на Windows torch может не суметь загрузить c10.dll (WinError 1114).
-    ocr = OcrEngine(cfg)
-    try:
-        ocr.warmup_async()
-    except Exception:
-        pass
+    # 1.0.0 (t60): Reader создаётся лениво/в фоне — окно раньше OCR.
+    ocr = None
     _, _, Manager, Qt = build_overlays()
     from PyQt5.QtCore import QObject, pyqtSignal
     from PyQt5.QtWidgets import QApplication
@@ -6195,6 +7524,7 @@ def run_gui(cfg):
         notification = pyqtSignal(str, str, str, bool)  # тост Windows (фон → GUI)
         notification_full = pyqtSignal(dict)  # центр уведомлений: запись целиком
         pick_reward = pyqtSignal(int)     # Alt+1…4: взята награда из скана
+        stats_changed = pyqtSignal()      # 1.0.0: «Дроп» — данные изменились
 
     # ── вход через браузер: готовим Qt ДО QApplication (только webview) ──
     # Основной способ входа — браузер пользователя по CDP (Chromium 87 не
@@ -6212,13 +7542,44 @@ def run_gui(cfg):
 
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
+    # 1.0.0: иконка приложения из assets/brand/icon.ico
+    try:
+        brand_icon = app_icon()
+        if brand_icon is not None:
+            app.setWindowIcon(brand_icon)
+    except Exception:
+        pass
     geom = make_geometry(cfg)
+    # 1.0.0: миграция статуса — убираем устаревший авто-режим из старых config
+    try:
+        status_mod = market_status_module()
+        if status_mod is not None:
+            changed = status_mod.migrate_status_config(cfg) or {}
+            if changed:
+                save_config_keys(cfg, changed)
+                log("Статус: авто-режим убран, переключено на «Онлайн» "
+                    f"({', '.join(sorted(changed))})")
+    except Exception as e:
+        log(f"Статус: миграция не выполнена ({type(e).__name__}: {e})")
+    # 1.0.0: UI scale игры (EE.cfg) и сохранённая калибровка скана — до первого скана
+    try:
+        log_ui_scale(cfg)
+    except Exception as e:
+        log(f"Масштаб интерфейса: не прочитан ({type(e).__name__}: {e})")
+    try:
+        init_scan_calibration(cfg, geom)
+    except Exception as e:
+        log(f"Калибровка: старт не применил сохранённую запись "
+            f"({type(e).__name__}: {e})")
     # чат создаётся позже; _on_login_state должен видеть это имя
     chat_service = None
     chat_widget = None
     status_service = None
     api = MarketAPI(cfg)
+    _t_catalog = time.time()
     api.load_items()
+    _STARTUP["catalog_ms"] = (time.time() - _t_catalog) * 1000
+    api.refresh_items_async()
     ui = _UiBridge()
 
     # Модули проверяем заранее: единое окно собирается только если есть все
@@ -6263,12 +7624,14 @@ def run_gui(cfg):
                 return {}
             return {"price": item.get("price"),
                     "name": item.get("market_name"),
-                    "ducats": item.get("ducats")}
+                    "ducats": item.get("ducats"),
+                    "tradable": item.get("tradable")}
 
         try:
             collector = farm_mod.FarmStatsCollector(
                 cfg, price_fn=_drop_price, slug_fn=_drop_slug,
-                logger=log, data_dir=DATA_DIR)
+                logger=log, data_dir=DATA_DIR,
+                on_change=(lambda: ui.stats_changed.emit()))
         except Exception as e:
             log(f"Дроп: сборщик не создан ({type(e).__name__}: {e})")
             collector = None
@@ -6304,6 +7667,24 @@ def run_gui(cfg):
     manager = Manager(cfg, geom, market=market, api=api,
                       embedded_ui=use_unified)
     scanner = Scanner(cfg, ocr, api, manager, geom)
+
+    def _warm_ocr_background():
+        started = time.time()
+        try:
+            engine = OcrEngine(cfg)
+            engine._warm()
+            scanner.attach_ocr(engine)
+            _STARTUP["ocr_ms"] = (time.time() - started) * 1000
+            _STARTUP["ocr_ready"] = True
+            if not _STARTUP.get("ocr_logged"):
+                _STARTUP["ocr_logged"] = True
+                log(f"OCR: готов за {time.time() - started:.1f} с (фон)")
+        except Exception as e:
+            log(f"OCR: прогрев не удался ({type(e).__name__}: {e})")
+
+    _STARTUP["ocr_started"] = time.time()
+    threading.Thread(target=_warm_ocr_background, daemon=True,
+                     name="wf-ocr-bg").start()
     reset_relic_log(cfg)
 
     # ── вход на warframe.market: браузер пользователя (CDP) ────────────
@@ -6732,10 +8113,18 @@ def run_gui(cfg):
                 status_providers.append(drops_panel.status_text)
                 refresh_actions.append(drops_panel.refresh)
 
+            # 1.0.0: карточка «Что нового» узнаёт о доступном обновлении
+            update_state = {"info": {}}
             if center_mod is not None and notification_store is not None:
                 try:
                     Center = center_mod.build_notification_center()
-                    notification_center = Center(cfg, notification_store)
+                    notification_center = Center(
+                        cfg, notification_store,
+                        on_open_updates=lambda: _open_settings(
+                            auto_updates=True),
+                        save_cfg=lambda mapping: save_config_keys(cfg,
+                                                                  mapping),
+                        update_info_fn=lambda: update_state.get("info") or {})
                 except Exception as e:
                     log(f"Центр уведомлений: вкладка не создана "
                         f"({type(e).__name__}: {e})")
@@ -6765,6 +8154,7 @@ def run_gui(cfg):
                                    center_mod.open_url(
                                        "https://warframe.market/")
                                    if center_mod is not None else None),
+                on_icons_cancel=lambda: icons_cancel(cfg),
                 on_close=(restore_game_focus
                           if cfg.get("restore_game_focus", True) else None),
                 hotkey_aliases=cfg.get("hotkey_aliases", True))
@@ -6776,6 +8166,15 @@ def run_gui(cfg):
             drops_panel = None
             manager.unified_window = None
 
+    # 1.0.0: «Дроп» обновляет показатели по событиям (лог/отметки/сброс),
+    # а не по таймеру каждую секунду
+    if collector is not None and drops_panel is not None:
+        try:
+            ui.stats_changed.connect(drops_panel.schedule_refresh)
+        except Exception as e:
+            log(f"Дроп: обновление по событиям не подключено "
+                f"({type(e).__name__}: {e})")
+
     # прозрачность окна (настройка «Оверлей»); применяется сразу
     if unified is not None:
         try:
@@ -6783,6 +8182,113 @@ def run_gui(cfg):
             unified.setWindowOpacity(max(0.4, min(1.0, opacity)))
         except Exception:
             pass
+
+    # ── пакет иконок (1.0.0): прогресс в шапке/настройках ──────────────
+    icon_pack = icon_pack_manager(cfg)
+    _icons_signals = {"obj": None}
+    _icons_dialog = {"cb": None}
+    _icons_hide_gen = {"gen": 0}
+    _icons_stop = threading.Event()
+
+    def _icons_progress_gui(payload):
+        """GUI-поток: прогресс «Иконки: N / M (P%)» в шапке и настройках."""
+        payload = dict(payload or {})
+        if unified is not None:
+            try:
+                if payload.get("running"):
+                    unified.set_icons_progress(payload.get("done") or 0,
+                                               payload.get("total") or 0,
+                                               str(payload.get("text") or ""))
+                elif payload.get("phase") == "done":
+                    # финальная строка висит пару секунд и гаснет
+                    unified.set_icons_progress(payload.get("done") or 0,
+                                               payload.get("total") or 0,
+                                               str(payload.get("text") or ""))
+                    _icons_hide_gen["gen"] += 1
+                    generation = _icons_hide_gen["gen"]
+
+                    def _hide_later(gen=generation):
+                        if _icons_hide_gen["gen"] != gen:
+                            return
+                        try:
+                            unified.hide_icons_progress()
+                        except Exception:
+                            pass
+
+                    try:
+                        from PyQt5.QtCore import QTimer
+                        QTimer.singleShot(5000, _hide_later)
+                    except Exception:
+                        pass
+                else:
+                    unified.hide_icons_progress()
+            except Exception:
+                pass
+        callback = _icons_dialog["cb"]
+        if callable(callback):
+            try:
+                callback(payload)
+            except Exception:
+                pass
+
+    def _redraw_icon_surfaces():
+        """t54: после пака/очистки — сбросить кэш и перерисовать UI."""
+        try:
+            if browser is not None:
+                browser.apply_cfg(cfg)
+        except Exception:
+            pass
+        try:
+            if drops_panel is not None:
+                drops_panel.apply_cfg(cfg)
+        except Exception:
+            pass
+        log("Иконки обновлены → перерисовано: market/drops/orders")
+
+    set_icon_redraw_callback(_redraw_icon_surfaces)
+
+    try:
+        _STARTUP["total_ms"] = (time.time() - _STARTUP["t0"]) * 1000
+        _STARTUP["gui_ms"] = _STARTUP["total_ms"]
+        ocr_ms = int(_STARTUP.get("ocr_ms") or 0)
+        ready = "да" if _STARTUP.get("ocr_ready") else "нет"
+        log(f"Старт: import={int(_STARTUP.get('import_ms') or 0)} "
+            f"ocr={ocr_ms} catalog={int(_STARTUP['catalog_ms'])} "
+            f"gui={int(_STARTUP['gui_ms'])} "
+            f"total={int(_STARTUP['total_ms'])} "
+            f"(ocr_ready={ready}, прогрев в фоне)")
+    except Exception:
+        pass
+
+    if icon_pack is not None:
+        try:
+            _icons_signals["obj"] = icon_pack_progress_bridge(
+                _icons_progress_gui)
+        except Exception as e:
+            log(f"Иконки: мост прогресса не создан ({type(e).__name__}: {e})")
+
+    def _icons_emit(payload):
+        """Из фонового потока — в GUI через сигнал (иначе напрямую)."""
+        payload = dict(payload or {})
+        bridge = _icons_signals["obj"]
+        if bridge is not None:
+            try:
+                bridge.emit_progress(payload)
+                return
+            except Exception:
+                pass
+        _icons_progress_gui(payload)
+
+    def _icons_done(result):
+        """Итог фоновой операции: сводку пака/обновления пишет icon_pack.py."""
+        result = dict(result or {})
+        if result.get("ok"):
+            return result
+        if result.get("cancelled"):
+            return result
+        if result.get("error") or result.get("busy"):
+            log(f"Иконки: {result.get('error') or 'операция не выполнена'}")
+        return result
 
     # свои тосты (поверх игры, не забирают фокус)
     if center_mod is not None:
@@ -6958,6 +8464,7 @@ def run_gui(cfg):
             notify_tray = notify_mod.build_tray()(
                 cfg, on_open=_tray_open, on_updates=_tray_updates,
                 on_settings=lambda: _open_settings(),
+                on_about=lambda: show_about(None),
                 on_exit=_tray_exit)
         except Exception as e:
             log(f"Уведомления: трей не создан ({type(e).__name__}: {e})")
@@ -7202,7 +8709,7 @@ def run_gui(cfg):
         if center_mod is None or not callable(
                 getattr(center_mod, "dispatch_toast_only", None)):
             return None
-        record = pick_toast_record(result, duplicate=duplicate)
+        record = pick_toast_record(result, duplicate=duplicate, cfg=cfg)
         try:
             return center_mod.dispatch_toast_only(
                 record, cfg=cfg, toast_stack=toast_stack,
@@ -7234,12 +8741,14 @@ def run_gui(cfg):
             try:
                 marked = collector.mark_picked(
                     result.get("name") or manager._reward_name(item),
-                    price=item.get("price"), index=index)
+                    price=item.get("price"), index=index,
+                    tradable=item.get("tradable"))
                 if not marked:
                     collector.record_pick(
                         result.get("name") or manager._reward_name(item),
                         price=item.get("price"), index=index,
-                        slug=item.get("slug"))
+                        slug=item.get("slug"),
+                        tradable=item.get("tradable"))
                     marked = True
                 if marked and drops_panel is not None:
                     drops_panel.refresh()
@@ -7382,6 +8891,24 @@ def run_gui(cfg):
         except Exception as e:
             log(f"Настройки: иконки не переключены "
                 f"({type(e).__name__}: {e})")
+        # 1.0.0 (t46): иконки валют — «Итого», «Дроп», открытый «Маркет»
+        try:
+            apply_display_settings(
+                settings_cfg,
+                summary=getattr(manager, "summary", None),
+                drops_panel=drops_panel,
+                market_browser=browser)
+        except Exception as e:
+            log(f"Настройки: отображение цен не обновлено "
+                f"({type(e).__name__}: {e})")
+        # 1.0.0: ручной выбор темы интерфейса — перепроверим на следующем скане
+        try:
+            if scanner is not None:
+                scanner.cfg["game_theme"] = str(
+                    settings_cfg.get("game_theme") or "auto")
+                scanner._theme_checked = False
+        except Exception:
+            pass
         # уведомления: фоновый опрос включается/выключается на лету
         if notify_poller is not None and notify_tray is not None:
             try:
@@ -7487,6 +9014,48 @@ def run_gui(cfg):
             toast_stack=toast_stack, tray=notify_tray,
             login_check=login_in_progress, badge_cb=badge_cb)
 
+    def _open_scan_calibration(parent=None):
+        """Мастер «Калибровка скана»: снимок, авто-определение, сохранение."""
+        mod = scan_calibrate_module()
+        if mod is None:
+            log("Калибровка: модуль scan_calibrate.py не найден")
+            return {"ok": False, "error": "модуль калибровки не найден"}
+
+        def _capture():
+            full, _mon = grab(cfg)
+            return to_base(full, cfg)
+
+        def _save(payload):
+            return save_scan_calibration(cfg, payload)
+
+        def _check_trial(geometry):
+            return _calibration_check_scan(cfg, geometry)
+
+        try:
+            Dialog = mod.build_calibration_dialog()
+            dialog = Dialog(cfg, capture_fn=_capture, save_fn=_save,
+                            check_fn=_check_trial,
+                            ui_scale=float(geom.get("sx") or 1.0),
+                            parent=(parent or unified))
+        except Exception as e:
+            log(f"Калибровка: мастер не открылся ({type(e).__name__}: {e})")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        try:
+            if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+                return {"ok": True, "dialog": dialog, "saved": False}
+            dialog.exec_()
+            result = dict(getattr(dialog, "last_result", {}) or {})
+            if result.get("ok"):
+                return {"ok": True, "saved": True,
+                        "scan_calibration": dict(cfg.get("scan_calibration")
+                                                 or {})}
+            return {"ok": True, "saved": False}
+        finally:
+            try:
+                dialog.deleteLater()
+            except Exception:
+                pass
+
     def _open_settings(auto_updates=False):
         """Настройки: клавиши/уведомления/обновления/прочее."""
         if settings_mod is None:
@@ -7497,6 +9066,24 @@ def run_gui(cfg):
             return False
         try:
             Dialog = settings_mod.build_settings_dialog()
+
+            def _icons_status_for_dialog():
+                return icons_status(cfg)
+
+            def _icons_download_for_dialog():
+                return icons_download(cfg, on_progress=_icons_emit,
+                                      on_done=_icons_done)
+
+            def _icons_update_for_dialog():
+                return icons_update(cfg, on_progress=_icons_emit,
+                                    on_done=_icons_done)
+
+            def _icons_clear_for_dialog():
+                return icons_clear(cfg)
+
+            def _icons_cancel_for_dialog():
+                return {"ok": bool(icons_cancel(cfg))}
+
             dialog = Dialog(
                 cfg, apply_fn=_apply_settings,
                 on_test_notification=_test_notification,
@@ -7505,15 +9092,34 @@ def run_gui(cfg):
                 restart_fn=_updates_restart,
                 auto_check=bool(auto_updates),
                 data_dir=DATA_DIR, version=APP_VERSION,
-                parent=unified if unified is not None else None)
+                parent=unified if unified is not None else None,
+                icons_status_fn=_icons_status_for_dialog,
+                icons_download_fn=_icons_download_for_dialog,
+                icons_update_fn=_icons_update_for_dialog,
+                icons_clear_fn=_icons_clear_for_dialog,
+                icons_cancel_fn=_icons_cancel_for_dialog,
+                on_scan_calibrate=_open_scan_calibration,
+                confirm_fn=(lambda text: themed_confirm(
+                    dialog, text, title="Иконки предметов",
+                    confirm_text="Удалить", danger=True)))
             if auto_updates:
                 try:
                     dialog.tabs.setCurrentWidget(dialog.updates_page)
                 except Exception:
                     pass
-            dialog.exec_()
+            # прогресс пака приходит из фонового потока в это окно
+            _icons_dialog["cb"] = getattr(dialog, "set_icons_progress", None)
+            try:
+                dialog.refresh_icons_status()
+            except Exception:
+                pass
+            try:
+                dialog.exec_()
+            finally:
+                _icons_dialog["cb"] = None
             return True
         except Exception as e:
+            _icons_dialog["cb"] = None
             log(f"Настройки: окно не открылось ({type(e).__name__}: {e})")
             return False
 
@@ -7582,6 +9188,7 @@ def run_gui(cfg):
         watcher_mod = update_watcher_module()
         if watcher_mod is not None:
             def _auto_update_available(info):
+                update_state["info"] = dict(info or {})
                 version = str((info or {}).get("version") or "").strip()
                 if not version or notifier is None:
                     return False
@@ -7608,7 +9215,7 @@ def run_gui(cfg):
         auto_update_watcher = None
 
     log("=" * 60)
-    log(f"Warframe Price Overlay {APP_VERSION} — готово.")
+    log(f"VoidFrameRU {APP_VERSION} — готово.")
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
     if unified is not None:
         hotkey = (cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")).upper()
@@ -7648,11 +9255,31 @@ def run_gui(cfg):
     log(f"Монитор: {geom['width']}x{geom['height']}  "
         f"(масштаб {geom['sx']:.2f}x{geom['sy']:.2f} от 1920x1080)")
     log("=" * 60)
+
+    # ── иконки: первый запуск (пак в фоне) и автообновление раз в N дней ──
+    if icon_pack is not None:
+        try:
+            started = icons_autostart(cfg, on_progress=_icons_emit,
+                                      on_done=_icons_done)
+            if not started and cfg.get("icons_pack_enabled", True):
+                log("Иконки: пак на диске — работаем офлайн, без запросов.")
+            icons_update_watcher(cfg, on_progress=_icons_emit,
+                                 on_done=_icons_done, stop_event=_icons_stop)
+        except Exception as e:
+            log(f"Иконки: фоновая загрузка не запущена "
+                f"({type(e).__name__}: {e})")
+    else:
+        log("Иконки: модуль icon_pack.py не найден — работают только "
+            "иконки по требованию.")
     try:
         app.exec_()
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            _icons_stop.set()
+        except Exception:
+            pass
         if auto_update_watcher is not None:
             try:
                 auto_update_watcher.stop()
@@ -7749,7 +9376,7 @@ def run_calibrate(cfg):
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(prog="WarframePriceOverlay",
+    p = argparse.ArgumentParser(prog="VoidFrameRU",
                                 description="Warframe Reward Price Overlay (wfinfo-аналог)")
     p.add_argument("--calibrate", action="store_true",
                    help="сохранить скриншот с разметкой найденных карточек")
@@ -7763,6 +9390,79 @@ def parse_args(argv=None):
                    help="не проверять обновления (обрабатывает лаунчер)")
     p.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     return p.parse_args(argv)
+
+
+def apply_display_settings(settings_cfg, summary=None, drops_panel=None,
+                           market_browser=None):
+    """1.0.0 (t46): один способ применить настройки отображения цен."""
+    for target in (summary, drops_panel, market_browser):
+        apply = getattr(target, "apply_cfg", None)
+        if callable(apply):
+            try:
+                apply(settings_cfg)
+            except Exception as e:
+                log(f"Настройки: apply_cfg не сработал "
+                    f"({type(e).__name__}: {e})")
+    return True
+
+
+def resolve_prices_parallel(api, names, cache=None, workers=4,
+                            timeout=1.5, logger=None):
+    """Параллельно получить цены (до 4 воркеров, общий таймаут пачки).
+
+    Кэш переиспользуется; недостающие/зависшие предметы получают
+    ``price=None`` (плашки к этому моменту уже нарисованы с именами).
+    Одна строка в лог: ``Цены: 4 предмета за 0.9 с (кэш 2)``.
+    """
+    from concurrent.futures import (ThreadPoolExecutor, as_completed,
+                                    TimeoutError as FuturesTimeout)
+    started = time.time()
+    names = list(dict.fromkeys(str(n) for n in (names or []) if str(n)))
+    out = {}
+    pending = []
+    cached = 0
+    for name in names:
+        value = cache.price_get(name) if cache is not None else None
+        if value is not None:
+            out[name] = dict(value)
+            cached += 1
+        else:
+            pending.append(name)
+    if pending:
+        workers = max(1, min(4, int(workers or 4)))
+        pool = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = {pool.submit(api.lookup, name): name
+                       for name in pending}
+            try:
+                for future in as_completed(futures, timeout=float(timeout)):
+                    name = futures[future]
+                    try:
+                        value = future.result()
+                    except Exception as exc:
+                        log(f"  API: {name}: {type(exc).__name__}")
+                        value = {"name": name, "price": None,
+                                 "matched": False, "error": "ошибка сети"}
+                    out[name] = dict(value or {})
+                    if cache is not None:
+                        cache.price_set(name, value)
+            except FuturesTimeout:
+                log("  API: таймаут пачки цен")
+        finally:
+            pool.shutdown(wait=False)
+        for name in pending:
+            if name not in out:
+                out[name] = {"name": name, "price": None,
+                             "matched": False, "error": "таймаут цен"}
+    elapsed = time.time() - started
+    message = (f"Цены: {len(names)} предмета за {elapsed:.1f} с "
+               f"(кэш {cached}, сеть "
+               f"{max(0, len(names) - cached)})")
+    try:
+        (logger or log)(message)
+    except Exception:
+        pass
+    return out
 
 
 def main(argv=None):
@@ -7780,7 +9480,7 @@ def main(argv=None):
             pass
         log(startup_line())
         if "--version" in raw:
-            line = f"WarframePriceOverlay {APP_VERSION}"
+            line = f"VoidFrameRU {APP_VERSION}"
             log(line)
             try:
                 if getattr(sys, "stdout", None) is not None:
@@ -7790,6 +9490,11 @@ def main(argv=None):
             return 0
         args = parse_args(raw)
         enable_dpi_awareness()
+        # 1.0.0: перенос данных старой версии (один раз, до чтения config)
+        try:
+            run_data_migration()
+        except Exception as exc:
+            log(f"Данные: миграция не выполнена ({type(exc).__name__})")
         cfg = load_config(args.config or CONFIG_PATH)
         ensure_dirs(cfg)
         if args.calibrate:
