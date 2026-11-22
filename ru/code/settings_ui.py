@@ -1306,6 +1306,12 @@ def build_settings_dialog():
             self.lbl_update_current.setStyleSheet(
                 f"color:{color('text')}; background:transparent;")
             outer.addWidget(self.lbl_update_current)
+            self.lbl_update_active = QLabel("")
+            self.lbl_update_active.setFont(font(10))
+            self.lbl_update_active.setStyleSheet(
+                f"color:{color('muted')}; background:transparent;")
+            self.lbl_update_active.setVisible(False)
+            outer.addWidget(self.lbl_update_active)
             self.chk_update_check = QCheckBox(
                 "Проверять автоматически (в фоне)")
             self.chk_update_check.setFont(font(11))
@@ -1341,6 +1347,12 @@ def build_settings_dialog():
             self.btn_update_apply.setVisible(False)
             self.btn_update_apply.clicked.connect(self.apply_and_restart)
             row.addWidget(self.btn_update_apply)
+            self.btn_restart_now = QPushButton("Перезапустить сейчас")
+            self.btn_restart_now.setStyleSheet(button_qss(small=True))
+            self.btn_restart_now.setCursor(Qt.PointingHandCursor)
+            self.btn_restart_now.setVisible(False)
+            self.btn_restart_now.clicked.connect(self.restart_now)
+            row.addWidget(self.btn_restart_now)
             row.addStretch(1)
             outer.addLayout(row)
             self.lbl_update_status = QLabel(
@@ -1729,6 +1741,38 @@ def build_settings_dialog():
                 return True
             return False
 
+        @staticmethod
+        def _ver_tuple(value):
+            try:
+                return tuple(int(part) for part in str(value).split(".")
+                             if part.isdigit())
+            except Exception:
+                return ()
+
+        def _update_versions(self, info):
+            running = str((info or {}).get("running") or self.version or "")
+            active = str((info or {}).get("active")
+                         or (info or {}).get("current") or running)
+            if active and running and active != running:
+                self.lbl_update_active.setText(
+                    f"Активная после перезапуска: {active}")
+                self.lbl_update_active.setVisible(True)
+            else:
+                self.lbl_update_active.setVisible(False)
+            return running, active
+
+        def restart_now(self):
+            if callable(self.restart_fn):
+                try:
+                    self.restart_fn()
+                    return True
+                except Exception as exc:
+                    self._set_status(f"Перезапуск не удался: {exc}", warn=True)
+            else:
+                self._set_status("Перезапуск недоступен в этой сборке.",
+                                 warn=True)
+            return False
+
         def check_updates(self):
             """«Проверить обновление»: фоновая проверка, окно не блокируется."""
             if self._update_busy:
@@ -1778,6 +1822,7 @@ def build_settings_dialog():
                 self.lbl_update_status.setStyleSheet(
                     f"color:{color('warning')};")
                 self.btn_update_apply.setVisible(False)
+                self.btn_restart_now.setVisible(False)
                 return
             if info.get("error"):
                 self.lbl_update_status.setText(
@@ -1786,11 +1831,24 @@ def build_settings_dialog():
                     f"color:{color('warning')};")
                 self.btn_update_apply.setVisible(False)
                 return
-            if info.get("available"):
-                version = info.get("version") or "?"
+            running, active = self._update_versions(info)
+            needs_restart = bool(info.get("needs_restart")) or bool(
+                active and running and self._ver_tuple(active)
+                > self._ver_tuple(running))
+            if needs_restart:
                 self.lbl_update_status.setText(
-                    f"Доступна версия {version}. "
-                    "Нажмите «Обновить и перезапустить».")
+                    f"Обновление {active} скачано — перезапустите приложение.")
+                self.lbl_update_status.setStyleSheet(f"color:{color('text')};")
+                self.btn_update_apply.setVisible(False)
+                self.btn_restart_now.setVisible(callable(self.restart_fn))
+                self.btn_restart_now.setEnabled(True)
+                self._set_status(f"Обновление {active} скачано — перезапустите.")
+                return
+            self.btn_restart_now.setVisible(False)
+            if info.get("available"):
+                version = info.get("version") or info.get("server") or "?"
+                self.lbl_update_status.setText(
+                    f"Доступно обновление {version} — скачиваю…")
                 self.lbl_update_status.setStyleSheet(f"color:{color('text')};")
                 notes = str(info.get("notes") or "").strip()
                 self.lbl_update_notes.setText(
@@ -1805,6 +1863,7 @@ def build_settings_dialog():
                 + (f" ({current})." if current else "."))
             self.lbl_update_status.setStyleSheet(f"color:{color('text')};")
             self.btn_update_apply.setVisible(False)
+            self.btn_restart_now.setVisible(False)
             self._set_status("Обновлений нет.")
 
         def apply_and_restart(self):
