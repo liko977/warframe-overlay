@@ -75,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -2132,6 +2132,25 @@ def init_scan_calibration(cfg, geom=None):
     return saved
 
 
+_STALE_CALIB_LOGGED = False
+
+
+def _log_stale_calibration(saved, detected):
+    global _STALE_CALIB_LOGGED
+    if _STALE_CALIB_LOGGED:
+        return
+    _STALE_CALIB_LOGGED = True
+    try:
+        old = "/".join(str(int(round(float(x))))
+                       for x in (saved.get("lefts") or []))
+        new = "/".join(str(int(round(float(x))))
+                       for x in (detected.get("lefts") or []))
+        log(f"Калибровка устарела (конфиг {old}, распознано {new}) — "
+            "использую авто")
+    except Exception:
+        pass
+
+
 def scan_geometry_effective(cfg, frame=None, calib_cache=None,
                             ui_scale=None):
     """Геометрия для текущего кадра: ``(cfg_eff, geometry|None, источник)``.
@@ -2148,6 +2167,39 @@ def scan_geometry_effective(cfg, frame=None, calib_cache=None,
         except Exception:
             saved = None
     if saved is not None:
+        # t73: не доверять устаревшей калибровке — сверяем с кадром
+        if mod is not None and frame is not None:
+            try:
+                hint = (wfinfo_geometry(ui_scale, cfg)
+                        if reward_geometry_module() else None)
+                detected = mod.detect_geometry(frame, expected=0, hint=hint)
+            except Exception:
+                detected = None
+            if detected:
+                old_lefts = [float(x) for x in (saved.get("lefts") or [])]
+                new_lefts = [float(x) for x in (detected.get("lefts") or [])]
+                diff = 0.0
+                if old_lefts and new_lefts:
+                    if len(old_lefts) != len(new_lefts):
+                        diff = 999.0
+                    else:
+                        diff = max(abs(a - b) for a, b in
+                                   zip(old_lefts, new_lefts))
+                old_pitch = float(saved.get("card_pitch")
+                                  or saved.get("pitch") or 0)
+                new_pitch = float(detected.get("card_pitch")
+                                  or detected.get("pitch") or 0)
+                pitch_diff = abs(old_pitch - new_pitch) if old_pitch and new_pitch else 0
+                if diff > 20 or pitch_diff > 20:
+                    _log_stale_calibration(saved, detected)
+                    try:
+                        applied = mod.apply_geometry(dict(cfg), detected)
+                    except Exception:
+                        applied = {}
+                    if applied:
+                        cfg_eff = dict(cfg)
+                        cfg_eff.update(applied)
+                        return cfg_eff, detected, "авто"
         return cfg, None, "конфиг"
     if mod is not None and frame is not None:
         hint = wfinfo_geometry(ui_scale, cfg) if reward_geometry_module() else None
@@ -2201,6 +2253,15 @@ def save_scan_calibration(cfg, payload):
                 f"({type(e).__name__}: {e})")
     saved = save_config_keys(cfg, {"scan_calibration": dict(payload)})
     log(scan_calibration_line(payload, "конфиг"))
+    try:
+        log("Калибровка сохранена: lefts=[{}] pitch={} scale={}".format(
+            ", ".join(str(int(round(float(x))))
+                      for x in (payload.get("lefts") or [])),
+            int(round(float(payload.get("card_pitch")
+                            or payload.get("pitch") or 0))),
+            payload.get("ui_scale") or payload.get("scale") or 1.0))
+    except Exception:
+        pass
     if not saved:
         return {"ok": False, "error": "config.json не записан"}
     return {"ok": True, "scan_calibration": dict(payload)}
@@ -9014,6 +9075,31 @@ def run_gui(cfg):
             toast_stack=toast_stack, tray=notify_tray,
             login_check=login_in_progress, badge_cb=badge_cb)
 
+    def _reset_scan_calibration():
+        """t73: удалить scan_calibration из config.json и применить канонику."""
+        cfg.pop("scan_calibration", None)
+        try:
+            raw = {}
+            if os.path.exists(CONFIG_PATH):
+                with open(CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
+                    raw = json.load(handle)
+            if isinstance(raw, dict):
+                raw.pop("scan_calibration", None)
+                with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
+                    json.dump(raw, handle, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        try:
+            mod = scan_calibrate_module()
+            canonical = (mod.geometry_from_config(cfg)
+                         if mod is not None else None)
+            if canonical:
+                mod.apply_geometry(cfg, canonical)
+        except Exception:
+            pass
+        log("Калибровка сброшена — используется каноническая сетка")
+        return {"ok": True}
+
     def _open_scan_calibration(parent=None):
         """Мастер «Калибровка скана»: снимок, авто-определение, сохранение."""
         mod = scan_calibrate_module()
@@ -9036,7 +9122,8 @@ def run_gui(cfg):
             dialog = Dialog(cfg, capture_fn=_capture, save_fn=_save,
                             check_fn=_check_trial,
                             ui_scale=float(geom.get("sx") or 1.0),
-                            parent=(parent or unified))
+                            parent=(parent or unified),
+                            reset_fn=_reset_scan_calibration)
         except Exception as e:
             log(f"Калибровка: мастер не открылся ({type(e).__name__}: {e})")
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
