@@ -391,7 +391,7 @@ def build_item_artwork():
                 f"color:{theme.PALETTE['muted']}; background:transparent;"
                 " font-size:10px;")
             lay.addWidget(self.caption)
-            lay.addWidget(self.part_chip_label)
+            lay.addWidget(self.part_chip_label, 0, Qt.AlignLeft)
             self.minis_host = QWidget()
             self.minis = QHBoxLayout(self.minis_host)
             self.minis.setContentsMargins(0, 0, 0, 0)
@@ -915,8 +915,10 @@ def build_market_browser():
             self.part_chip = item_icons.part_chip_label(
                 str(item.get("slug") or ""), str(item.get("name") or ""),
                 self)
-            if self.part_chip is not None:
-                lay.addWidget(self.part_chip)
+            if self.part_chip is not None and self.part_chip.text():
+                lay.addWidget(self.part_chip, 0, Qt.AlignVCenter)
+            elif self.part_chip is not None:
+                self.part_chip.deleteLater()
             lay.addWidget(self.lbl_sell)
             lay.addWidget(self.lbl_buy)
             lay.addWidget(self.lbl_online)
@@ -2071,8 +2073,10 @@ def build_market_browser():
             order_chip = item_icons.part_chip_label(
                 str((icon_item or {}).get("slug") or ""),
                 str(self._order_item_name(order)), card)
-            if order_chip is not None:
-                lay.addWidget(order_chip)
+            if order_chip is not None and order_chip.text():
+                lay.addWidget(order_chip, 0, Qt.AlignVCenter)
+            elif order_chip is not None:
+                order_chip.deleteLater()
             card.lbl_name = name
             card.lbl_price = price
             card.lbl_quantity = quantity
