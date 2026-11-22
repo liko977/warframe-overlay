@@ -18,6 +18,7 @@
 import datetime
 import os
 import time
+import webbrowser
 
 import ui_theme as theme
 
@@ -185,9 +186,9 @@ def build_drops_panel():
     from PyQt5.QtCore import Qt, pyqtSignal
     from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QButtonGroup, QComboBox, QFrame, QHBoxLayout,
-                                 QLabel, QMessageBox, QPushButton, QScrollArea,
-                                 QSizePolicy, QStackedWidget, QVBoxLayout,
-                                 QWidget)
+                                 QLabel, QPushButton, QScrollArea, QSizePolicy,
+                                 QStackedWidget, QVBoxLayout, QWidget)
+    import market_browser
 
     def make_font(size, bold=False):
         font = QFont(theme.FONT)
@@ -450,6 +451,17 @@ def build_drops_panel():
                 line.addWidget(name, 1)
                 line.addWidget(price)
                 line.addWidget(qty)
+                market = QPushButton("↗")
+                market.setFont(make_font(9, True))
+                market.setStyleSheet(theme.button_qss(small=True))
+                market.setCursor(Qt.PointingHandCursor)
+                market.setFixedSize(22, 22)
+                slug = str((drop or {}).get("slug") or "")
+                market.setEnabled(bool(slug))
+                market.setToolTip("Открыть на маркете")
+                market.clicked.connect(
+                    lambda _=False, s=slug: self._open_market(s))
+                line.addWidget(market)
                 line.addWidget(self._sell_button(drop))
                 self.loot_lay.addWidget(row)
 
@@ -482,6 +494,14 @@ def build_drops_panel():
                                    self._on_loot_sell(d))
             return button
 
+        def _open_market(self, slug):
+            url = f"https://warframe.market/items/{slug}" if slug else ""
+            if url:
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+
         def _on_loot_sell(self, drop):
             if not callable(self.sell_handler):
                 return
@@ -496,14 +516,21 @@ def build_drops_panel():
                     self._listed_slugs.add(slug)
                 self._render_loot()
 
+        def _reset_confirm_dialog(self):
+            Confirm = market_browser.build_market_browser().ConfirmDialog
+            return Confirm(
+                self, "Очистить выбранный лут и историю взятых наград?",
+                confirm_text="Сбросить", cancel_text="Отмена",
+                danger=True, title="Сбросить лут")
+
         def _reset_stats(self):
             if self.collector is None:
                 return
-            answer = QMessageBox.question(
-                self, "Сбросить лут",
-                "Очистить выбранный лут и историю взятых наград?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if answer != QMessageBox.Yes:
+            try:
+                accepted = self._reset_confirm_dialog().exec_() == 1
+            except Exception:
+                return
+            if not accepted:
                 return
             try:
                 self.collector.reset()
