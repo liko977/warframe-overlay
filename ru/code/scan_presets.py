@@ -109,6 +109,22 @@ def graphics(geometry):
     return f"{int(width)}×{int(height)} — {geometry.get('preset_label')}"
 
 
+def application_line(cfg, geometry):
+    """Строка лога применения пресета (t84)."""
+    lefts = ",".join(str(int(round(float(x))))
+                     for x in (geometry.get("lefts") or []))
+    center = cfg.get("cards_center_x")
+    pitch = float(geometry.get("card_pitch") or 242)
+    width = float(geometry.get("card_width") or 242)
+    n = len(geometry.get("lefts") or [])
+    total = n * width + (n - 1) * (pitch - width) if n else 0
+    first = float((geometry.get("lefts") or [0])[0])
+    grid = [int(round(first + i * pitch)) for i in range(n)]
+    return (f"Раскладка применена: preset={cfg.get('scan_preset', 'auto')} "
+            f"lefts=[{lefts}] center_x={float(center or 0):.1f} "
+            f"(card_lefts → [{','.join(str(x) for x in grid)}])")
+
+
 def ensure_preset(cfg):
     """Нормализовать cfg['scan_preset']; старую калибровку игнорируем."""
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -128,8 +144,12 @@ def apply_geometry(cfg, geometry):
     cfg["card_width"] = float(geometry.get("card_width") or 242)
     cfg["card_pitch"] = float(geometry.get("card_pitch") or 242)
     cfg["card_height"] = float(geometry.get("card_height") or 235)
-    cfg["cards_center_x"] = lefts[0] if len(lefts) == 1 else (
-        lefts[0] + cfg["card_pitch"] * (len(lefts) - 1) / 2.0)
+    # t84: центр ряда = lefts[0] + полная ширина ряда / 2
+    n = len(lefts)
+    width = float(geometry.get("card_width") or 242)
+    pitch = float(geometry.get("card_pitch") or 242)
+    total = n * width + (n - 1) * (pitch - width)
+    cfg["cards_center_x"] = lefts[0] + total / 2.0
     cfg["card_top"] = float(geometry.get("card_top") or 224)
     cfg["name_offset_y"] = float(geometry.get("name_offset_y") or 187)
     cfg["name_height"] = float(geometry.get("name_height") or 48)
@@ -145,5 +165,6 @@ def apply_geometry(cfg, geometry):
 
 
 __all__ = ["PRESETS", "BOTTOM", "preset_label", "scan_geometry",
-           "preset_log_line", "ensure_preset", "apply_geometry",
+           "preset_log_line", "application_line", "ensure_preset",
+           "apply_geometry",
            "canonical_lefts"]
