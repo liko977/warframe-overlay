@@ -762,7 +762,7 @@ def verify_token(token, http_get=None):
     try:
         headers = {"Authorization": f"Bearer {token}",
                    "Accept": "application/json",
-                   "User-Agent": "WarframePriceOverlayRU/0.6.1"}
+                   "User-Agent": "VoidFrameRU/0.6.1"}
         try:
             code = http_get(API_ME, headers, 10)
         except TypeError:
