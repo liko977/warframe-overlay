@@ -1,13 +1,13 @@
 {
-  "version": "1.0.3",
-  "notes": "Пресеты раскладки скана (в т.ч. «низ экрана») вместо автокалибровки; строки «Лута» прижаты к верху; приложение работает в одном экземпляре — второй запуск поднимает уже открытое окно.",
-  "updated_at": "2026-11-22T18:24:12Z",
+  "version": "1.0.4",
+  "notes": "Исправлен сдвиг плашек влево (неверный центр ряда при пресетах); имена карточек очищаются от ников игроков и мусора; плашки не рисуются, когда наград на экране нет.",
+  "updated_at": "2026-11-22T18:44:49Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "d7e48e879e9c4d3a6dbaed4d583ec00d3068c04782afb371abeac500209420e9",
+      "sha256": "ec5e3c9a70bc12b9ff142236cb064c2a896b4d9dabf3b47b8e55f6ae0c33d03e",
       "size": 2869
     },
     {
@@ -17,10 +17,16 @@
       "size": 41977
     },
     {
+      "path": "card_text.py",
+      "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/card_text.py",
+      "sha256": "9ed56f1006ce64eba14c9b94209decdd3c3258419381acc22351b8a0e30ebfa4",
+      "size": 4620
+    },
+    {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "41ec3a88d96892e04ffd21ac40a32b6c4c401e3279ee195e191415a50312c8a5",
-      "size": 11948
+      "sha256": "3476deed1d76ac2eca750e3984bb654c63ccd70626d07351845c8da482c9f5c9",
+      "size": 12252
     },
     {
       "path": "chat_client.py",
@@ -181,8 +187,8 @@
     {
       "path": "scan_presets.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/scan_presets.py",
-      "sha256": "a872d6aa448f4ff78b8b55888e52caf2a075d2758b0e5c45863c0fcc6a884e22",
-      "size": 6185
+      "sha256": "1b0381e7462149623ac4628716e68b382f01a17d4d3864cb6759ff84e8dd31a1",
+      "size": 7212
     },
     {
       "path": "settings_ui.py",
@@ -223,8 +229,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "812a7281080a1d8810e52ab91bfa8dd669d49b8b08c14dc02e5cd1ff340d8d32",
-      "size": 443658
+      "sha256": "c43f354e6388c4b7e1c6d2e75bfa0cbbdab94fb6fe046925bbe0a0c8bf710e3f",
+      "size": 444875
     }
   ]
 }
