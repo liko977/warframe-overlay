@@ -535,13 +535,15 @@ def build_drops_panel():
             loot_head.setContentsMargins(0, 2, 0, 0)
             lay.addWidget(loot_head)
             self.loot_host = QWidget()
-            self.loot_host.setSizePolicy(QSizePolicy.Expanding,
-                                         QSizePolicy.Preferred)
+            self.loot_host.setSizePolicy(QSizePolicy.Preferred,
+                                         QSizePolicy.Minimum)
             self.loot_lay = QVBoxLayout(self.loot_host)
             self.loot_lay.setContentsMargins(0, 0, 0, 0)
-            self.loot_lay.setSpacing(3)
+            self.loot_lay.setSpacing(0)
+            self.loot_lay.setAlignment(Qt.AlignTop)
             self.loot_scroll = QScrollArea()
             self.loot_scroll.setWidgetResizable(True)
+            self.loot_scroll.setAlignment(Qt.AlignTop)
             self.loot_scroll.setFrameShape(QFrame.NoFrame)
             self.loot_scroll.setMinimumHeight(140)
             self.loot_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
@@ -909,6 +911,7 @@ def build_drops_panel():
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
+            self.loot_lay.setAlignment(Qt.AlignTop)
             loot = []
             session = None
             history = self._session_view != "current"
@@ -990,6 +993,7 @@ def build_drops_panel():
                         subtitle_text = hint
                 wrap = _LootEmptyHint(title_text, subtitle_text,
                                       cfg=self.cfg)
+                self.loot_lay.setAlignment(Qt.AlignCenter)
                 self.loot_lay.addWidget(wrap, 1)
                 self.empty_hint_wrap = wrap
                 self.empty_hint = wrap.title
@@ -1097,6 +1101,8 @@ def build_drops_panel():
                 else:
                     line.addWidget(self._sell_button(drop))
                 self.loot_lay.addWidget(row)
+            self.loot_lay.setAlignment(Qt.AlignTop)
+            self.loot_lay.addStretch(1)
             self._fit_loot_height()
             try:
                 QTimer.singleShot(0, self._fit_loot_height)
