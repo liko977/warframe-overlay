@@ -1264,7 +1264,7 @@ def normalize(data, now=None, node_dict=None):
                 ducats = _number(entry.get("ducats"))
                 credits = _number(entry.get("credits"))
                 if ducats:
-                    bits.append(f"{int(ducats)} ◆")
+                    bits.append(f"{int(ducats)} дк")
                 if credits:
                     bits.append(f"{int(credits):,} кр".replace(",", " "))
                 rows.append(_row("void_trader_item", SECTION_BARO, f"• {item}",
@@ -1279,7 +1279,7 @@ def normalize(data, now=None, node_dict=None):
         cost = _number(reward.get("cost"))
         detail = ""
         if name:
-            detail = f"награда: {name}" + (f" ({int(cost)} ◆)" if cost else "")
+            detail = f"награда: {name}" + (f" ({int(cost)} дк)" if cost else "")
         rows.append(_row("steel_path", SECTION_STEEL_PATH, "Стальной путь", detail,
                          parse_iso(steel.get("expiry")), parse_iso(steel.get("activation")),
                          headline="Стальной путь", subtext=detail,
