@@ -75,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
