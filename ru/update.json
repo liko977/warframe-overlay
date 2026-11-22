@@ -1,13 +1,13 @@
 {
-  "version": "1.0.4",
-  "notes": "Исправлен сдвиг плашек влево (неверный центр ряда при пресетах); имена карточек очищаются от ников игроков и мусора; плашки не рисуются, когда наград на экране нет.",
-  "updated_at": "2026-11-22T18:44:49Z",
+  "version": "1.0.5",
+  "notes": "Конфиг больше не теряет URL обновлений (миграция config_version=2, самопроверка критичных ключей); пустое поле URL в настройках восстанавливает адрес; новая настройка «Не проверять обновления»; Alt+1…4 — тост «Взято» и запись в истории уведомлений.",
+  "updated_at": "2026-11-22T19:36:57Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "ec5e3c9a70bc12b9ff142236cb064c2a896b4d9dabf3b47b8e55f6ae0c33d03e",
+      "sha256": "580df3e2a421913ce72c3a74a19ed075a96dd2e96ef3eafdba9ec15e5cafef61",
       "size": 2869
     },
     {
@@ -25,8 +25,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "3476deed1d76ac2eca750e3984bb654c63ccd70626d07351845c8da482c9f5c9",
-      "size": 12252
+      "sha256": "abc430b3bf14dfc63264a7bf41795acd2a7447c1aab56263f78240e306809d38",
+      "size": 12906
     },
     {
       "path": "chat_client.py",
@@ -133,14 +133,14 @@
     {
       "path": "notification_center.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/notification_center.py",
-      "sha256": "624fa76b887ab017dc42cf71c1a64496cad872bf3ef1960e1b69af2da84b76f4",
-      "size": 76695
+      "sha256": "247bc714417127cef3e2f50b2aa0b514b155d3eea5ce38d55a6926e2da6a7fe6",
+      "size": 76735
     },
     {
       "path": "notifications.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/notifications.py",
-      "sha256": "4bc4dee54d1129238306d36f459c242b8d8cf7d1a7e4c3968f59e87e16986a8e",
-      "size": 45033
+      "sha256": "628ebc3b9f33c14c336d3b8e73242fb0e92080a719a5dc859f5be2b8c21f0ee1",
+      "size": 45063
     },
     {
       "path": "ocr_correct.py",
@@ -193,8 +193,8 @@
     {
       "path": "settings_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/settings_ui.py",
-      "sha256": "c2fff26482c3dbcb06e0edf8c0cda4facb4a0a0a0ae62bc8ef4affe4ba1113ba",
-      "size": 109009
+      "sha256": "781165d043c3713585a43b72e1350dbf4c6f6e9b9882d9ff55d3ade98118ff63",
+      "size": 110427
     },
     {
       "path": "single_instance.py",
@@ -229,8 +229,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "c43f354e6388c4b7e1c6d2e75bfa0cbbdab94fb6fe046925bbe0a0c8bf710e3f",
-      "size": 444875
+      "sha256": "f6e07ddb67bda54ff240be36b95931f20a59fe6f242823b0c6d47268df388216",
+      "size": 450811
     }
   ]
 }
