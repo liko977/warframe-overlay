@@ -624,6 +624,48 @@ def _cache_key(frame, expected, base_w, base_h):
             int(base_w), int(base_h))
 
 
+APP_UI_MARKERS = ("калибровка", "настройки", "прозрачность",
+                   "масштаб шрифта")
+
+
+def frame_has_app_ui(text):
+    """True, если OCR кадра содержит подписи интерфейса приложения."""
+    low = str(text or "").lower().replace("ё", "е")
+    return any(marker in low for marker in APP_UI_MARKERS)
+
+
+def capture_without_windows(capture_fn, delay=0.15, app=None):
+    """Снимок с временно скрытыми окнами приложения.
+
+    Возвращает ``(frame, hidden_count)``; окна восстанавливаются в finally.
+    """
+    import time
+    from PyQt5.QtWidgets import QApplication
+    app = app or QApplication.instance()
+    hidden = []
+    if app is not None:
+        for widget in app.topLevelWidgets():
+            try:
+                if widget.isVisible():
+                    widget.hide()
+                    hidden.append(widget)
+            except Exception:
+                pass
+        app.processEvents()
+    try:
+        time.sleep(max(0.0, float(delay)))
+        frame = capture_fn() if callable(capture_fn) else None
+    finally:
+        for widget in hidden:
+            try:
+                widget.show()
+            except Exception:
+                pass
+        if app is not None:
+            app.processEvents()
+    return frame, len(hidden)
+
+
 def clear_cache(cache):
     """Сбросить кэш авто-определения (кнопка «Определить автоматически»)."""
     if isinstance(cache, dict):
@@ -892,12 +934,16 @@ def build_calibration_dialog():
         """Скриншот полосы наград, авто-определение, сброс, сохранение."""
 
         def __init__(self, cfg=None, capture_fn=None, save_fn=None,
-                     check_fn=None, ui_scale=1.0, parent=None):
+                     check_fn=None, ui_scale=1.0, parent=None,
+                     reset_fn=None, ocr_text_fn=None):
             super().__init__(parent)
             self.cfg = dict(cfg or {})
             self.capture_fn = capture_fn
             self.save_fn = save_fn
             self.check_fn = check_fn
+            self.reset_fn = reset_fn
+            self.ocr_text_fn = ocr_text_fn
+            self.last_capture_hidden = 0
             self.ui_scale = float(ui_scale or 1.0)
             self.frame = None
             self.geometry = None
@@ -947,7 +993,7 @@ def build_calibration_dialog():
             row = QHBoxLayout()
             row.setSpacing(8)
             self.btn_detect = QPushButton("Определить автоматически")
-            self.btn_reset = QPushButton("Сбросить к 1920×1080")
+            self.btn_reset = QPushButton("Сбросить калибровку")
             self.btn_check = QPushButton("Проверить")
             self.btn_save = QPushButton("Сохранить")
             self.btn_close = QPushButton("Закрыть")
@@ -1031,9 +1077,22 @@ def build_calibration_dialog():
         # ── кнопки ───────────────────────────────────────────────────
         def detect_auto(self):
             """«Определить автоматически»: снимок + поиск карточек."""
-            frame = self._capture()
+            frame, hidden = capture_without_windows(self._capture)
+            self.last_capture_hidden = hidden
             if frame is None:
                 return None
+            if callable(self.ocr_text_fn):
+                try:
+                    if frame_has_app_ui(self.ocr_text_fn(frame)):
+                        self.geometry = None
+                        self._show_preview(None)
+                        self.refresh_state()
+                        self._set_status(
+                            "Калибровка отменена: в кадре интерфейс "
+                            "приложения", warn=True)
+                        return None
+                except Exception:
+                    pass
             geometry = detect_geometry(frame)
             if geometry is None:
                 self.geometry = None
@@ -1052,12 +1111,19 @@ def build_calibration_dialog():
             return geometry
 
         def reset_defaults(self):
-            """«Сбросить к 1920×1080»: вернуть стандартную геометрию."""
+            """«Сбросить к 1920×1080»: удалить калибровку и взять канонику."""
+            self.cfg.pop("scan_calibration", None)
+            if callable(self.reset_fn):
+                try:
+                    self.reset_fn()
+                except Exception:
+                    pass
             self.geometry = geometry_from_config(self.cfg)
             self.geometry["source"] = "конфиг"
             self._show_preview(self.geometry)
             self.refresh_state()
-            self._set_status("Сброшено к стандартным координатам 1920×1080.")
+            self._set_status("Калибровка сброшена — используется "
+                             "каноническая сетка.")
             return self.geometry
 
         def check(self):
