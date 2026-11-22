@@ -1,13 +1,13 @@
 {
-  "version": "1.0.2",
-  "notes": "Исправлено: «Лут» показывает только выбранные награды (Alt+1…4), а не дропы из лога; чип типа не растягивает строки и не прячет иконки; калибровка не захватывает окна приложения.",
-  "updated_at": "2026-11-22T17:41:49Z",
+  "version": "1.0.3",
+  "notes": "Пресеты раскладки скана (в т.ч. «низ экрана») вместо автокалибровки; строки «Лута» прижаты к верху; приложение работает в одном экземпляре — второй запуск поднимает уже открытое окно.",
+  "updated_at": "2026-11-22T18:24:12Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "b1fb1f45dd034ba43c08a391e78eb0a21671d88522e1007e4dda993bf74f9f2e",
+      "sha256": "d7e48e879e9c4d3a6dbaed4d583ec00d3068c04782afb371abeac500209420e9",
       "size": 2869
     },
     {
@@ -19,8 +19,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "0b1805e67ac8b33f5402d58eeaf582f6a11e790dfddd721b316e8df629a61ce2",
-      "size": 10952
+      "sha256": "41ec3a88d96892e04ffd21ac40a32b6c4c401e3279ee195e191415a50312c8a5",
+      "size": 11948
     },
     {
       "path": "chat_client.py",
@@ -61,8 +61,8 @@
     {
       "path": "farm_stats_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/farm_stats_ui.py",
-      "sha256": "349867106682d820b7656fbd759be9164b9aa424016e07550f33eff4ad3e3749",
-      "size": 70778
+      "sha256": "ea46040bda7a80c0b984e8216f7de7b1ba446b13d81a8ca692759a20eeae2f24",
+      "size": 71086
     },
     {
       "path": "game_themes.py",
@@ -179,10 +179,22 @@
       "size": 53796
     },
     {
+      "path": "scan_presets.py",
+      "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/scan_presets.py",
+      "sha256": "a872d6aa448f4ff78b8b55888e52caf2a075d2758b0e5c45863c0fcc6a884e22",
+      "size": 6185
+    },
+    {
       "path": "settings_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/settings_ui.py",
-      "sha256": "a74a7d987c61a3ad1b9cc7408165da0e1b1455893b58fc0527e494092452bdc0",
-      "size": 104703
+      "sha256": "c2fff26482c3dbcb06e0edf8c0cda4facb4a0a0a0ae62bc8ef4affe4ba1113ba",
+      "size": 109009
+    },
+    {
+      "path": "single_instance.py",
+      "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/single_instance.py",
+      "sha256": "8ba4f73cdf0a67f560ba599e34d827d4aa51dd7fe7966e419a3f11d23058ce5b",
+      "size": 7370
     },
     {
       "path": "ui_icons.py",
@@ -211,8 +223,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "ea1b77e338336dec42640712e0dd5a374103d6ecafb877bf65a949dd083cb83f",
-      "size": 444110
+      "sha256": "812a7281080a1d8810e52ab91bfa8dd669d49b8b08c14dc02e5cd1ff340d8d32",
+      "size": 443658
     }
   ]
 }
