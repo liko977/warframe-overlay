@@ -48,8 +48,9 @@ KIND_CHAT = "chat"
 #: Служебные уведомления меню трея (в notify_events не входят; force=True).
 KIND_UPDATES = "updates"
 
+KIND_PICK = "pick"
 ALL_KINDS = (KIND_ORDER_BOUGHT, KIND_PRICE_DROP, KIND_BARO_ARRIVAL,
-             KIND_BARO_LEAVING, KIND_FISSURE_ENDING, KIND_CHAT)
+             KIND_BARO_LEAVING, KIND_FISSURE_ENDING, KIND_CHAT, KIND_PICK)
 
 #: Настройки по умолчанию (добавляются в warframe.DEFAULT_CONFIG).
 DEFAULT_CONFIG = {
