@@ -269,7 +269,7 @@ def _default_data_dir():
     if env:
         return env
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "WarframePriceOverlay")
+    return os.path.join(base, "VoidFrameRU")
 
 
 def parse_iso(value):
@@ -1740,7 +1740,12 @@ class WarframeStatusClient:
             source = self._source
             latency = self._last_latency
         if not data:
-            return f"нет данных · {error}" if error else "нет данных"
+            try:
+                import ui_safe
+                error_text = ui_safe.clean(error, fallback="", limit=80)
+            except Exception:
+                error_text = ""
+            return f"нет данных · {error_text}" if error_text else "нет данных"
         age = max(0, int(now - fetched_at))
         if source in ("официальный API", "warframestat") and not error \
                 and latency is not None:
