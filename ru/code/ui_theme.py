@@ -418,6 +418,88 @@ def dialog_qss():
     """
 
 
+def safe_palette_color(key, fallback):
+    """Цвет из PALETTE с валидацией (иначе литерал — без белого фолбэка)."""
+    value = PALETTE.get(str(key))
+    if not isinstance(value, str):
+        return fallback
+    text = value.strip()
+    if not text:
+        return fallback
+    import re as _re
+    if _re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        return text
+    if _re.fullmatch(r"#[0-9a-fA-F]{8}", text):
+        return text
+    if _re.fullmatch(r"rgba?\([^)]*\)", text):
+        return text
+    return fallback
+
+
+def notifications_qss():
+    """QSS центра уведомлений: диалог, скролл/viewport, список, кнопки.
+
+    Все цвета — из PALETTE с валидацией и литеральным фолбэком
+    (``#121a25`` и т.п.), поэтому строки всегда валидны и белого фона нет.
+    """
+    bg = safe_palette_color("panel", "#121a25")
+    window = safe_palette_color("window", "#0d131c")
+    card = safe_palette_color("card", "#17212e")
+    border = safe_palette_color("border", "#24344a")
+    text = safe_palette_color("text", "#e6edf6")
+    muted = safe_palette_color("muted", "#93a1b5")
+    hover = safe_palette_color("hover", "#1e2a3a")
+    accent = safe_palette_color("accent", "#4aa8ff")
+    return f"""
+        QDialog#notifDialog {{
+            background-color: {bg};
+        }}
+        QDialog#notifDialog QLabel {{
+            color: {text}; background: transparent;
+        }}
+        QWidget#notifCenter {{
+            background-color: {bg};
+        }}
+        QWidget#notifBody {{
+            background-color: transparent;
+        }}
+        QScrollArea#notifScroll {{
+            background-color: {bg};
+            border: 1px solid {border};
+            border-radius: 6px;
+        }}
+        QWidget#notifViewport {{
+            background-color: {bg};
+        }}
+        QScrollArea#notifScroll > QWidget > QWidget {{
+            background-color: {bg};
+        }}
+        QLabel#notifHeader {{
+            color: {muted}; background: transparent;
+            font-weight: 600; padding-top: 4px;
+        }}
+        QPushButton {{
+            color: {text}; background-color: {card};
+            border: 1px solid {border}; border-radius: 4px;
+            padding: 4px 10px;
+        }}
+        QPushButton:hover {{
+            background-color: {hover}; border-color: {accent};
+        }}
+        QPushButton:disabled {{ color: {muted}; }}
+        QFrame#notifRow {{
+            background-color: {card};
+            border: 1px solid {border};
+            border-radius: 6px;
+        }}
+        QFrame#notifRow:hover {{
+            background-color: {hover};
+            border: 1px solid {accent};
+        }}
+        {scroll_qss()}
+    """
+
+
 def status_qss(stale=False):
     p = PALETTE
     color = p["warning"] if stale else p["muted"]
