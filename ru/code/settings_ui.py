@@ -1225,7 +1225,25 @@ def build_settings_dialog():
                 "Снимок экрана наград, авто-определение карточек под ваше "
                 "разрешение и масштаб Windows, пробный скан")
             self.btn_scan_calibrate.clicked.connect(self.calibrate_scan)
+            self.btn_scan_calibrate.setVisible(False)
+            self.btn_scan_calibrate.setToolTip(
+                "Устарело (1.0.3): используйте готовый пресет раскладки")
             scan_row.addWidget(self.btn_scan_calibrate)
+            try:
+                import scan_presets as _sp
+                self.cmb_scan_preset = QComboBox()
+                width = int((self.cfg or {}).get("base_width") or 1920)
+                height = int((self.cfg or {}).get("base_height") or 1080)
+                for pid, label in _sp.PRESETS:
+                    self.cmb_scan_preset.addItem(
+                        f"{label} · экран {width}×{height}", pid)
+                self.cmb_scan_preset.setFont(font(11))
+                current = str((self.cfg or {}).get("scan_preset") or "auto")
+                index = self.cmb_scan_preset.findData(current)
+                self.cmb_scan_preset.setCurrentIndex(index if index >= 0 else 0)
+                scan_row.addWidget(self.cmb_scan_preset, 1)
+            except Exception:
+                self.cmb_scan_preset = None
             scan_row.addStretch(1)
             form.addRow(QLabel("Координаты карточек"), scan_row)
             outer.addLayout(form)
@@ -1234,6 +1252,23 @@ def build_settings_dialog():
             self.lbl_scan_calibration.setWordWrap(True)
             self.lbl_scan_calibration.setStyleSheet(
                 f"color:{color('muted')}; background:transparent;")
+            self.lbl_scan_preview = QLabel("")
+            self.lbl_scan_preview.setFixedSize(192, 108)
+            self.lbl_scan_preview.setStyleSheet(
+                "background:#0d131c; border:1px solid #4A7CA6;")
+            outer.addWidget(self.lbl_scan_preview)
+            self.lbl_scan_preview_hint = QLabel(
+                "карточки должны попасть в рамки")
+            self.lbl_scan_preview_hint.setFont(font(9))
+            self.lbl_scan_preview_hint.setStyleSheet(
+                f"color:{color('muted')};")
+            outer.addWidget(self.lbl_scan_preview_hint)
+            try:
+                self.cmb_scan_preset.currentIndexChanged.connect(
+                    self._scan_preset_changed)
+            except Exception:
+                pass
+            self._draw_scan_preset_preview()
             outer.addWidget(self.lbl_scan_calibration)
             self.refresh_scan_calibration()
             outer.addWidget(muted(
@@ -1554,6 +1589,10 @@ def build_settings_dialog():
                     if part.strip()],
                 "notify_mode": str(self.cmb_notify_mode.currentData() or "overlay"),
                 "notify_toast_sec": int(self.spin_toast_sec.value()),
+                "scan_preset": str(
+                    self.cmb_scan_preset.currentData()
+                    if getattr(self, "cmb_scan_preset", None) is not None
+                    else "auto"),
                 "notify_toast_opacity": float(
                     self.spin_toast_opacity.value()),
                 "notify_chat_color": str(self.cmb_chat_color.currentData()
@@ -1849,6 +1888,52 @@ def build_settings_dialog():
             return False
 
         # ── 1.0.0: калибровка скана ──────────────────────────────────
+        def _scan_preset_changed(self, *_args):
+            try:
+                import scan_presets as _sp
+                pid = (self.cmb_scan_preset.currentData()
+                       if self.cmb_scan_preset is not None else "auto")
+                self.cfg["scan_preset"] = str(pid or "auto")
+                width = int((self.cfg or {}).get("base_width") or 1920)
+                height = int((self.cfg or {}).get("base_height") or 1080)
+                geometry = _sp.scan_geometry(self.cfg, width, height)
+                _sp.apply_geometry(self.cfg, geometry)
+                self._draw_scan_preset_preview(geometry)
+                self.lbl_scan_calibration.setText(
+                    _sp.preset_log_line(geometry))
+            except Exception:
+                pass
+
+        def _draw_scan_preset_preview(self, geometry=None):
+            try:
+                import scan_presets as _sp
+                from PyQt5.QtCore import QRect
+                from PyQt5.QtGui import QColor, QPainter, QPixmap
+                width = int((self.cfg or {}).get("base_width") or 1920)
+                height = int((self.cfg or {}).get("base_height") or 1080)
+                geometry = geometry or _sp.scan_geometry(
+                    self.cfg, width, height)
+                pix = QPixmap(192, 108)
+                pix.fill(QColor("#0d131c"))
+                painter = QPainter(pix)
+                try:
+                    painter.setPen(QColor("#4A7CA6"))
+                    sx = 192.0 / max(1, width)
+                    sy = 108.0 / max(1, height)
+                    for left in geometry.get("lefts") or []:
+                        painter.drawRect(QRect(
+                            int(float(left) * sx),
+                            int(float(geometry.get("card_top") or 0) * sy),
+                            max(8, int(float(geometry.get("card_width")
+                                           or 242) * sx)),
+                            max(6, int(float(geometry.get("card_height")
+                                           or 235) * sy))))
+                finally:
+                    painter.end()
+                self.lbl_scan_preview.setPixmap(pix)
+            except Exception:
+                pass
+
         def scan_calibration_text(self):
             """Подпись состояния калибровки (сохранена/нет)."""
             raw = (self.cfg or {}).get("scan_calibration")
