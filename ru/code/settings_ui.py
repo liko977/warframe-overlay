@@ -69,15 +69,17 @@ NOTIFY_EVENT_OPTIONS = (
     ("baro_leaving", "Баро улетает"),
     ("fissure_ending", "Фиссура заканчивается"),
     ("chat", "Сообщение в чате"),
+    ("pick", "Выбор награды Alt+1…4"),
 )
 
 #: Негорячие параметры по умолчанию (совпадают с warframe.DEFAULT_CONFIG).
 DEFAULT_VALUES = {
     "notify_enabled": True,
     "notify_sound": True,
+    "notify_pick_toast": True,
     "notify_skip_when_game_focused": False,
     "notify_events": ["order_bought", "price_drop", "baro_arrival",
-                      "baro_leaving", "fissure_ending", "chat"],
+                      "baro_leaving", "fissure_ending", "chat", "pick"],
     "notify_price_drop_pct": 10,
     "notify_fissure_tiers": ["Axi", "Neo"],
     "notify_mode": "overlay",
@@ -103,9 +105,15 @@ DEFAULT_VALUES = {
     # 1.0.0: тема интерфейса Warframe («auto» или имя из 19 тем WFInfo)
     "game_theme": "auto",
     "update_check": True,
-    "update_url": "",
+    "update_url": ("https://raw.githubusercontent.com/liko977/"
+                   "warframe-overlay/main/ru/update.json"),
+    "update_disabled": False,
+    "config_version": 2,
     "update_check_interval_min": 180,
 }
+
+DEFAULT_UPDATE_URL = ("https://raw.githubusercontent.com/liko977/"
+                      "warframe-overlay/main/ru/update.json")
 
 MODIFIERS = ("ctrl", "alt", "shift", "win")
 #: Цвета-акценты центра уведомлений — только из палитры ui_theme.
@@ -1024,8 +1032,10 @@ def build_settings_dialog():
                 "Выключено — полная тишина (тосты, чат, лут, трей)")
             self.chk_notify_skip_focus = QCheckBox(
                 "Только когда игра НЕ в фокусе")
+            self.chk_notify_pick_toast = QCheckBox(
+                "Тост при выборе награды Alt+1…4")
             for box in (self.chk_notify_enabled, self.chk_notify_sound,
-                        self.chk_notify_skip_focus):
+                        self.chk_notify_skip_focus, self.chk_notify_pick_toast):
                 box.setFont(font(11))
                 outer.addWidget(box)
             outer.addWidget(muted(
@@ -1300,6 +1310,9 @@ def build_settings_dialog():
                 "Проверять автоматически (в фоне)")
             self.chk_update_check.setFont(font(11))
             outer.addWidget(self.chk_update_check)
+            self.chk_update_disabled = QCheckBox("Не проверять обновления")
+            self.chk_update_disabled.setFont(font(11))
+            outer.addWidget(self.chk_update_disabled)
             form = QFormLayout()
             form.setSpacing(8)
             self.edit_update_url = QLineEdit()
@@ -1472,6 +1485,8 @@ def build_settings_dialog():
             values = settings_from_cfg(cfg)
             self.chk_notify_enabled.setChecked(
                 bool(values.get("notify_enabled", True)))
+            self.chk_notify_pick_toast.setChecked(
+                bool(values.get("notify_pick_toast", True)))
             self.chk_notify_sound.setChecked(
                 bool(values.get("notify_sound", True)))
             self._update_sound_controls()
@@ -1564,7 +1579,10 @@ def build_settings_dialog():
                     combo.setCurrentIndex(index)
             self.chk_update_check.setChecked(
                 bool(values.get("update_check", True)))
-            self.edit_update_url.setText(str(values.get("update_url") or ""))
+            self.chk_update_disabled.setChecked(
+                bool(values.get("update_disabled", False)))
+            self.edit_update_url.setText(str(
+                values.get("update_url") or DEFAULT_UPDATE_URL))
             self.spin_update_interval.setValue(
                 int(values.get("update_check_interval_min", 180) or 180))
             self._clear_errors()
@@ -1577,6 +1595,7 @@ def build_settings_dialog():
             config = _hotkey_config_values(mapping)
             config.update({
                 "notify_enabled": self.chk_notify_enabled.isChecked(),
+                "notify_pick_toast": self.chk_notify_pick_toast.isChecked(),
                 "notify_sound": self.chk_notify_sound.isChecked(),
                 "notify_skip_when_game_focused":
                     self.chk_notify_skip_focus.isChecked(),
@@ -1618,11 +1637,16 @@ def build_settings_dialog():
                 "overlay_show_set_price": self.chk_show_set_price.isChecked(),
                 "currency_icons": self.chk_currency_icons.isChecked(),
                 "update_check": self.chk_update_check.isChecked(),
-                "update_url": self.edit_update_url.text().strip(),
+                "update_url": (self.edit_update_url.text().strip()
+                               or DEFAULT_UPDATE_URL),
+                "update_disabled": self.chk_update_disabled.isChecked(),
                 "update_check_interval_min":
                     int(self.spin_update_interval.value()),
                 "hotkeys": mapping,
             })
+            if not self.edit_update_url.text().strip():
+                self.edit_update_url.setText(DEFAULT_UPDATE_URL)
+                self._set_status("URL восстановлен по умолчанию", warn=True)
             return config
 
         # ── действия ─────────────────────────────────────────────────
