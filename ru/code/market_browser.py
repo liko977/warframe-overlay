@@ -19,6 +19,21 @@ import time
 
 import market_client as mc
 import ui_theme as theme
+try:
+    import ui_safe as _ui_safe
+except Exception:                       # pragma: no cover
+    _ui_safe = None
+
+#: 1.0.0: модуль иконок валют (ленивый импорт; False = ещё не пробовали)
+_CURRENCY_ICONS = False
+
+
+def _ui_error(context, exc=None, text="не удалось — подробности в app.log"):
+    """1.0.0: в статус — понятный текст, исключение — в app.log."""
+    if _ui_safe is not None:
+        return _ui_safe.human_error(context, exc, fallback=text)
+    return str(text)
+
 
 try:                       # B2: общий список открытых окон приложения
     import login_mode
@@ -92,6 +107,30 @@ def price_text(value):
         return "—"
 
 
+def price_html(value, cfg=None):
+    """Цена + иконка платины (1.0.0); без иконок — прежнее ``12 p``."""
+    mod = currency_icons_module()
+    if mod is None:
+        return price_text(value)
+    try:
+        return mod.format_money(value, currency="platinum", cfg=cfg)
+    except Exception:
+        return price_text(value)
+
+
+def currency_icons_module():
+    """Модуль ``currency_icons.py`` или None (старая сборка)."""
+    global _CURRENCY_ICONS
+    if _CURRENCY_ICONS is not False:
+        return _CURRENCY_ICONS
+    try:
+        import currency_icons as module
+        _CURRENCY_ICONS = module
+    except Exception:
+        _CURRENCY_ICONS = None
+    return _CURRENCY_ICONS
+
+
 def item_icon_label(item, size=24, cfg=None, force=False):
     """QLabel с иконкой предмета (лениво); None, если Qt/модуль недоступны.
 
@@ -105,7 +144,8 @@ def item_icon_label(item, size=24, cfg=None, force=False):
         cfg = cfg or {}
         base = cfg.get("data_dir") or os.environ.get("WF_DATA_DIR")
         provider = item_icons.get_provider(
-            base, enabled=bool(force or cfg.get("show_item_icons", True)))
+            base, enabled=bool(force or cfg.get("show_item_icons", True)),
+            auto_download=False)
         label = QLabel()
         label.setFixedSize(int(size), int(size))
         label.setStyleSheet("background: transparent;")
@@ -116,40 +156,45 @@ def item_icon_label(item, size=24, cfg=None, force=False):
         slug = str(item.get("slug") or "")
         if not slug and not item.get("en_name"):
             return label
-        if slug:
-            image = str(item.get("thumb") or item.get("icon") or "")
-        else:
-            image = provider.resolve(name=name, slug=slug,
-                                     en_name=item.get("en_name") or "",
-                                     game_ref=str(item.get("gameRef") or ""))
         pix = provider.placeholder(size)
         if pix is not None:
             label.setPixmap(pix)
-        badge_text = item_icons.part_badge(slug, name)
-        if badge_text:
-            badge = QLabel(badge_text, label)
-            badge.setFixedSize(16, 11)
-            badge.setAlignment(Qt.AlignCenter)
-            badge.setStyleSheet(
-                "background:#f5c451; color:#17212e; font-size:6px;"
-                " font-weight:700; border-radius:2px;")
-            badge.move(int(size) - 17, 0)
-            badge.show()
-        if not image and not slug:
-            return label
-        if not (item.get("thumb") or item.get("icon")) and not provider.has_index():
+        if item_icons.part_style(slug, name).get("is_part"):
+            bw, bh = item_icons.part_badge_size(
+                slug, name, mini=int(size) < 28)
+            if int(size) < 28:
+                bw = max(10, min(bw, int(size) - 2))
+                bh = max(8, min(bh, int(size) - 6))
+            pix_badge = item_icons.part_badge_pixmap(slug, name, bw, bh)
+            if pix_badge is not None:
+                badge = QLabel(label)
+                badge.setPixmap(pix_badge)
+                badge.setText(item_icons.part_badge(slug, name))
+                badge.setFixedSize(bw, bh)
+                badge.move(2, max(0, int(size) - bh - 2))
+                badge.setToolTip(item_icons.part_style(slug, name).get('type', ''))
+                badge.show()
+            label.setToolTip(item_icons.part_style(slug, name).get('type', ''))
+        if not slug:
             return label
 
         def done(_key, pixmap):
             try:
                 if pixmap is not None and not pixmap.isNull():
-                    label.setPixmap(pixmap.scaled(
-                        int(size), int(size), Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation))
+                    pix = pixmap.scaled(int(size), int(size),
+                                        Qt.KeepAspectRatio,
+                                        Qt.SmoothTransformation)
+                    try:
+                        if item_icons.is_set_item(slug, name):
+                            pix = item_icons.decorate_set_pixmap(
+                                pix, int(size), label=int(size) >= 48)
+                    except Exception:
+                        pass
+                    label.setPixmap(pix)
             except Exception:
                 pass
 
-        provider.request_item(slug or name or image, item, callback=done,
+        provider.request_item(slug, item, callback=done,
                               size=size)
         return label
     except Exception:
@@ -163,6 +208,396 @@ def order_type_of(order):
 # ─────────────────────────────────────────────────────────────────────────
 #  UI (PyQt5 импортируется лениво)
 # ─────────────────────────────────────────────────────────────────────────
+def build_item_artwork():
+    """Фабрика крупной картинки предмета (192×192) с мягкой синей обводкой.
+
+    Стиль (утверждён в макете ``branding/VoidFrameRU-market-render.png``):
+    подложка ``#1A2231``, рамка радиус 18 / 3 px ``#4A7CA6`` alpha 235,
+    мягкое свечение blur 6 / alpha 105, при наведении alpha 130 (120 мс).
+    """
+    from PyQt5.QtCore import QRectF, Qt, QVariantAnimation
+    from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
+    from PyQt5.QtWidgets import (QHBoxLayout, QLabel, QVBoxLayout, QWidget)
+
+    import item_icons
+
+    class _ArtFrame(QWidget):
+        ART_SIZE = 192
+        RADIUS = 18
+        BORDER_WIDTH = 3
+        BORDER_COLOR = "#4A7CA6"
+        BORDER_ALPHA = 235
+        BG_COLOR = "#1A2231"
+        GLOW_ALPHA = 105
+        HOVER_ALPHA = 130
+        GLOW_BLUR = 6
+        #: 1.0.0 (t49): кольца перекрываются — рисуем с коэффициентом,
+        #: чтобы композитный alpha не выходил за лимиты (base max ≤145,
+        #: hover max ≤165). Атрибуты GLOW_ALPHA/HOVER_ALPHA не меняются.
+        GLOW_SCALE = 0.78
+        HOVER_MS = 120
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self.setFixedSize(self.ART_SIZE, self.ART_SIZE)
+            self.setAttribute(Qt.WA_StyledBackground, False)
+            self._letter = ""
+            self._glow = float(self.GLOW_ALPHA)
+            self._anim = None
+
+        # ── состояние ─────────────────────────────────────────────
+        def set_letter(self, letter):
+            self._letter = str(letter or "")[:1].upper()
+            self.update()
+
+        def _base_rgb(self):
+            color = QColor(self.BORDER_COLOR)
+            return color.red(), color.green(), color.blue()
+
+        def enterEvent(self, event):        # noqa: N802 (Qt API)
+            self._animate_to(self.HOVER_ALPHA)
+            super().enterEvent(event)
+
+        def leaveEvent(self, event):        # noqa: N802 (Qt API)
+            self._animate_to(self.GLOW_ALPHA)
+            super().leaveEvent(event)
+
+        def _animate_to(self, value):
+            try:
+                anim = QVariantAnimation(self)
+                anim.setStartValue(float(self._glow))
+                anim.setEndValue(float(value))
+                anim.setDuration(self.HOVER_MS)
+                anim.valueChanged.connect(self._on_glow)
+                anim.finished.connect(lambda: setattr(self, "_anim", None))
+                self._anim = anim
+                anim.start()
+            except Exception:
+                self._glow = float(value)
+                self.update()
+
+        def _on_glow(self, value):
+            try:
+                self._glow = float(value)
+                self.update()
+            except Exception:
+                pass
+
+        # ── отрисовка ─────────────────────────────────────────────
+        def paintEvent(self, event):        # noqa: N802 (Qt API)
+            painter = QPainter(self)
+            try:
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                red, green, blue = self._base_rgb()
+                rect = QRectF(1.5, 1.5, self.ART_SIZE - 3.0,
+                              self.ART_SIZE - 3.0)
+                # мягкое свечение (кольца наружу; alpha задаётся атрибутом)
+                for index in range(int(self.GLOW_BLUR)):
+                    alpha = int(max(0.0, self._glow) * self.GLOW_SCALE
+                                * (1.0 - index / float(self.GLOW_BLUR)))
+                    if alpha <= 0:
+                        continue
+                    pen = QPen(QColor(red, green, blue, alpha))
+                    pen.setWidth(2)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    grow = index + 1
+                    painter.drawRoundedRect(
+                        rect.adjusted(-grow, -grow, grow, grow),
+                        self.RADIUS + grow, self.RADIUS + grow)
+                # подложка
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(self.BG_COLOR))
+                painter.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+                # рамка 3 px, приглушённый синий
+                pen = QPen(QColor(red, green, blue, self.BORDER_ALPHA))
+                pen.setWidth(self.BORDER_WIDTH)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                inner = rect.adjusted(self.BORDER_WIDTH / 2.0,
+                                      self.BORDER_WIDTH / 2.0,
+                                      -self.BORDER_WIDTH / 2.0,
+                                      -self.BORDER_WIDTH / 2.0)
+                painter.drawRoundedRect(inner, self.RADIUS, self.RADIUS)
+                # плейсхолдер — первая буква названия
+                if self._letter:
+                    font = self.font()
+                    font.setPixelSize(64)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.setPen(QColor(122, 144, 170, 210))
+                    painter.drawText(QRectF(0, 0, self.ART_SIZE,
+                                            self.ART_SIZE),
+                                     Qt.AlignCenter, self._letter)
+            finally:
+                painter.end()
+
+    class ItemArtwork(QWidget):
+        ART_SIZE = _ArtFrame.ART_SIZE
+        RADIUS = _ArtFrame.RADIUS
+        BORDER_WIDTH = _ArtFrame.BORDER_WIDTH
+        BORDER_COLOR = _ArtFrame.BORDER_COLOR
+        BORDER_ALPHA = _ArtFrame.BORDER_ALPHA
+        BG_COLOR = _ArtFrame.BG_COLOR
+        GLOW_ALPHA = _ArtFrame.GLOW_ALPHA
+        HOVER_ALPHA = _ArtFrame.HOVER_ALPHA
+        GLOW_BLUR = _ArtFrame.GLOW_BLUR
+        GLOW_SCALE = _ArtFrame.GLOW_SCALE
+        HOVER_MS = _ArtFrame.HOVER_MS
+
+        def __init__(self, cfg=None, parent=None):
+            super().__init__(parent)
+            self.cfg = dict(cfg or {})
+            self.art_size = self.ART_SIZE
+            self.border_color = self.BORDER_COLOR
+            self.border_alpha = self.BORDER_ALPHA
+            self.border_width = self.BORDER_WIDTH
+            self.radius = self.RADIUS
+            self.glow_alpha = self.GLOW_ALPHA
+            self.glow_blur = self.GLOW_BLUR
+            self.hover_alpha = self.HOVER_ALPHA
+            self.hover_ms = self.HOVER_MS
+            self._token = 0
+            self._placeholder = True
+            self._item = {}
+            self._meta = {}
+            self.setFixedWidth(self.ART_SIZE)
+            lay = QVBoxLayout(self)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(4)
+            self.frame = _ArtFrame(self)
+            self.image = QLabel(self.frame)
+            self.image.setGeometry(3, 3, self.ART_SIZE - 6,
+                                   self.ART_SIZE - 6)
+            self.image.setAlignment(Qt.AlignCenter)
+            self.image.setStyleSheet("background: transparent;")
+            self.image.setScaledContents(False)
+            self.badge = QLabel("", self.frame)
+            self.badge.setAlignment(Qt.AlignCenter)
+            self.badge.setStyleSheet(
+                "background:#f5c451; color:#17212e; font-size:8px;"
+                " font-weight:700; border-radius:3px; padding:1px 3px;")
+            self.badge.hide()
+            lay.addWidget(self.frame)
+            self.caption = QLabel("")
+            self.caption.setWordWrap(True)
+            self.caption.setMaximumHeight(34)
+            self.part_chip_label = QLabel("")
+            self.part_chip_label.setStyleSheet(
+                "background:#262F40; font-size:9px; font-weight:700;"
+                " border-radius:8px; padding:2px 6px;")
+            self.part_chip_label.setVisible(False)
+            self.caption.setStyleSheet(
+                f"color:{theme.PALETTE['muted']}; background:transparent;"
+                " font-size:10px;")
+            lay.addWidget(self.caption)
+            lay.addWidget(self.part_chip_label)
+            self.minis_host = QWidget()
+            self.minis = QHBoxLayout(self.minis_host)
+            self.minis.setContentsMargins(0, 0, 0, 0)
+            self.minis.setSpacing(2)
+            self.minis_host.hide()
+            lay.addWidget(self.minis_host)
+            lay.addStretch(1)
+            self.hide()
+
+        # ── данные ────────────────────────────────────────────────
+        def set_cfg(self, cfg):
+            self.cfg = dict(cfg or {})
+            return self
+
+        def clear(self):
+            self._token += 1
+            self._item = {}
+            self._meta = {}
+            self._placeholder = True
+            self.image.clear()
+            self.caption.clear()
+            self.badge.hide()
+            self._clear_minis()
+            self.hide()
+
+        def _clear_minis(self):
+            while self.minis.count():
+                item = self.minis.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            self.minis_host.hide()
+
+        def _provider(self):
+            base = self.cfg.get("data_dir") or os.environ.get("WF_DATA_DIR")
+            return item_icons.get_provider(base, enabled=True)
+
+        def _apply_pixmap(self, pixmap):
+            if pixmap is None or pixmap.isNull():
+                return False
+            scaled = pixmap.scaled(self.ART_SIZE - 12,
+                                   self.ART_SIZE - 12,
+                                   Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
+            try:
+                slug = str((self._item or {}).get("slug") or "")
+                name = str((self._meta or {}).get("name") or "")
+                if item_icons.is_set_item(slug, name):
+                    scaled = item_icons.decorate_set_pixmap(
+                        scaled, self.ART_SIZE - 12, label=True)
+            except Exception:
+                pass
+            self.image.setPixmap(scaled)
+            self.frame.set_letter("")
+            self._placeholder = False
+            return True
+
+        def set_item(self, item=None, meta=None):
+            """Показать предмет: картинка/плейсхолдер, бейдж, подпись, сет."""
+            self._token += 1
+            token = self._token
+            item = dict(item or {})
+            meta = dict(meta or {})
+            self._item = item
+            self._meta = meta
+            cfg = dict(self.cfg or {})
+            enabled = bool(cfg.get("show_item_icons", True))
+            name = str(meta.get("name") or item.get("name")
+                       or item.get("slug") or "").strip()
+            if not name and not item.get("slug"):
+                self.clear()
+                return False
+            self.show()
+            self.caption.setText(name)
+            self.frame.setVisible(enabled)
+            self.caption.setVisible(True)
+            letter = name[:1].upper() if name else "?"
+            self.frame.set_letter(letter)
+            self.image.clear()
+            self._placeholder = True
+            self.frame.setToolTip(name + ("\nиконка не загружена"
+                                          if enabled else ""))
+            slug = str(item.get("slug") or meta.get("slug") or "")
+            badge = ""
+            try:
+                badge = item_icons.part_badge(slug, name) or ""
+            except Exception:
+                badge = ""
+            if str(slug).endswith("_set") or meta.get("set_parts"):
+                badge = ""
+            bw, bh = item_icons.part_badge_size(slug, name)
+            pix_badge = item_icons.part_badge_pixmap(slug, name, bw, bh)
+            if pix_badge is not None and item_icons.part_style(slug,
+                                                               name).get(
+                    "is_part"):
+                self.badge.setPixmap(pix_badge)
+                self.badge.setText(str(badge))
+                self.badge.setFixedSize(bw, bh)
+                self.badge.move(4, self.ART_SIZE - bh - 4)
+                self.badge.show()
+            else:
+                self.badge.hide()
+            chip_style = item_icons.part_style(slug, name)
+            if hasattr(self, "part_chip_label"):
+                if chip_style.get("is_part"):
+                    self.part_chip_label.setText(chip_style["type"])
+                    self.part_chip_label.setStyleSheet(
+                        "background:#262F40; font-size:9px;"
+                        f" font-weight:700; color:{chip_style['color']};"
+                        " border-radius:8px; padding:2px 6px;")
+                    self.part_chip_label.setVisible(True)
+                else:
+                    self.part_chip_label.setVisible(False)
+            self.frame.setToolTip(name + ("\nиконка не загружена"
+                                          if enabled else ""))
+            self._fill_minis(meta.get("set_parts") or [], token)
+            if not enabled:
+                self.minis_host.hide()
+                return False
+            provider = self._provider()
+            key = slug or name
+            # кэш/диск пакета — без сети и без мерцания
+            pix = None
+            try:
+                pix = provider.get_cached(key)
+                if pix is None:
+                    path = provider._find_disk(key)
+                    if path:
+                        pix = provider._load_pixmap(path)
+            except Exception:
+                pix = None
+            if pix is not None and self._apply_pixmap(pix):
+                return True
+
+            def done(_key, pixmap):
+                if token != self._token:
+                    return
+                self._apply_pixmap(pixmap)
+
+            try:
+                # только готовый пакет (офлайн); иначе плейсхолдер без сети
+                if getattr(provider, "pack_ready", False):
+                    provider.request_item(key, item, callback=done, size=256)
+            except Exception:
+                pass
+            return False
+
+        def _fill_minis(self, parts, token):
+            self._clear_minis()
+            names = [str(part) for part in (parts or []) if str(part).strip()]
+            if not names:
+                return
+            provider = self._provider()
+            for name in names[:6]:
+                mini = QLabel(self.minis_host)
+                mini.setFixedSize(32, 32)
+                mini.setStyleSheet("background: transparent;")
+                mini.setAlignment(Qt.AlignCenter)
+                mini_style = item_icons.part_style(
+                    name.replace(" ", "_").lower(), name)
+                mini.setToolTip(name + (f"\n{mini_style['type']}"
+                                        if mini_style.get("is_part") else ""))
+                if mini_style.get("is_part"):
+                    mw, mh = item_icons.part_badge_size(
+                        "", name, mini=True)
+                    badge_pix = item_icons.part_badge_pixmap(
+                        "", name, mw, mh)
+                    if badge_pix is not None:
+                        mini_badge = QLabel(mini)
+                        mini_badge.setPixmap(badge_pix)
+                        mini_badge.setFixedSize(mw, mh)
+                        mini_badge.move(2, 32 - mh - 2)
+                        mini_badge.show()
+                self.minis.addWidget(mini)
+                item = {"name": name}
+                try:
+                    pix = provider.get_cached(name)
+                    if pix is None:
+                        path = provider._find_disk(name)
+                        if path:
+                            pix = provider._load_pixmap(path)
+                    if pix is not None:
+                        mini.setPixmap(pix.scaled(32, 32, Qt.KeepAspectRatio,
+                                                  Qt.SmoothTransformation))
+                        continue
+
+                    def done(_key, pixmap, label=mini, expect=token):
+                        if expect != self._token:
+                            return
+                        if pixmap is not None and not pixmap.isNull():
+                            label.setPixmap(pixmap.scaled(
+                                32, 32, Qt.KeepAspectRatio,
+                                Qt.SmoothTransformation))
+                    if getattr(provider, "pack_ready", False):
+                        provider.request_item(name, item, callback=done,
+                                              size=32)
+                except Exception:
+                    pass
+            if self.minis.count():
+                self.minis.addStretch(1)
+                self.minis_host.show()
+
+    return ItemArtwork
+
+
 def build_market_browser():
     """Фабрика окна «Маркет»; возвращает класс ``MarketBrowser``."""
     from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
@@ -450,6 +885,7 @@ def build_market_browser():
         def __init__(self, item, parent=None, cfg=None):
             super().__init__(parent)
             self.item_data = dict(item)
+            self.cfg = dict(cfg or {})
             self.setObjectName("mRow")
             self.setFixedHeight(48)
             self.set_style(selected=False, zebra=False)
@@ -459,6 +895,7 @@ def build_market_browser():
             self.lbl_name = QLabel(str(item.get("name") or item.get("slug") or "?"))
             self.lbl_name.setFont(make_font(12))
             self.lbl_name.setStyleSheet(f"color:{theme.PALETTE['text']};")
+            self.lbl_name.setMinimumWidth(0)
             self.icon = item_icon_label(item, 40, cfg)
             if self.icon is not None:
                 lay.addWidget(self.icon, 0, Qt.AlignVCenter)
@@ -474,6 +911,12 @@ def build_market_browser():
             self.lbl_online.setFont(make_font(10))
             self.lbl_online.setStyleSheet(f"color:{theme.PALETTE['muted']};")
             lay.addWidget(self.lbl_name, 1)
+            import item_icons
+            self.part_chip = item_icons.part_chip_label(
+                str(item.get("slug") or ""), str(item.get("name") or ""),
+                self)
+            if self.part_chip is not None:
+                lay.addWidget(self.part_chip)
             lay.addWidget(self.lbl_sell)
             lay.addWidget(self.lbl_buy)
             lay.addWidget(self.lbl_online)
@@ -483,10 +926,11 @@ def build_market_browser():
 
         def set_prices(self, hint):
             hint = hint or {}
+            self._hint = dict(hint)
             sell = hint.get("sell")
             buy = hint.get("buy")
-            self.lbl_sell.setText(price_text(sell) if sell else "")
-            self.lbl_buy.setText(price_text(buy) if buy else "")
+            self.lbl_sell.setText(price_html(sell, self.cfg) if sell else "")
+            self.lbl_buy.setText(price_html(buy, self.cfg) if buy else "")
             online = hint.get("sell_online") or 0
             self.lbl_online.setText(f"{online} онлайн" if online else "")
 
@@ -694,6 +1138,9 @@ def build_market_browser():
             self.lbl_set_parts.setStyleSheet(
                 f"color:{theme.PALETTE['muted']};")
             self.lbl_set_parts.setWordWrap(True)
+            # 1.0.0: крупная картинка предмета в правом верхнем блоке
+            Artwork = build_item_artwork()
+            self.artwork = Artwork(self.cfg, self)
 
             offers = QHBoxLayout()
             offers.setSpacing(14)
@@ -763,9 +1210,17 @@ def build_market_browser():
             chart_head.addWidget(self.btn_90d)
 
             self.chart = _PriceChart(self)
-            right_lay.addWidget(self.lbl_detail_name)
-            right_lay.addWidget(self.badges_host)
-            right_lay.addWidget(self.lbl_set_parts)
+            top = QHBoxLayout()
+            top.setSpacing(12)
+            info_col = QVBoxLayout()
+            info_col.setSpacing(6)
+            info_col.addWidget(self.lbl_detail_name)
+            info_col.addWidget(self.badges_host)
+            info_col.addWidget(self.lbl_set_parts)
+            info_col.addStretch(1)
+            top.addLayout(info_col, 1)
+            top.addWidget(self.artwork, 0, Qt.AlignTop)
+            right_lay.addLayout(top)
             right_lay.addLayout(offers)
             right_lay.addLayout(actions)
             right_lay.addLayout(chart_head)
@@ -890,9 +1345,14 @@ def build_market_browser():
 
         # ── статус ─────────────────────────────────────────────────────
         def _set_status(self, text, stale=False, sticky=False):
-            self.lbl_status.setText(str(text))
+            # 1.0.0: в статус — только человеческий текст (без traceback/repr)
+            if _ui_safe is not None:
+                safe = _ui_safe.clean(text, fallback="нет данных", limit=160)
+            else:
+                safe = str(text)
+            self.lbl_status.setText(safe)
             self.lbl_status.setStyleSheet(theme.status_qss(stale))
-            self._sticky_status = str(text) if sticky else ""
+            self._sticky_status = safe if sticky else ""
 
         def _tick_status(self):
             if self._busy_catalog or self._busy_details or self._busy_orders:
@@ -977,6 +1437,19 @@ def build_market_browser():
                 row.set_style(zebra=(index % 2 == 1))
                 self.list_results.setItemWidget(list_item, row)
                 self._result_rows.append(row)
+            try:
+                import item_icons as _ii
+                base = self.cfg.get("data_dir") or None
+                provider = _ii.get_provider(
+                    base, enabled=bool(self.cfg.get("show_item_icons", True)),
+                    auto_download=False)
+                keys = [str((item or {}).get("slug") or "")
+                        for item in self._result_items]
+                self._icon_preloader = _ii.IconPreloader(
+                    provider, logger=self._log)
+                self._icon_preloader.start(keys, 0, min(9, len(keys) - 1))
+            except Exception:
+                pass
             self._suppress_select = False
             if self._result_items:
                 self.list_results.setCurrentRow(0)
@@ -1014,6 +1487,41 @@ def build_market_browser():
                 slug = (row.item_data or {}).get("slug")
                 if slug in mapping:
                     row.set_prices(mapping[slug])
+
+        def apply_cfg(self, cfg):
+            """1.0.0 (t46): обновить копии cfg и перерисовать цены."""
+            self.cfg = dict(cfg or {})
+            for row in getattr(self, "_result_rows", []) or []:
+                try:
+                    row.cfg = dict(self.cfg)
+                    row.set_prices(getattr(row, "_hint", {}) or {})
+                except Exception:
+                    pass
+            art = getattr(self, "artwork", None)
+            if art is not None:
+                try:
+                    art.set_cfg(self.cfg)
+                    item = dict(getattr(art, "_item", {}) or {})
+                    meta = dict(getattr(art, "_meta", {}) or {})
+                    if item:
+                        art.set_item(item, meta)
+                except Exception:
+                    pass
+            details = getattr(self, "_details", None) or {}
+            top = details.get("top") or {}
+            if top:
+                try:
+                    self._fill_offers(self.sell_box, top.get("sell") or [],
+                                      "sell")
+                    self._fill_offers(self.buy_box, top.get("buy") or [], "buy")
+                except Exception:
+                    pass
+            if getattr(self, "_orders", None):
+                try:
+                    self._render_orders()
+                except Exception:
+                    pass
+            return self
 
         def _on_row_changed(self, row):
             for index, widget in enumerate(self._result_rows):
@@ -1079,12 +1587,29 @@ def build_market_browser():
             top = dict(payload.get("top") or {})
             series = dict(payload.get("series") or {})
             notes = list(payload.get("notes") or [])
+            # 1.0.0: неторгуемый предмет — без цен/ордеров (цена не «0»)
+            if meta.get("tradable") is False:
+                top = {"sell": [], "buy": []}
+                series = {"48h": [], "90d": []}
             self._details = {"meta": meta, "top": top, "series": series}
-            self.lbl_detail_name.setText(str(meta.get("name") or payload.get("slug") or ""))
+            name = str(meta.get("name") or payload.get("slug") or "")
+            self.lbl_detail_name.setText(name)
             self._fill_badges(meta)
             parts = meta.get("set_parts") or []
             self.lbl_set_parts.setText(
                 "Части сета: " + ", ".join(str(x) for x in parts) if parts else "")
+            # 1.0.0: крупная картинка (192×192) + подпись + бейдж + мини-иконки
+            try:
+                self.artwork.set_cfg(self.cfg)
+                art_item = {
+                    "slug": meta.get("slug") or payload.get("slug") or "",
+                    "name": name,
+                    "en_name": meta.get("name_en") or "",
+                    "gameRef": meta.get("game_ref") or "",
+                }
+                self.artwork.set_item(art_item, meta)
+            except Exception as exc:
+                _ui_error("маркет (картинка)", exc)
             self._fill_offers(self.sell_box, top.get("sell") or [], "sell")
             self._fill_offers(self.buy_box, top.get("buy") or [], "buy")
             self.chart.set_series(series)
@@ -1103,6 +1628,10 @@ def build_market_browser():
             clear_layout(self.sell_box)
             clear_layout(self.buy_box)
             self.chart.set_series({"48h": [], "90d": []})
+            try:
+                self.artwork.clear()
+            except Exception:
+                pass
 
         def _fill_badges(self, meta):
             clear_layout(self.badges_box)
@@ -1144,10 +1673,9 @@ def build_market_browser():
                 line = QHBoxLayout(row)
                 line.setContentsMargins(0, 0, 0, 0)
                 line.setSpacing(6)
-                price = QLabel(price_text(order.get("platinum")))
+                price = QLabel(price_html(order.get("platinum"), self.cfg))
                 price.setFont(make_font(12, True))
                 price.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
-                price.setToolTip(theme.currency_tooltip("platinum"))
                 price.setToolTip(theme.currency_tooltip("platinum"))
                 quantity = QLabel(f"×{order.get('quantity', '?')}")
                 quantity.setFont(make_font(10))
@@ -1279,8 +1807,10 @@ def build_market_browser():
                              **dialog_options))
                 accepted = (dialog.exec_() == 1)    # QDialog.Accepted
             except Exception as exc:
-                self._set_status(f"форма ордера не открылась: {exc}",
-                                 stale=True, sticky=True)
+                self._set_status(_ui_error(
+                    "форма ордера", exc, "форма ордера не открылась — "
+                    "подробности в app.log"),
+                    stale=True, sticky=True)
             finally:
                 self._untrack_dialog(dialog)
             if self._current_tab == 1 or order is not None:
@@ -1367,17 +1897,101 @@ def build_market_browser():
                 self._pending_select = None
                 self.select_my_order(pending_select)
 
+        def _log(self, message):
+            try:
+                import warframe
+                warframe.log(message)
+            except Exception:
+                pass
+
         def _render_orders(self):
-            clear_layout(self.orders_box)
-            if not self._orders:
-                if self.client.has_token():
-                    self.lbl_orders_empty.setText("Ордеров нет — создайте через «Продать».")
-                self.orders_box.addStretch(1)
+            """t68: diff — те же ордера обновляются без пересборки."""
+            orders = list(self._orders)
+            ids = [str(order.get("id") or "") for order in orders]
+            rows = getattr(self, "_order_rows", None)
+            if rows is None:
+                rows = {}
+                self._order_rows = rows
+            # тот же набор: только текст
+            if rows and len(rows) == len(orders) and set(rows) == set(ids):
+                for order in orders:
+                    self._update_order_row(rows[str(order.get("id") or "")],
+                                           order)
+                if callable(getattr(self, "_log", None)):
+                    self._log(f"Ордера: обновлено {len(orders)}/{len(orders)} "
+                              "без пересборки")
                 return
-            self.lbl_orders_empty.setText("")
-            for index, order in enumerate(self._orders):
-                self.orders_box.addWidget(self._make_order_row(order, index))
+            scroll = 0
+            try:
+                scroll = self.orders_scroll.verticalScrollBar().value()
+            except Exception:
+                pass
+            # удалить исчезнувшие
+            for key in list(rows):
+                if key not in ids:
+                    card = rows.pop(key)
+                    self.orders_box.removeWidget(card)
+                    card.deleteLater()
+            # снять все элементы раскладки, виджеты сохранить
+            while self.orders_box.count():
+                self.orders_box.takeAt(0)
+            for order in orders:
+                key = str(order.get("id") or "")
+                card = rows.get(key)
+                if card is None:
+                    card = self._make_order_row(order, len(rows))
+                    rows[key] = card
+                else:
+                    self._update_order_row(card, order)
+                self.orders_box.addWidget(card)
+            if not orders:
+                if self.client.has_token():
+                    self.lbl_orders_empty.setText(
+                        "Ордеров нет — создайте через «Продать».")
+                else:
+                    self.lbl_orders_empty.setText("")
+            else:
+                self.lbl_orders_empty.setText("")
             self.orders_box.addStretch(1)
+            try:
+                self.orders_scroll.verticalScrollBar().setValue(scroll)
+            except Exception:
+                pass
+            try:
+                import item_icons as _ii
+                provider = _ii.get_provider(
+                    self.cfg.get("data_dir"),
+                    enabled=bool(self.cfg.get("show_item_icons", True)),
+                    auto_download=False)
+                keys = [str((o.get("item") or {}).get("slug") or "")
+                        for o in orders if isinstance(o.get("item"), dict)]
+                self._orders_preloader = _ii.IconPreloader(
+                    provider, logger=self._log)
+                self._orders_preloader.start(keys, 0, min(9, len(keys) - 1))
+            except Exception:
+                pass
+
+        def _update_order_row(self, card, order):
+            kind = order_type_of(order)
+            color = (theme.PALETTE["success"] if kind == "sell"
+                     else theme.PALETTE["danger"])
+            try:
+                card.lbl_price.setText(price_html(order.get("platinum"),
+                                                   self.cfg))
+                card.lbl_quantity.setText(f"×{order.get('quantity', '?')}")
+                extras = []
+                if order.get("rank") is not None:
+                    extras.append(f"ранг {order.get('rank')}")
+                if order.get("perTrade") is not None:
+                    extras.append(f"лот {order.get('perTrade')}")
+                extras.append("виден" if order.get("visible", True)
+                              else "скрыт")
+                card.lbl_info.setText(" · ".join(extras))
+                card.setProperty("order_kind", kind)
+                card.setStyleSheet(theme.row_qss(
+                    zebra=bool(getattr(card, "_zebra", False))))
+            except Exception:
+                pass
 
         def _order_item_name(self, order):
             embedded = (order.get("item")
@@ -1437,7 +2051,7 @@ def build_market_browser():
             name.setFont(make_font(11))
             name.setStyleSheet(f"color:{theme.PALETTE['text']};")
             name.setMinimumWidth(220)
-            price = QLabel(price_text(order.get("platinum")))
+            price = QLabel(price_html(order.get("platinum"), self.cfg))
             price.setFont(make_font(12, True))
             price.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
             quantity = QLabel(f"×{order.get('quantity', '?')}")
@@ -1453,6 +2067,16 @@ def build_market_browser():
             info.setFont(make_font(10))
             info.setStyleSheet(f"color:{theme.PALETTE['muted']};")
             lay.addWidget(name, 1)
+            import item_icons
+            order_chip = item_icons.part_chip_label(
+                str((icon_item or {}).get("slug") or ""),
+                str(self._order_item_name(order)), card)
+            if order_chip is not None:
+                lay.addWidget(order_chip)
+            card.lbl_name = name
+            card.lbl_price = price
+            card.lbl_quantity = quantity
+            card.lbl_info = info
             lay.addWidget(price)
             lay.addWidget(quantity)
             lay.addWidget(info)
@@ -1547,7 +2171,9 @@ def build_market_browser():
                     token_cls(self.cfg, self.client, self, save_fn=save_fn))
                 dialog.exec_()
             except Exception as exc:
-                self._set_status(f"окно токена не открылось: {exc}", stale=True,
+                self._set_status(_ui_error(
+                    "окно токена", exc, "окно токена не открылось — "
+                    "подробности в app.log"), stale=True,
                                  sticky=True)
                 return
             finally:
