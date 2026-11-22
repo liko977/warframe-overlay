@@ -122,9 +122,36 @@ def status_error_text(payload):
 
 
 def status_menu_spec():
-    """Пункты меню чипа (для UI/тестов): (подпись, status/auto)."""
+    """Пункты меню чипа (для UI/тестов): (подпись, status).
+
+    1.0.0: пункт «Авто (В игре, когда игра в фокусе)» убран — остались только
+    явные статусы Онлайн / В игре / Невидимка.
+    """
     return [("Онлайн", "online"), ("В игре", "ingame"),
-            ("Невидимка", "invisible"), ("Авто", "auto")]
+            ("Невидимка", "invisible")]
+
+
+def migrate_status_config(cfg):
+    """1.0.0: убрать устаревший авто-режим статуса из конфига.
+
+    Возвращает словарь изменённых ключей (для сохранения/лога). Если раньше
+    был ``status_auto=True`` или ``status_mode="auto"`` — переводим на явный
+    «Онлайн», чтобы статус не «прыгал» сам и не ломал миграцию старых config.
+    """
+    changed = {}
+    if not isinstance(cfg, dict):
+        return changed
+    mode = str(cfg.get("status_mode") or "").strip().lower()
+    if mode == "auto" or mode not in ("", "online", "ingame", "invisible"):
+        cfg["status_mode"] = "online"
+        changed["status_mode"] = "online"
+    elif not mode:
+        cfg["status_mode"] = "online"
+        changed["status_mode"] = "online"
+    if cfg.get("status_auto"):
+        cfg["status_auto"] = False
+        changed["status_auto"] = False
+    return changed
 
 
 def duration_menu_spec():
@@ -593,10 +620,8 @@ def build_status_service():
                 on_log=self.logger)
             self.started = True
             self.socket.start()
-            self.auto = bool(self.cfg.get("status_auto", False))
-            if self.auto:
-                self._timer.start()
-                self.auto_tick()
+            # 1.0.0: авто-режим статуса убран — всегда явный статус
+            self.auto = False
             return True
 
         def stop(self, restore=True):
@@ -624,39 +649,30 @@ def build_status_service():
             result = self.socket.set_status(status, duration)
             if not result.get("ok"):
                 self._suppress_confirm = True
-                self.error.emit(result.get("error") or "ошибка статуса")
+                try:
+                    import ui_safe
+                    message = ui_safe.clean(result.get("error"),
+                                            fallback="ошибка статуса",
+                                            limit=140)
+                except Exception:
+                    message = "ошибка статуса"
+                self.error.emit(message)
             elif result.get("status") not in ("offline", ""):
                 self._awaiting_status = str(result.get("status") or "")
                 self._confirm_timer.start()
             return result
 
         def set_auto(self, enabled):
-            self.auto = bool(enabled)
-            if self.auto:
-                self._timer.start()
-                self.auto_tick()
-            else:
-                self._timer.stop()
-                self.last_auto = ""
+            """1.0.0: авто-режим удалён — вызов оставлен для совместимости."""
+            self.auto = False
+            self._timer.stop()
+            self.last_auto = ""
             self.auto_changed.emit(self.auto)
             return self.auto
 
         def auto_tick(self):
-            if not self.auto or self.socket is None \
-                    or not self.socket.authenticated:
-                return False
-            focused = False
-            if callable(self.focus_fn):
-                try:
-                    focused = bool(self.focus_fn())
-                except Exception:
-                    focused = False
-            desired = "ingame" if focused else "online"
-            if desired == self.last_auto:
-                return False
-            self.last_auto = desired
-            self.socket.set_status(desired, None)
-            return True
+            """1.0.0: авто-режим статуса удалён — тик ничего не меняет."""
+            return False
 
         def _confirm_timeout(self):
             if not self._awaiting_status:
@@ -667,9 +683,17 @@ def build_status_service():
             self.error.emit(text)
 
         def _on_socket_error(self, text):
-            # t27: после ошибки не даём «статус: …» затереть текст ошибки
+            # t27: после ошибки не даём «статус: …» затереть текст ошибки.
+            # 1.0.0: в интерфейс — только понятный текст, без repr исключений.
             self._suppress_confirm = True
-            self.error.emit(str(text or "ошибка статуса"))
+            try:
+                import ui_safe
+                message = ui_safe.clean(
+                    text, fallback="не удалось изменить статус — "
+                    "проверьте вход и сеть", limit=140)
+            except Exception:
+                message = str(text or "ошибка статуса")
+            self.error.emit(message)
 
         def _on_socket_status(self, status, until=None):
             self.last_status = str(status or "")
@@ -693,8 +717,7 @@ def build_status_service():
 #  UI: чип статуса в шапке
 # ─────────────────────────────────────────────────────────────────────────
 def make_status_chip_style(status, auto=False):
+    """Подпись чипа статуса. 1.0.0: суффикс «· авто» больше не показываем."""
     color = status_color(status)
     text = status_label(status)
-    if auto:
-        text = f"{text} · авто"
     return f"● {text}", color
