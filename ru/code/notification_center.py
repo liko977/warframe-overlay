@@ -1532,6 +1532,7 @@ def build_toast_stack():
                                 Qt.WindowStaysOnTopHint)
             self.setAttribute(Qt.WA_ShowWithoutActivating, True)
             self.setAttribute(Qt.WA_TranslucentBackground, True)
+            self.setAttribute(Qt.WA_NoSystemBackground, True)
             self.setAttribute(Qt.WA_DeleteOnClose, False)
             self.setFixedWidth(320)
             self._apply_toast_style()
@@ -1665,40 +1666,50 @@ def build_toast_stack():
             self.timer.timeout.connect(self.fade_out)
             self._animation = None
             self.setCursor(Qt.PointingHandCursor)
-            try:
-                shadow = QGraphicsDropShadowEffect(self)
-                shadow.setBlurRadius(4)
-                shadow.setOffset(0, 2)
-                shadow.setColor(QColor(0, 0, 0, 55))
-                self.setGraphicsEffect(shadow)
-            except Exception:
-                pass
             self.adjustSize()
 
         def _apply_toast_style(self):
+            # t93: фон рисуется в paintEvent, QSS на top-level даёт белый кадр
             self.setStyleSheet(
-                f"QFrame#toast {{ background: rgba(13,17,23,"
-                f"{self._bg_alpha}); border:1px solid {TOAST_BORDER};"
-                f" border-radius:{TOAST_RADIUS}px; }}"
+                "QFrame#toast { background: transparent; border: none; }"
                 " QLabel { background: transparent; }")
 
+        def paintEvent(self, event):
+            from PyQt5.QtGui import QColor, QPainter, QPen
+            painter = QPainter(self)
+            try:
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                rect = self.rect().adjusted(1, 1, -1, -1)
+                painter.setBrush(QColor(13, 17, 23, 255))
+                painter.setPen(QPen(QColor(TOAST_BORDER), 1))
+                painter.drawRoundedRect(rect, TOAST_RADIUS, TOAST_RADIUS)
+            finally:
+                painter.end()
+            super().paintEvent(event)
+
         def enterEvent(self, event):       # noqa: N802 (Qt API)
-            self._bg_alpha = 255
-            self._apply_toast_style()
             super().enterEvent(event)
 
         def leaveEvent(self, event):       # noqa: N802 (Qt API)
-            self._bg_alpha = int(round(self.opacity_value * 255))
-            self._apply_toast_style()
             super().leaveEvent(event)
 
         def show_without_focus(self):
+            pos = self.pos()
+            size = self.size()
             self.show()
             try:
                 self.raise_()
             except Exception:
                 pass
             self.timer.start()
+            try:
+                if callable(getattr(self, "logger", None)):
+                    self.logger(
+                        f"Тост: показан (kind={self.record.get('kind')}, "
+                        f"pos=({pos.x()},{pos.y()}), "
+                        f"size={size.width()}x{size.height()})")
+            except Exception:
+                pass
 
         def fade_out(self):
             if self._animation is not None:
@@ -1729,11 +1740,12 @@ def build_toast_stack():
         activated = pyqtSignal(dict)
 
         def __init__(self, cfg, on_click=None, login_check=None,
-                     max_toasts=3, parent=None):
+                     max_toasts=3, parent=None, logger=None):
             super().__init__(parent)
             self.cfg = dict(cfg or {})
             self.on_click = on_click
             self.login_check = login_check
+            self.logger = logger
             self.max_toasts = max(1, int(max_toasts or 3))
             self.toasts = []
             self._default_login = None
@@ -1778,11 +1790,22 @@ def build_toast_stack():
             if len(self.toasts) >= self.max_toasts:
                 self._remove(self.toasts[0])
             toast = ToastWidget(self.cfg, record)
+            toast.logger = self.logger
             toast.clicked.connect(self._on_clicked)
             toast.finished.connect(self._remove)
+            geometry = self._screen_geometry()
+            if geometry is not None:
+                y = geometry.top() + 16
+                for existing in list(self.toasts):
+                    existing.adjustSize()
+                    existing.setGeometry(existing.x(), int(y), 320,
+                                         existing.height())
+                    y += existing.height() + 8
+                toast.adjustSize()
+                x = geometry.right() - 16 - 320
+                toast.setGeometry(max(0, x), int(y), 320, toast.height())
             self.toasts.append(toast)
             toast.show_without_focus()
-            self._reposition()
             return toast
 
         def _on_clicked(self, record):
