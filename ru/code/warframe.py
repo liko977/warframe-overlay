@@ -75,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -457,6 +457,17 @@ def money_html(amount, currency="platinum", cfg=None):
         return mod.format_money(amount, currency=currency, cfg=cfg)
     except Exception:
         return f"{amount} {suffix}"
+
+
+def currency_pixmap(currency, size, cfg=None):
+    """QPixmap иконки валюты ровно size×size (или None)."""
+    mod = currency_icons_module()
+    if mod is None:
+        return None
+    try:
+        return mod.currency_pixmap(currency, size, cfg=cfg)
+    except Exception:
+        return None
 
 
 def currency_icon_label(currency, cfg=None, size=16, scale=None):
@@ -2651,13 +2662,13 @@ def build_overlays():
             self.frame = QFrame()
             self.frame.setObjectName("card")
             self._style_normal = """
-                QFrame#card { background-color: rgba(8, 11, 18, 238);
+                QFrame#card { background-color: rgba(13, 17, 23, 255);
                               border: 1px solid #24344a; border-radius: 6px; }
                 QLabel { border: none; background: transparent; color: #e8eef7;
                          font-family: 'Segoe UI', Arial, sans-serif; }
             """
             self._style_best = """
-                QFrame#card { background-color: rgba(12, 14, 8, 242);
+                QFrame#card { background-color: rgba(13, 17, 23, 255);
                               border: 1px solid #e8c05a; border-radius: 6px; }
                 QLabel { border: none; background: transparent; color: #f2f6fc;
                          font-family: 'Segoe UI', Arial, sans-serif; }
@@ -2669,7 +2680,7 @@ def build_overlays():
             lay.setSpacing(0)
 
             self.lbl_name = QLabel("")
-            self.lbl_name.setStyleSheet("color:#cfd8e6; font-size:11px; font-weight:600;")
+            self.lbl_name.setStyleSheet("color:#E6E9EE; font-size:13px; font-weight:600;")
             self.lbl_name.setMaximumHeight(15)
             self.part_chip = item_icons_module().part_chip_label("", "")
             self._last_data = None
@@ -2692,7 +2703,7 @@ def build_overlays():
             mid.setSpacing(6)
             self.lbl_price = QLabel("…")
             self.lbl_price.setStyleSheet(
-                f"font-size:25px; font-weight:700; color:{theme.currency_platinum()};")
+                f"font-size:18px; font-weight:700; color:#E7F1FF;")
             self.lbl_price.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_ducats = QLabel("")
             self.lbl_ducats.setStyleSheet(
@@ -2706,10 +2717,10 @@ def build_overlays():
 
             self.lbl_set = QLabel("")
             set_font = QFont(self.font())
-            set_font.setPixelSize(12)
-            set_font.setWeight(QFont.DemiBold)
+            set_font.setPixelSize(10)
+            set_font.setWeight(QFont.Normal)
             self.lbl_set.setFont(set_font)
-            self.lbl_set.setTextFormat(Qt.RichText)
+            self.lbl_set.setTextFormat(Qt.PlainText)
             self.lbl_set.setToolTip("Полный комплект")
             self.lbl_set.setVisible(False)
             self.btn_set_market = QPushButton("↗")
@@ -2718,7 +2729,9 @@ def build_overlays():
             market_font.setPixelSize(10)
             market_font.setBold(True)
             self.btn_set_market.setFont(market_font)
-            self.btn_set_market.setStyleSheet(theme.button_qss(small=True))
+            self.btn_set_market.setStyleSheet(
+                "background:transparent; border:none; color:#93A1B5;"
+                " font-size:10px;")
             self.btn_set_market.setCursor(Qt.PointingHandCursor)
             self.btn_set_market.setToolTip("Открыть на маркете")
             self.btn_set_market.clicked.connect(self._open_set_market)
@@ -2761,7 +2774,18 @@ def build_overlays():
 
             outer.addWidget(self.frame)
             fs = float(cfg.get("font_scale", 1.0))
-            self.setFixedSize(int(240 * fs), int(96 * fs))
+            name_px = max(1, int(round(13 * fs)))
+            price_px = max(1, int(round(18 * fs)))
+            set_px = max(1, int(round(10 * fs)))
+            self.lbl_name.setStyleSheet(
+                f"color:#E6E9EE; font-size:{name_px}px; font-weight:600;")
+            self.lbl_price.setStyleSheet(
+                f"font-size:{price_px}px; font-weight:700; color:#E7F1FF;")
+            set_font = QFont(self.font())
+            set_font.setPixelSize(set_px)
+            set_font.setWeight(QFont.Normal)
+            self.lbl_set.setFont(set_font)
+            self.setFixedSize(int(round(242 * fs)), int(round(96 * fs)))
             try:
                 theme.on_currency_change(
                     lambda _p, _d: self._on_currency_changed())
@@ -2771,7 +2795,7 @@ def build_overlays():
         def _on_currency_changed(self):
             try:
                 self.lbl_price.setStyleSheet(
-                    f"font-size:25px; font-weight:700; "
+                    f"font-size:18px; font-weight:700; "
                     f"color:{theme.currency_platinum()};")
                 self.lbl_ducats.setStyleSheet(
                     f"color:{theme.currency_ducats()}; font-size:15px; "
@@ -2870,35 +2894,45 @@ def build_overlays():
                 self._request_icon(self._last_data)
 
         def _update_set_label(self, data):
+            data = data or {}
             show = bool(self.cfg.get("overlay_show_set_price", True))
-            price = (data or {}).get("set_price") if show else None
-            if price is None:
+            price = data.get("set_price") if show else None
+            online = data.get("sell_online", 0) or 0
+            part_price = data.get("price")
+            same = (price is not None and part_price is not None
+                    and int(price) == int(part_price))
+            pieces = []
+            if price is not None and not same:
+                suspicious = bool(data.get("set_suspicious"))
+                mark = " (?)" if suspicious else ""
+                icon = currency_icon_html("platinum", self.cfg, px=10)
+                sep = currency_sep(icon)
+                amount = (f"<span style='color:{theme.currency_platinum()}'>"
+                          f"{int(price)}</span>{sep}{icon}{mark}")
+                pieces.append("компл. " + amount)
+            if online:
+                pieces.append(f"{int(online)} онлайн")
+            if not pieces:
                 self.lbl_set.clear()
                 self.lbl_set.setVisible(False)
                 self.btn_set_market.setVisible(False)
                 return
-            name = ((data or {}).get("set_name")
-                    or (data or {}).get("set_slug") or "комплект")
-            suspicious = bool((data or {}).get("set_suspicious"))
-            platinum = (theme.PALETTE["muted"] if suspicious
-                        else theme.currency_platinum())
-            mark = " (?)" if suspicious else ""
-            set_icon = currency_icon_html("platinum", self.cfg, px=10)
-            self.lbl_set.setText(
-                '<span style="color:rgba(231,241,255,191);'
-                ' font-weight:400;">компл.</span> '
-                f'<span style="color:{platinum}; font-weight:700;">'
-                f'{int(price)}{currency_sep(set_icon)}{set_icon}{mark}</span>')
-            tip = format_set_price_tooltip(data)
-            if suspicious and (data or {}).get("set_suspect_reason"):
-                tip += "\n" + str((data or {}).get("set_suspect_reason"))
-            self.lbl_set.setToolTip(tip + f"\n{name}")
+            _fs = float(self.cfg.get("font_scale", 1.0))
             self.lbl_set.setStyleSheet(
-                "background: transparent; font-size:12px;")
+                "background: transparent; color:#93A1B5; "
+                f"font-size:{max(1, int(round(10 * _fs)))}px;")
+            self.lbl_set.setTextFormat(Qt.RichText)
+            self.lbl_set.setText(" · ".join(pieces))
+            tip = format_set_price_tooltip(data) if price is not None else ""
+            if data.get("set_suspect_reason"):
+                tip += "\n" + str(data.get("set_suspect_reason"))
+            self.lbl_set.setToolTip(tip or "Комплект и продавцы")
             self.lbl_set.setVisible(True)
-            self.btn_set_market.setVisible(True)
-            self.btn_set_market.setToolTip(
-                f"Открыть на маркете: {name}")
+            self.btn_set_market.setVisible(False)
+            if price is not None:
+                name = data.get("set_name") or data.get("set_slug") or "комплект"
+                self.lbl_set.setToolTip((tip or "") + "\n" + str(name))
+                self.btn_set_market.setToolTip(f"Открыть на маркете: {name}")
 
         def _open_set_market(self):
             data = self._last_data or {}
@@ -2931,7 +2965,7 @@ def build_overlays():
                 from PyQt5.QtGui import QFontMetrics
                 _fm = QFontMetrics(self.lbl_name.font())
                 self.lbl_name.setText(_fm.elidedText(
-                    name, Qt.ElideRight, 220))
+                    name, Qt.ElideRight, int(220 * float(self.cfg.get("font_scale", 1.0)))))
                 self.lbl_name.setToolTip(name)
             except Exception:
                 self.lbl_name.setText(name)
@@ -2993,27 +3027,26 @@ def build_overlays():
                 self.lbl_sold.setText("<span style='color:#6f7b8c;'>запрашиваю</span>")
             elif isinstance(price, (int, float)) and price:
                 tilde = "~" if d.get("sell_offline") else ""
-                icon = currency_icon_html("platinum", self.cfg, px=10)
+                icon = currency_icon_html("platinum", self.cfg, px=14)
                 sep = currency_sep(icon)
+                platinum_text = theme.currency_platinum()
                 self.lbl_price.setText(
-                    f"<span style='color:{platinum};'>{tilde}{int(price)}</span>"
-                    f"{sep}<span style='color:{theme.rgba(platinum, 0.72)}; "
-                    f"font-size:13px;'>{icon}</span>")
+                    f"<span style='color:{platinum_text};'>{tilde}{int(price)}</span>"
+                    f"{sep}<span style='color:{platinum_text};'>{icon}</span>")
                 du = d.get("ducats")
                 if du:
                     d_icon = currency_icon_html("ducats", self.cfg, px=10)
                     self.lbl_ducats.setText(
-                        f"◆ {int(du)}{currency_sep(d_icon)}{d_icon}")
+                        f"{int(du)}{currency_sep(d_icon)}{d_icon}")
                 else:
                     self.lbl_ducats.setText("")
-                online = d.get("sell_online", 0)
-                self.lbl_sold.setText(f"{online} онлайн" if online else "нет онлайн")
+                self.lbl_sold.setText("")
             elif d.get("matched"):
                 self.lbl_price.setText("<span style='color:#6c7789; font-size:15px;'>нет ордеров</span>")
                 if d.get("ducats"):
                     d_icon = currency_icon_html("ducats", self.cfg, px=10)
                     self.lbl_ducats.setText(
-                        f"◆ {int(d['ducats'])}{currency_sep(d_icon)}{d_icon}")
+                        f"{int(d['ducats'])}{currency_sep(d_icon)}{d_icon}")
                 else:
                     self.lbl_ducats.setText("")
                 self.lbl_sold.setText("")
@@ -3066,11 +3099,11 @@ def build_overlays():
                 pass
 
         def apply_cfg(self, cfg):
-            """1.0.0 (t46): актуальные настройки отображения без копий."""
+            """1.0.0 (t46): настройки без показа скрытого «Итого» (t95)."""
             self.cfg = dict(cfg or {})
             if self._last_summary is not None:
                 data, final = self._last_summary
-                self.set_summary(data, final=final)
+                self.set_summary(data, final=final, show=self.isVisible())
             return self
 
         def _on_currency_changed(self):
@@ -3080,11 +3113,11 @@ def build_overlays():
                     f"color:{theme.currency_platinum()};")
                 if self._last_summary is not None:
                     data, final = self._last_summary
-                    self.set_summary(data, final=final)
+                    self.set_summary(data, final=final, show=self.isVisible())
             except Exception:
                 pass
 
-        def set_summary(self, data, final=False):
+        def set_summary(self, data, final=False, show=True):
             self._last_summary = ([dict(d) for d in (data or [])], bool(final))
             total, best = 0, None
             for d in data or []:
@@ -3105,15 +3138,18 @@ def build_overlays():
                     self.lbl_best.setText(
                         f"дороже всех: {best[1][:40]} ({int(best[0])}{sep}"
                         f"{icon})" if best else " ")
-                    self.show()
+                    if show:
+                        self.show()
                 else:
                     self.lbl_total.setText("Итого: —")
                     self.lbl_best.setText("цены не найдены")
-                    self.show()
+                    if show:
+                        self.show()
             else:
                 self.lbl_total.setText("Итого: …")
                 self.lbl_best.setText("подгружаю цены…")
-                self.show()
+                if show:
+                    self.show()
 
     class _SelectedOverlay(QWidget):
         """Редактор списка «Выбрано из реликвий»: добавить / изменить / удалить.
@@ -3241,7 +3277,7 @@ def build_overlays():
             price = it.get("price")
             p = f"{int(price)}p" if isinstance(price, (int, float)) and price else "—"
             du = it.get("ducats")
-            tail = f"  ◆{int(du)} дк" if du else ""
+            tail = f"  {int(du)} дк" if du else ""
             return f"{name} — {p}{tail}"
 
         def _clear_rows(self):
@@ -3394,7 +3430,7 @@ def build_overlays():
                 du = c.get("ducats")
                 text = f"{i + 1}. {name} — {p}"
                 if du:
-                    text += f"   ◆ {du}"
+                    text += f"   {du} дк"
                 act = menu.addAction(text)
                 actions[act] = i
             chosen = menu.exec_(anchor.mapToGlobal(QPoint(0, anchor.height())))
@@ -5859,7 +5895,7 @@ def save_selected_list(cfg, items):
             if isinstance(price, (int, float)) and price:
                 total += price
             du = it.get("ducats")
-            tail = f"  ◆ {du} дк" if du else ""
+            tail = f"  {du} дк" if du else ""
             lines.append(f"{i}. {name} — {fmt_plat(price)}{tail}")
         lines.append("")
         lines.append(f"Итого: {int(total)}p")
@@ -8460,7 +8496,7 @@ def run_gui(cfg):
             ToastStack = center_mod.build_toast_stack()
             toast_stack = ToastStack(
                 cfg, on_click=lambda record: _toast_activated(record),
-                login_check=login_in_progress)
+                login_check=login_in_progress, logger=log)
         except Exception as e:
             log(f"Центр уведомлений: тосты не созданы "
                 f"({type(e).__name__}: {e})")
@@ -9068,6 +9104,14 @@ def run_gui(cfg):
 
     def _settings_side_effects(settings_cfg, _values):
         """Применить настройки к уже работающему приложению (без перезапуска)."""
+        # t92: фильтр уведомлений читает актуальный cfg, а не копию
+        try:
+            if notifier is not None and callable(
+                    getattr(notifier, "apply_cfg", None)):
+                notifier.apply_cfg(settings_cfg)
+        except Exception as e:
+            log(f"Уведомления: настройки не применены "
+                f"({type(e).__name__}: {e})")
         # цвета валют: глобальная палитра + слушатели плашек/панелей
         try:
             ui_theme().set_currency_colors(
@@ -9159,6 +9203,16 @@ def run_gui(cfg):
                 unified.lbl_status.setText("настройки сохранены и применены")
             except Exception:
                 pass
+        try:
+            overlay_visible = bool(
+                any(w.isVisible() for w in (getattr(manager, "cards", []) or []))
+                or (getattr(manager, "summary", None) is not None
+                    and manager.summary.isVisible()))
+            log("Настройки применены (оверлей: "
+                f"{'перерисован' if overlay_visible else 'скрыт'}, "
+                "скан не запускался)")
+        except Exception:
+            pass
         # подсказка «Дропа» и консольная строка — по новым биндам
         try:
             if drops_panel is not None:
