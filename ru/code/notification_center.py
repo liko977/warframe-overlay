@@ -126,14 +126,15 @@ def test_notification_record(kind="market"):
 
 
 def dispatch_toast_only(record, cfg=None, toast_stack=None,
-                        login_check=None, sound_player=None, sound=False):
+                        login_check=None, sound_player=None, sound=False,
+                        force=False):
     """Эфемерный тост без HistoryStore/бейджа (лут и подобное).
 
     Не пишет в центр уведомлений, не меняет непрочитанные и не трогает
     историю; уважает ``notify_enabled``/``login_in_progress``.
     """
     cfg = cfg or {}
-    if not _cfg_bool(cfg.get("notify_enabled", True), True):
+    if not force and not _cfg_bool(cfg.get("notify_enabled", True), True):
         return {"ok": False, "display": "disabled", "stored": False}
     login = False
     if callable(login_check):
@@ -141,7 +142,7 @@ def dispatch_toast_only(record, cfg=None, toast_stack=None,
             login = bool(login_check())
         except Exception:
             login = False
-    if login or toast_stack is None:
+    if (login and not force) or toast_stack is None:
         return {"ok": False, "display": "login" if login else "none",
                 "stored": False}
     try:
@@ -244,6 +245,8 @@ def action_for_kind(kind):
         return "chat"
     if kind in ("order_bought", "price_drop"):
         return "market"
+    if kind == "pick":
+        return "drops"
     if kind in ("baro_arrival", "baro_leaving", "fissure_ending"):
         return "events"
     if kind == "updates":
@@ -433,9 +436,8 @@ class HistoryStore:
         return dict(normalized)
 
     def records(self):
-        """Записи для центра; лут (pick) живёт в «Дропе», не здесь."""
-        return [dict(record) for record in self._records
-                if canonical_kind(record.get("kind")) != "pick"]
+        """Записи для центра, включая отметки лута (kind=pick)."""
+        return [dict(record) for record in self._records]
 
     def grouped(self, now=None):
         return group_records(self.records(), now=now)
