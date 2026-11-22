@@ -149,13 +149,15 @@ class FarmStatsCollector:
     """
 
     def __init__(self, cfg, price_fn=None, slug_fn=None, clock=time.time,
-                 logger=print, async_prices=True, data_dir=None):
+                 logger=print, async_prices=True, data_dir=None,
+                 on_change=None):
         self.cfg = dict(cfg or {})
         self.price_fn = price_fn
         self.slug_fn = slug_fn
         self.clock = clock or time.time
         self.logger = logger or (lambda *a, **k: None)
         self.async_prices = bool(async_prices)
+        self.on_change = on_change
         self.data_dir = (data_dir or os.environ.get("WF_DATA_DIR")
                          or os.path.dirname(os.path.abspath(__file__)))
         self._lock = threading.RLock()
@@ -169,6 +171,8 @@ class FarmStatsCollector:
         self._cur_keys = set()
         self._replaying = False     # идёт повторное чтение уже учтённой сессии
         self._last_file_size = None # для детекта in-place truncate
+        self._app_session_started = False
+        self._open_keys = set()      # дедуп повторных событий «open»
         self.load()
 
     # ── файл ────────────────────────────────────────────────────────────
@@ -180,7 +184,10 @@ class FarmStatsCollector:
 
     @staticmethod
     def _empty():
-        return {"schema": SCHEMA, "updated_utc": 0.0, "sessions": []}
+        return {"schema": SCHEMA, "updated_utc": 0.0, "sessions": [],
+                # 1.0.0: счётчики реликвий (EE.log) — total не сбрасывается
+                "relics_opened_total": 0, "relics_opened_session": 0,
+                "last_relic_at": None}
 
     def load(self):
         """Читает ``farm_stats.json`` (или пустую структуру)."""
@@ -258,7 +265,44 @@ class FarmStatsCollector:
                 "priced_drops": int(s.get("priced_drops") or 0),
                 "best_drop": best,
                 "drops": drops,
+                "marks": [],
             })
+            for mark in (s.get("marks") or []):
+                if not isinstance(mark, dict):
+                    continue
+                name = str(mark.get("name") or mark.get("picked_name") or "")
+                if not name:
+                    continue
+                out["sessions"][-1]["marks"].append({
+                    "name": name,
+                    "price": _to_int(mark.get("price")
+                                     or mark.get("picked_price")),
+                    "slug": str(mark.get("slug") or ""),
+                    "at": _to_float(mark.get("at")
+                                    or mark.get("picked_utc")),
+                })
+        # 1.0.0: счётчики открытий реликвий (EE.log).
+        # У старых файлов этих полей нет — total восстанавливаем из сессий,
+        # чтобы накопительный счётчик не обнулился при обновлении.
+        total = _to_int(d.get("relics_opened_total"))
+        if total is None:
+            total = 0
+        if not total:
+            opens = sum(int(s.get("screens_opened") or 0)
+                        for s in out["sessions"])
+            if opens:
+                total = opens
+            else:
+                total = sum(int(s.get("relics_opened") or 0)
+                            for s in out["sessions"])
+        out["relics_opened_total"] = max(0, int(total))
+        session = _to_int(d.get("relics_opened_session"))
+        if session is None:
+            last = out["sessions"][-1] if out["sessions"] else None
+            session = (int(last.get("screens_opened") or 0)
+                       if last and last.get("ended_utc") is None else 0)
+        out["relics_opened_session"] = max(0, int(session))
+        out["last_relic_at"] = _to_float(d.get("last_relic_at")) or None
         return out
 
     def save(self):
@@ -281,14 +325,42 @@ class FarmStatsCollector:
                 pass
             return False
 
+    def _notify(self):
+        """Сообщить UI, что данные изменились (только по событиям, не таймер)."""
+        if not callable(self.on_change):
+            return False
+        try:
+            self.on_change()
+            return True
+        except Exception:
+            return False
+
+    # ── счётчики открытий реликвий (1.0.0) ────────────────────────────
+    def _event_utc_locked(self, sess, rel):
+        started = sess.get("started_utc") if isinstance(sess, dict) else None
+        if isinstance(started, (int, float)) and started and rel is not None:
+            return float(started) + float(rel)
+        try:
+            return float(self.clock())
+        except Exception:
+            return time.time()
+
     def _payload_locked(self):
         now = self.clock()
         sessions = []
         for s in self.data["sessions"]:
             self._recompute_session_locked(s)
+            s["marks"] = self._marks_of_session(s)
             sessions.append(copy.deepcopy(s))
         sessions = self._rotate_locked(sessions)
-        return {"schema": SCHEMA, "updated_utc": now, "sessions": sessions}
+        payload = {"schema": SCHEMA, "updated_utc": now, "sessions": sessions}
+        # 1.0.0: накопительные счётчики открытий реликвий
+        payload["relics_opened_total"] = int(
+            self.data.get("relics_opened_total") or 0)
+        payload["relics_opened_session"] = int(
+            self.data.get("relics_opened_session") or 0)
+        payload["last_relic_at"] = self.data.get("last_relic_at")
+        return payload
 
     def _rotate_locked(self, sessions):
         try:
@@ -335,14 +407,23 @@ class FarmStatsCollector:
         поток или ``None`` (нет лога/модуля — статистика просто выключена)."""
         if not self.attach():
             return None
+        # 1.0.0 (t35): каждый запуск приложения — новый сеанс; предыдущий
+        # закрывается (ended_utc) и остаётся в истории.
+        if bool(self.cfg.get("farm_stats_new_session_on_start", True)):
+            with self._lock:
+                self._begin_app_session_locked()
         logp = _load_log_parser()
         try:
             poll_ms = int(self.cfg.get("log_poll_ms", 500) or 500)
         except Exception:
             poll_ms = 500
         try:
+            # 1.0.0 (t35): новый сеанс на запуск — не перечитываем старый лог
+            start_at_end = bool(self.cfg.get(
+                "farm_stats_new_session_on_start", True))
             tailer = logp.EeLogTailer(self.path, on_event=self.on_event,
-                                      poll_ms=poll_ms, start_at_end=False,
+                                      poll_ms=poll_ms,
+                                      start_at_end=start_at_end,
                                       log_func=self.logger)
             tailer.start()
             self._tailer = tailer
@@ -379,12 +460,29 @@ class FarmStatsCollector:
         self.save()
 
     def reset(self):
-        """Сбрасывает статистику (файл и память)."""
+        """Сбросить ТОЛЬКО текущий сеанс (лут и счётчик).
+
+        1.0.0 (t35): история прошлых сеансов и ``relics_opened_total``
+        сохраняются — «Сбросить» не удаляет прошлое.
+        """
         with self._lock:
-            self.data = self._empty()
+            cur = self._current_session_locked()
+            if cur is not None:
+                cur["drops"] = []
+                cur["screens_opened"] = 0
+                cur["relics_opened"] = 0
+                cur["total_value"] = 0
+                cur["priced_drops"] = 0
+                cur["best_drop"] = None
+                cur["last_rel_time"] = None
+                cur["marks"] = []
+            self.data["relics_opened_session"] = 0
+            self.data["last_relic_at"] = None
             self._cur_keys = set()
             self._cur_max_rel = None
+            self._open_keys = set()
         self.save()
+        self._notify()
         return True
 
     # ── события ─────────────────────────────────────────────────────────
@@ -439,26 +537,47 @@ class FarmStatsCollector:
             self._cur_keys.add(key)
             self._recompute_session_locked(sess)
         self._request_price(drop)
+        self.save()
+        self._notify()
 
     def _handle_open(self, ev):
         rel = _to_float(ev.get("time"))
         with self._lock:
+            # 1.0.0 (t35): один и тот же экран не должен давать +2
+            key = (rel, str(ev.get("path") or ev.get("screen") or ""))
+            if key in self._open_keys:
+                return
+            self._open_keys.add(key)
+            if len(self._open_keys) > 5000:
+                self._open_keys = set(list(self._open_keys)[-2000:])
             sess = self._ensure_session_locked(rel)
             if self._replay_skip_locked(rel):
                 return
             sess["screens_opened"] = int(sess.get("screens_opened") or 0) + 1
+            utc = self._event_utc_locked(sess, rel)
+            sess["last_relic_at"] = utc
+            # 1.0.0: «Открыто реликвий» — сессия и накопительный total
+            self.data["relics_opened_total"] = int(
+                self.data.get("relics_opened_total") or 0) + 1
+            self.data["relics_opened_session"] = int(
+                self.data.get("relics_opened_session") or 0) + 1
+            self.data["last_relic_at"] = utc
+        self.save()
+        self._notify()
 
-    def mark_picked(self, name, price=None, index=None):
+    def mark_picked(self, name, price=None, index=None, tradable=None):
         """«Взято: <name>» у последнего дропа текущей игровой сессии.
 
         Вызывается по Alt+1…4 (после OCR-скана наград). Пишет
-        ``picked_name``/``picked_price``/``picked_index`` в последний дроп
+        ``picked_name``/``picked_price``/``picked_index`` (и
+        ``picked_tradable`` — 1.0.0: можно ли продать) в последний дроп
         активной сессии и сохраняет ``farm_stats.json``. ``False`` — дропов
         ещё нет (писать некуда).
         """
         name = str(name or "").strip()
         if not name:
             return False
+        name = self._canonical(name)
         with self._lock:
             sess = self._current_session_locked()
             if sess is None:
@@ -481,17 +600,24 @@ class FarmStatsCollector:
                                         if index is not None else None)
             except Exception:
                 drop["picked_index"] = None
+            if tradable is None:
+                drop["picked_tradable"] = None
+            else:
+                drop["picked_tradable"] = bool(tradable)
+                drop["tradable"] = bool(tradable)
             drop["picked_utc"] = float(self.clock())
             self._recompute_session_locked(sess)
         self.save()
+        self._notify()
         return True
 
     def record_pick(self, name, price=None, index=None, slug=None,
-                    ts=None):
+                    ts=None, tradable=None):
         """Записать взятый лут, даже если EE.log ещё не дал дроп."""
         name = str(name or "").strip()
         if not name:
             return False
+        name = self._canonical(name, str(slug or ""))
         now = float(ts if ts is not None else self.clock())
         with self._lock:
             sess = self._current_session_locked()
@@ -502,19 +628,24 @@ class FarmStatsCollector:
                 "slug": slug, "name": name,
                 "price": (int(price) if price is not None else None),
                 "priced": price is not None,
+                "tradable": (None if tradable is None else bool(tradable)),
                 "picked_name": name,
                 "picked_price": (int(price) if price is not None else None),
                 "picked_index": (int(index) if index is not None else None),
+                "picked_tradable": (None if tradable is None
+                                    else bool(tradable)),
                 "picked_utc": now,
             }
             sess.setdefault("drops", []).append(drop)
             self._recompute_session_locked(sess)
         self.save()
+        self._notify()
         return True
 
     def picked_loot(self, limit=200):
         """Взятые предметы (Alt+1…4), новые сверху."""
         out = []
+        order = 0
         with self._lock:
             for sess in self.data.get("sessions") or []:
                 started = sess.get("started_utc")
@@ -522,6 +653,7 @@ class FarmStatsCollector:
                     name = str(drop.get("picked_name") or "").strip()
                     if not name:
                         continue
+                    order += 1
                     item = copy.deepcopy(drop)
                     item["picked_name"] = name
                     item["picked_price"] = _to_int(drop.get("picked_price"))
@@ -529,8 +661,13 @@ class FarmStatsCollector:
                                           or _to_float(drop.get("utc"))
                                           or started or 0.0)
                     item["session_started_utc"] = started
+                    item["_order"] = order
                     out.append(item)
-        out.sort(key=lambda d: d.get("picked_utc") or 0.0, reverse=True)
+        # при равном времени побеждает более поздняя запись (порядок добавления)
+        out.sort(key=lambda d: (d.get("picked_utc") or 0.0,
+                                d.get("_order") or 0), reverse=True)
+        for item in out:
+            item.pop("_order", None)
         return out[:max(1, int(limit))]
 
     def picked_stats(self):
@@ -567,6 +704,40 @@ class FarmStatsCollector:
             "priced_drops": sum(1 for d in loot
                                 if d.get("picked_price") is not None),
             "loot": loot,
+        }
+
+    def drop_stats(self):
+        """Компактные показатели «Дропа» для 4 карточек (1.0.0).
+
+        Возвращает:
+          * ``relics_total``/``relics_session`` — открыто реликвий (EE.log);
+          * ``last_relic_at`` — время последней реликвии (UTC) или ``None``;
+          * ``last_pick`` — предмет из ПОСЛЕДНЕЙ отметки Alt+1…4
+            (``picked_name``/``picked_price``/``picked_utc``) или ``None``;
+          * ``selected_count``/``selected_sum`` — выбранное (Alt+1…4);
+          * ``avg_per_hour``/``hours`` — средний доход (hours<0.05 → 0);
+          * ``log_available``/``log_path`` — доступен ли EE.log.
+
+        Наград из EE.log в UI не показываем: карточка «Последний дроп»
+        строится только по отметкам Alt+1…4 (записи ``record_pick``/сессии).
+        """
+        base = self.picked_stats()
+        last_pick = self.picked_loot(1)
+        with self._lock:
+            total = int(self.data.get("relics_opened_total") or 0)
+            session = int(self.data.get("relics_opened_session") or 0)
+            last_relic_at = _to_float(self.data.get("last_relic_at"))
+        return {
+            "relics_total": total,
+            "relics_session": session,
+            "last_relic_at": last_relic_at,
+            "last_pick": last_pick[0] if last_pick else None,
+            "selected_count": int(base.get("relics_opened", 0) or 0),
+            "selected_sum": int(base.get("total_value", 0) or 0),
+            "avg_per_hour": float(base.get("avg_per_hour", 0.0) or 0.0),
+            "hours": float(base.get("hours", 0.0) or 0.0),
+            "log_available": bool(self.path),
+            "log_path": str(self.path or ""),
         }
 
     def _session_id_for_started(self, started):
@@ -634,6 +805,182 @@ class FarmStatsCollector:
         self._cur_max_rel = None
         self._cur_keys = set()
         self._replaying = False
+
+    @staticmethod
+    def _canonical(name, slug=""):
+        try:
+            import display_name
+            return display_name.canonical_name(slug or "", name or "")
+        except Exception:
+            return str(name or "")
+
+    # ── 1.0.0 (t35): сеансы «Дропа» ────────────────────────────────────
+    HISTORY_SESSIONS = 5
+
+    def _trim_history_locked(self):
+        """Оставить не более 5 завершённых сеансов + текущий."""
+        sessions = self.data.get("sessions") or []
+        completed = [s for s in sessions if s.get("ended_utc") is not None]
+        if len(completed) <= self.HISTORY_SESSIONS:
+            return
+        keep = set(id(s) for s in completed[-self.HISTORY_SESSIONS:])
+        self.data["sessions"] = [
+            s for s in sessions
+            if s.get("ended_utc") is None or id(s) in keep]
+        self._trim_history_locked()
+
+    def _begin_app_session_locked(self):
+        """Закрыть предыдущий сеанс и начать новый (запуск приложения)."""
+        if self._app_session_started:
+            return self._current_session_locked()
+        self._app_session_started = True
+        sessions = self.data.setdefault("sessions", [])
+        active = self._current_session_locked()
+        if active is not None:
+            active["ended_utc"] = float(self.clock())
+        self._trim_history_locked()
+        now = float(self.clock())
+        sess = {
+            "id": self._new_id(now),
+            "log_path": self.path or "",
+            "started_utc": now,
+            "anchor_source": "clock",
+            "ended_utc": None,
+            "last_rel_time": None,
+            "last_file_size": self._file_size(),
+            "relics_opened": 0,
+            "screens_opened": 0,
+            "total_value": 0,
+            "priced_drops": 0,
+            "best_drop": None,
+            "drops": [],
+            "marks": [],
+        }
+        sessions.append(sess)
+        self.data["relics_opened_session"] = 0
+        self.data["last_relic_at"] = None
+        self._cur_max_rel = None
+        self._cur_keys = set()
+        self._open_keys = set()
+        self._replaying = False
+        return sess
+
+    def _marks_of_session(self, sess):
+        """Отметки Alt+1…4 сеанса: ``[{name, price, slug, at}]``."""
+        marks = []
+        started = _to_float(sess.get("started_utc")) or 0.0
+        for drop in sess.get("drops") or []:
+            name = str(drop.get("picked_name") or "").strip()
+            if not name:
+                continue
+            at = (_to_float(drop.get("picked_utc"))
+                  or _to_float(drop.get("utc")))
+            if not at:
+                rel = _to_float(drop.get("rel_time"))
+                at = (started + rel) if (rel is not None and started) else 0.0
+            marks.append({
+                "name": name,
+                "price": _to_int(drop.get("picked_price")),
+                "slug": str(drop.get("slug") or ""),
+                "at": at,
+            })
+        for mark in sess.get("marks") or []:
+            if not isinstance(mark, dict):
+                continue
+            name = str(mark.get("name") or "").strip()
+            if not name:
+                continue
+            if any(m["name"] == name and m["at"] == _to_float(mark.get("at"))
+                   for m in marks):
+                continue
+            marks.append({"name": name,
+                          "price": _to_int(mark.get("price")),
+                          "slug": str(mark.get("slug") or ""),
+                          "at": _to_float(mark.get("at")) or started})
+        marks.sort(key=lambda m: m.get("at") or 0.0)
+        return marks
+
+    def completed_sessions(self, limit=None):
+        """Завершённые сеансы, новые сверху (по ``ended_utc``)."""
+        limit = self.HISTORY_SESSIONS if limit is None else int(limit)
+        with self._lock:
+            items = [copy.deepcopy(s) for s in self.data.get("sessions") or []
+                     if s.get("ended_utc") is not None]
+        items.sort(key=lambda s: _to_float(s.get("ended_utc")) or 0.0,
+                   reverse=True)
+        return items[:max(1, limit)]
+
+    def current_session(self):
+        with self._lock:
+            cur = self._current_session_locked()
+            return copy.deepcopy(cur) if cur is not None else None
+
+    def session_view(self, view="current"):
+        """Данные выбранного сеанса для карточек и списка «Лут».
+
+        ``view``: ``current``, ``prev``, ``prev2``. Возвращает словарь с
+        ``marks``, ``relics``, ``selected_count``/``sum``, ``avg_per_hour``,
+        ``hours``, ``last_pick``, ``session`` (или ``None``).
+        """
+        view = str(view or "current")
+        sess = None
+        if view == "current":
+            sess = self.current_session()
+        else:
+            index = 0 if view == "prev" else 1
+            completed = self.completed_sessions(self.HISTORY_SESSIONS)
+            if len(completed) > index:
+                sess = completed[index]
+        if sess is None:
+            return {"view": view, "session": None, "marks": [],
+                    "relics": 0, "selected_count": 0, "selected_sum": 0,
+                    "avg_per_hour": 0.0, "hours": 0.0, "last_pick": None,
+                    "empty": True}
+        marks = self._marks_of_session(sess)
+        total = sum(m.get("price") or 0 for m in marks)
+        started = _to_float(sess.get("started_utc")) or 0.0
+        ended = _to_float(sess.get("ended_utc"))
+        now = ended if ended else float(self.clock())
+        hours = ((now - started) / 3600.0
+                 if started and now >= started else 0.0)
+        best = None
+        for mark in marks:
+            if mark.get("price") is None:
+                continue
+            if best is None or mark["price"] > (best.get("price") or 0):
+                best = mark
+        last = marks[-1] if marks else None
+        return {
+            "view": view,
+            "session": sess,
+            "marks": marks,
+            "relics": int(sess.get("screens_opened") or 0),
+            "selected_count": len(marks),
+            "selected_sum": int(total),
+            "avg_per_hour": (total / hours if hours >= 0.05 else 0.0),
+            "hours": hours,
+            "last_pick": last,
+            "best_drop": best,
+            "empty": not marks,
+        }
+
+    def session_label(self, view="current"):
+        """Заголовок сеанса: «Прошлый · 22.11 21:40» (локальное время)."""
+        data = self.session_view(view)
+        sess = data.get("session") or {}
+        titles = {"current": "Текущий", "prev": "Прошлый",
+                  "prev2": "Позапрошлый"}
+        title = titles.get(str(view), "Текущий")
+        stamp = _to_float(sess.get("started_utc"))
+        if not stamp:
+            stamp = _to_float(sess.get("ended_utc"))
+        if not stamp:
+            return title
+        try:
+            text = time.strftime("%d.%m %H:%M", time.localtime(stamp))
+        except Exception:
+            return title
+        return f"{title} · {text}"
 
     def _requeue_unpriced(self):
         """F4: дропы с ``priced=false`` — в очередь на повторный запрос цены.
@@ -744,6 +1091,7 @@ class FarmStatsCollector:
         sessions = self.data["sessions"]
         if len(sessions) > max_n:
             self.data["sessions"] = sessions[-max_n:]
+        self._trim_history_locked()
         return sess
 
     def _close_active_locked(self):
@@ -891,10 +1239,12 @@ class FarmStatsCollector:
         price = None
         name = None
         ducats = None
+        tradable = None
         if isinstance(info, dict):
             price = info.get("price")
             name = info.get("name") or info.get("market_name")
             ducats = info.get("ducats")
+            tradable = info.get("tradable")
         price = _to_int(price)
         with self._lock:
             drop["price"] = price
@@ -903,10 +1253,15 @@ class FarmStatsCollector:
                 drop["name"] = name
             if ducats is not None:
                 drop["ducats"] = ducats
+            if tradable is not None:
+                drop["tradable"] = bool(tradable)
+                if drop.get("picked_name"):
+                    drop["picked_tradable"] = bool(tradable)
             sess = self._find_session_locked(drop)
             if sess is not None:
                 self._recompute_session_locked(sess)
         self.save()
+        self._notify()
 
     def _find_session_locked(self, drop):
         for s in self.data.get("sessions") or []:
