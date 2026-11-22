@@ -1624,7 +1624,7 @@ def build_toast_stack():
                     item_name, self)
                 if chip is not None and chip.text():
                     chip.show()
-                    body.addWidget(chip)
+                    body.addWidget(chip, 0, Qt.AlignLeft)
                     if not getattr(self, "icon_badge", None):
                         tw, th = _ii.part_badge_size(
                             str(record.get("item_slug") or ""), item_name)
