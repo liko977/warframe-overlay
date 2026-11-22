@@ -75,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -191,6 +191,8 @@ DEFAULT_CONFIG = {
     "monitor": 1,                    # 1 = основной монитор (mss)
     "base_width": 1920,
     "base_height": 1080,
+    "scan_preset": "auto",           # 1.0.3: раскладка скана (без калибровки)
+    "scan_custom": {},
     "card_width": 242,               # ширина карточки (968/4, вплотную)
     "card_pitch": 242,               # шаг между карточками (= ширине)
     "cards_center_x": 960,           # центр ряда карточек = W/2
@@ -2111,131 +2113,46 @@ def scan_calibration_line(geometry, source="конфиг", geom=None):
 
 
 def init_scan_calibration(cfg, geom=None):
-    """Старт: применить сохранённую калибровку (если она есть в config)."""
-    mod = scan_calibrate_module()
+    """1.0.3: применить пресет раскладки, калибровку игнорировать."""
+    mod = scan_presets_module()
     if mod is None:
         return None
-    try:
-        saved = mod.normalize_calibration(cfg.get("scan_calibration"))
-    except Exception as e:
-        log(f"Калибровка: сохранённая запись не читается ({type(e).__name__})")
-        return None
-    if not saved:
-        return None
-    try:
-        applied = mod.apply_geometry(cfg, saved)
-    except Exception as e:
-        log(f"Калибровка: не применилась ({type(e).__name__}: {e})")
-        return None
-    if applied:
-        log(scan_calibration_line(saved, "конфиг", geom))
-    return saved
-
-
-_STALE_CALIB_LOGGED = False
-
-
-def _log_stale_calibration(saved, detected):
-    global _STALE_CALIB_LOGGED
-    if _STALE_CALIB_LOGGED:
-        return
-    _STALE_CALIB_LOGGED = True
-    try:
-        old = "/".join(str(int(round(float(x))))
-                       for x in (saved.get("lefts") or []))
-        new = "/".join(str(int(round(float(x))))
-                       for x in (detected.get("lefts") or []))
-        log(f"Калибровка устарела (конфиг {old}, распознано {new}) — "
-            "использую авто")
-    except Exception:
-        pass
+    width = float((geom or {}).get("width")
+                  or cfg.get("base_width") or 1920)
+    height = float((geom or {}).get("height")
+                   or cfg.get("base_height") or 1080)
+    pid = mod.ensure_preset(cfg)
+    geometry = mod.scan_geometry(cfg, width, height)
+    mod.apply_geometry(cfg, geometry)
+    log(mod.preset_log_line(geometry))
+    if cfg.get("scan_calibration"):
+        log("Калибровка: старая scan_calibration игнорируется (t78)")
+    cfg["_scan_preset_logged"] = pid
+    return geometry
 
 
 def scan_geometry_effective(cfg, frame=None, calib_cache=None,
                             ui_scale=None):
-    """Геометрия для текущего кадра: ``(cfg_eff, geometry|None, источник)``.
-
-    Приоритет (1.0.0): сохранённая калибровка (t4) → авто-определение по
-    кадру (t4, кэш на сессию) → встроенные цифры WFInfo × UI scale →
-    ручной конфиг. Сохранённую калибровку ставит ``init_scan_calibration``.
-    """
-    mod = scan_calibrate_module()
-    saved = None
-    if mod is not None:
-        try:
-            saved = mod.normalize_calibration(cfg.get("scan_calibration"))
-        except Exception:
-            saved = None
-    if saved is not None:
-        # t73: не доверять устаревшей калибровке — сверяем с кадром
-        if mod is not None and frame is not None:
-            try:
-                hint = (wfinfo_geometry(ui_scale, cfg)
-                        if reward_geometry_module() else None)
-                detected = mod.detect_geometry(frame, expected=0, hint=hint)
-            except Exception:
-                detected = None
-            if detected:
-                old_lefts = [float(x) for x in (saved.get("lefts") or [])]
-                new_lefts = [float(x) for x in (detected.get("lefts") or [])]
-                diff = 0.0
-                if old_lefts and new_lefts:
-                    if len(old_lefts) != len(new_lefts):
-                        diff = 999.0
-                    else:
-                        diff = max(abs(a - b) for a, b in
-                                   zip(old_lefts, new_lefts))
-                old_pitch = float(saved.get("card_pitch")
-                                  or saved.get("pitch") or 0)
-                new_pitch = float(detected.get("card_pitch")
-                                  or detected.get("pitch") or 0)
-                pitch_diff = abs(old_pitch - new_pitch) if old_pitch and new_pitch else 0
-                if diff > 20 or pitch_diff > 20:
-                    _log_stale_calibration(saved, detected)
-                    try:
-                        applied = mod.apply_geometry(dict(cfg), detected)
-                    except Exception:
-                        applied = {}
-                    if applied:
-                        cfg_eff = dict(cfg)
-                        cfg_eff.update(applied)
-                        return cfg_eff, detected, "авто"
-        return cfg, None, "конфиг"
-    if mod is not None and frame is not None:
-        hint = wfinfo_geometry(ui_scale, cfg) if reward_geometry_module() else None
-        try:
-            geometry, source = mod.resolve_geometry(
-                cfg, frame=frame, expected=0, cache=calib_cache, hint=hint)
-        except Exception as e:
-            log(f"Калибровка: авто-определение не удалось "
-                f"({type(e).__name__}: {e})")
-            geometry, source = None, "конфиг"
-        if geometry and source == "авто":
-            try:
-                applied = mod.apply_geometry(dict(cfg), geometry)
-            except Exception:
-                applied = {}
-            if applied:
-                cfg_eff = dict(cfg)
-                cfg_eff.update(applied)
-                return cfg_eff, geometry, "авто"
-    # встроенные цифры WFInfo (под текущий UI scale) — точнее старых констант
-    rg = reward_geometry_module()
-    if rg is not None:
-        ui = ui_scale if ui_scale else warframe_ui_scale(cfg)[0]
-        try:
-            values = rg.config_values(ui)
-        except Exception:
-            values = {}
-        if values:
+    """1.0.3: геометрия только из пресета (калибровка игнорируется)."""
+    mod = scan_presets_module()
+    if mod is None:
+        rg = reward_geometry_module()
+        if rg is not None:
+            values = rg.config_values(ui_scale or 1.0)
             cfg_eff = dict(cfg)
-            cfg_eff.update(values)
-            try:
-                geometry = rg.geometry(ui)
-            except Exception:
-                geometry = None
-            return cfg_eff, geometry, "wfinfo"
-    return cfg, None, "конфиг"
+            cfg_eff.update(values or {})
+            return cfg_eff, rg.geometry(ui_scale or 1.0), "wfinfo"
+        return cfg, None, "конфиг"
+    width = float(cfg.get("base_width") or 1920)
+    height = float(cfg.get("base_height") or 1080)
+    mod.ensure_preset(cfg)
+    geometry = mod.scan_geometry(cfg, width, height)
+    cfg_eff = dict(cfg)
+    mod.apply_geometry(cfg_eff, geometry)
+    if not cfg.get("_scan_preset_logged"):
+        log(mod.preset_log_line(geometry))
+        cfg["_scan_preset_logged"] = geometry.get("preset")
+    return cfg_eff, geometry, "preset"
 
 
 def save_scan_calibration(cfg, payload):
@@ -2316,9 +2233,17 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
         cfg, base_img, calib_cache, ui_scale=ui_scale)
     # t31: число найденных рамок — источник истины для раскладки 1/2/3/4
     frames_found = 0
-    if source == "авто" and isinstance(geometry, dict):
+    if source in ("авто", "preset") and isinstance(geometry, dict):
         try:
             frames_found = int(geometry.get("frames_found") or 0)
+        except Exception:
+            frames_found = 0
+    if not frames_found:
+        # t78: пресет задаёт координаты, но число рамок берём с кадра
+        try:
+            _mod = scan_calibrate_module()
+            _det = _mod.detect_geometry(base_img) if _mod is not None else None
+            frames_found = int((_det or {}).get("frames_found") or 0)
         except Exception:
             frames_found = 0
     band = dict(cfg_eff["scan_band"])
@@ -6245,6 +6170,15 @@ def icon_pack_module():
     return _load_local_module("icon_pack.py", "icon_pack", _ICON_PACK_MODULE)
 
 
+def scan_presets_module():
+    """Модуль ``scan_presets.py`` (1.0.3) или None."""
+    try:
+        import scan_presets
+        return scan_presets
+    except Exception:
+        return None
+
+
 def scan_calibrate_module():
     """Авто-калибровка скана (scan_calibrate.py); модуль опционален."""
     return _load_local_module("scan_calibrate.py", "scan_calibrate",
@@ -7300,6 +7234,13 @@ class Scanner:
                     "matched": False, "sell_online": 0, "best_sell": None,
                     "best_buy": None, "ducats": None, "error": None,
                 })
+            preset_id = str(self.cfg.get("scan_preset") or "auto")
+            if getattr(self, "_preset_warned", None) != preset_id:
+                named = sum(1 for d in preliminary if d.get("name"))
+                if preliminary and named * 2 < len(preliminary):
+                    self._preset_warned = preset_id
+                    log(f"Раскладка: распознано {named}/{len(preliminary)} "
+                        "— попробуйте другой пресет")
             if gen == self.generation:
                 started = time.time()
                 self._plates_ms = (time.time() - t0) * 1000
@@ -7610,6 +7551,23 @@ def run_gui(cfg):
             app.setWindowIcon(brand_icon)
     except Exception:
         pass
+    # 1.0.3: только один экземпляр приложения
+    _single = None
+    try:
+        import single_instance
+        _single = single_instance.acquire(logger=log)
+        if _single.state == "second":
+            log("Уже запущено — окно поднято, выхожу")
+            return
+        if _single.state == "normal":
+            log(f"Один экземпляр: сокет недоступен "
+                f"({_single.error or 'таймаут'}) — продолжаю запуск")
+        elif _single.stale:
+            log("Один экземпляр: устаревший сокет снят")
+    except Exception as e:
+        log(f"Один экземпляр: проверка не удалась "
+            f"({type(e).__name__}: {e}) — продолжаю запуск")
+
     geom = make_geometry(cfg)
     # 1.0.0: миграция статуса — убираем устаревший авто-режим из старых config
     try:
@@ -8226,6 +8184,32 @@ def run_gui(cfg):
             unified = None
             drops_panel = None
             manager.unified_window = None
+
+    def _raise_primary_window():
+        try:
+            target = unified
+            if target is not None:
+                target.showNormal()
+                target.show()
+                target.raise_()
+                target.activateWindow()
+            for widget in app.topLevelWidgets():
+                if widget.isWindow():
+                    if widget.isMinimized():
+                        widget.showNormal()
+                    widget.show()
+                    widget.raise_()
+                    widget.activateWindow()
+            log("Второй запуск: окно поднято")
+        except Exception as e:
+            log(f"Второй запуск: окно не поднято "
+                f"({type(e).__name__}: {e})")
+
+    if _single is not None and _single.state == "primary":
+        try:
+            _single.show_requested.connect(_raise_primary_window)
+        except Exception:
+            pass
 
     # 1.0.0: «Дроп» обновляет показатели по событиям (лог/отметки/сброс),
     # а не по таймеру каждую секунду
@@ -9363,6 +9347,13 @@ def run_gui(cfg):
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            if _single is not None:
+                _single.close()
+                import single_instance
+                single_instance.close()
+        except Exception:
+            pass
         try:
             _icons_stop.set()
         except Exception:
