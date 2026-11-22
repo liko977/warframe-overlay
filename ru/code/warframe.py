@@ -75,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -180,8 +180,10 @@ DEFAULT_CONFIG = {
     "ocr_languages": ["ru", "en"],   # русская + английская игра
 
     # ── обновления ──────────────────────────────────────────────────────
-    "update_url": "",                # загрузки обновлений нет
+    "update_url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/update.json",
     "update_check": False,           # не обращаемся к GitHub
+    "update_disabled": False,        # 1.0.5: отключение проверок
+    "config_version": 2,             # 1.0.5: версия схемы конфига
     "update_check_interval_min": 180,  # автопроверка раз в 3 часа
     "last_update_notified": "",      # одна нотификация на версию
 
@@ -279,8 +281,9 @@ DEFAULT_CONFIG = {
     "notify_only_when_game_focused": False,   # True — только когда игра в фокусе
     "notify_skip_when_game_focused": False,   # True — только когда игра НЕ в фокусе
     "notify_events": ["order_bought", "price_drop", "baro_arrival",
-                      "baro_leaving", "fissure_ending", "chat"],
+                      "baro_leaving", "fissure_ending", "chat", "pick"],
     "notify_cooldown_min": 10,       # анти-спам: не чаще раза в N минут
+    "notify_pick_toast": True,        # 1.0.5: тост при Alt+1…4
     "notify_price_drop_pct": 10,     # «цена ниже моей»: на сколько % ниже
     "notify_fissure_tiers": ["Axi", "Neo"],   # эры фиссур для уведомлений
     "notify_poll_sec": 60,           # период фоновой проверки ордеров/событий
@@ -626,6 +629,69 @@ def deep_merge(base, extra):
     return out
 
 
+CONFIG_VERSION = 2
+DEFAULT_UPDATE_URL = ("https://raw.githubusercontent.com/liko977/"
+                      "warframe-overlay/main/ru/update.json")
+
+
+def _write_config(cfg, path):
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(cfg, handle, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _migrate_config(cfg, raw):
+    """Идемпотентная миграция конфига v1→v2. Возвращает (cfg, N)."""
+    raw = raw if isinstance(raw, dict) else {}
+    changed = 0
+    old_version = int(raw.get("config_version") or 1)
+    # пустая строка = «не задано»; выключение только через update_disabled
+    if not str(cfg.get("update_url") or "").strip():
+        cfg["update_url"] = DEFAULT_UPDATE_URL
+        changed += 1
+    if "update_disabled" not in cfg:
+        cfg["update_disabled"] = False
+        changed += 1
+    if old_version < CONFIG_VERSION:
+        if str(raw.get("icons_auto_download") or "").strip():
+            if not raw.get("icons_allow_manual_download"):
+                cfg["icons_allow_manual_download"] = bool(
+                    raw.get("icons_auto_download"))
+                changed += 1
+        # все отсутствующие новые ключи уже добавлены deep_merge ранее
+        cfg["config_version"] = CONFIG_VERSION
+        changed += 1
+        log(f"Конфиг: миграция v1→v2 (обновлено {changed} ключей)")
+        return cfg, changed
+    # самопроверка критичных ключей
+    try:
+        import scan_presets
+        presets = {pid for pid, _ in scan_presets.PRESETS}
+        if str(cfg.get("scan_preset") or "") not in presets:
+            cfg["scan_preset"] = "auto"
+            log("Конфиг: scan_preset восстановлен по умолчанию")
+            changed += 1
+    except Exception:
+        pass
+    for key in ("card_width", "card_pitch", "card_top"):
+        try:
+            value = float(cfg.get(key) or 0)
+        except Exception:
+            value = 0
+        if value <= 0:
+            cfg[key] = DEFAULT_CONFIG.get(key)
+            log(f"Конфиг: {key} восстановлен по умолчанию")
+            changed += 1
+    if not str(cfg.get("update_url") or "").strip():
+        cfg["update_url"] = DEFAULT_UPDATE_URL
+        log("Конфиг: update_url восстановлен по умолчанию")
+        changed += 1
+    return cfg, changed
+
+
 def load_config(path=CONFIG_PATH):
     cfg = dict(DEFAULT_CONFIG)
     raw = {}
@@ -644,6 +710,9 @@ def load_config(path=CONFIG_PATH):
             log(f"Создан конфиг: {path}")
         except Exception as e:
             log(f"Конфиг не создан: {e}")
+    cfg, _migrated = _migrate_config(cfg, raw)
+    if _migrated:
+        _write_config(cfg, path)
     # миграция со старых конфигов: F8 был сканом, теперь это редактор
     if isinstance(raw, dict) and "hotkey_editor" not in raw:
         if str(raw.get("hotkey_scan", "")).lower() == "f8":
@@ -983,6 +1052,25 @@ def pick_toast_record(result, duplicate=False, cfg=None):
         "item_thumb": item.get("thumb") or "",
         "item_icon": item.get("icon") or "",
     }
+
+
+def pick_history_record(result, duplicate=False):
+    """Запись истории «Взято» для Alt+1…4."""
+    record = pick_toast_record(result, duplicate=duplicate, cfg=None)
+    item = result.get("item") if isinstance(result.get("item"), dict) else {}
+    name = str(result.get("name") or item.get("market_name")
+               or item.get("name") or "предмет")
+    price = result.get("price", item.get("price"))
+    text = name + (f" — {int(price)}p" if isinstance(price, (int, float))
+                   and price else "")
+    record.update({
+        "id": "pick-" + (str(item.get("slug") or name).strip() or "item"),
+        "kind": "pick",
+        "title": "Взято",
+        "text": text,
+        "action": "drops",
+    })
+    return record
 
 
 def assess_set_price(part_price, set_price, parts_prices=None):
@@ -6760,6 +6848,7 @@ def save_config_keys(cfg, values, path=CONFIG_PATH):
     отдельно через :func:`save_market_token` и не логируется.
     """
     values = dict(values or {})
+    values.setdefault("config_version", CONFIG_VERSION)
     raw = {}
     try:
         if os.path.exists(path):
@@ -8781,6 +8870,8 @@ def run_gui(cfg):
 
     def _show_pick_toast(result, duplicate=False):
         """Эфемерный тост «Добавлено/Уже в дропах» — без центра/бейджа."""
+        if not bool(cfg.get("notify_pick_toast", True)):
+            return None
         if center_mod is None or not callable(
                 getattr(center_mod, "dispatch_toast_only", None)):
             return None
@@ -8788,10 +8879,38 @@ def run_gui(cfg):
         try:
             return center_mod.dispatch_toast_only(
                 record, cfg=cfg, toast_stack=toast_stack,
-                login_check=login_in_progress)
+                login_check=login_in_progress, force=True)
         except Exception as exc:
             log(f"  Дроп: тост не показан ({type(exc).__name__}: {exc})")
             return None
+
+    def _record_pick_history(result, duplicate=False):
+        """История центра уведомлений для Alt+1…4 (kind=pick)."""
+        if not bool(cfg.get("notify_enabled", True)):
+            return False
+        events = cfg.get("notify_events") or []
+        if isinstance(events, str):
+            events = [part.strip() for part in events.split(",")]
+        if "pick" not in events:
+            return False
+        if notification_store is None or center_mod is None:
+            return False
+        record = pick_history_record(result, duplicate=duplicate)
+        try:
+            stored = notification_store.add_record(record)
+            if notification_center is not None:
+                notification_center.add_record(stored)
+            if unified is not None:
+                try:
+                    count, color = notification_store.badge(cfg)
+                    unified.set_unread_badge(count, color)
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            log(f"Уведомление: отметка не записана "
+                f"({type(e).__name__}: {e})")
+            return False
 
     def pick_reward(index):
         """Alt+1…4: «взята награда №N» → «Выбрано» и «Дроп» (без угадывания)."""
@@ -8809,8 +8928,22 @@ def run_gui(cfg):
                 pass
         if result.get("ok") and (result.get("added")
                                  or result.get("reason") == "duplicate"):
-            _show_pick_toast(result,
-                             duplicate=not bool(result.get("added")))
+            duplicate = not bool(result.get("added"))
+            _show_pick_toast(result, duplicate=duplicate)
+            _record_pick_history(result, duplicate=duplicate)
+            item = result.get("item") if isinstance(result.get("item"), dict) else {}
+            name = str(result.get("name") or item.get("market_name")
+                       or item.get("name") or "предмет")
+            price = result.get("price", item.get("price"))
+            parts = []
+            if bool(cfg.get("notify_pick_toast", True)):
+                parts.append("тост")
+            if bool(cfg.get("notify_enabled", True)) and "pick" in (
+                    cfg.get("notify_events") or []):
+                parts.append("история")
+            log(f"Уведомление: отметка «{name}» — "
+                f"{int(price) if isinstance(price, (int, float)) else 0}p "
+                f"({'/'.join(parts) if parts else 'выключено'})")
         if result.get("added") and collector is not None:
             item = result.get("item") or {}
             try:
