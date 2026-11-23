@@ -19,7 +19,10 @@ import sys
 APP_NAME = "VoidFrameRU"
 
 #: Версия релиза. Должна совпадать с ``warframe.APP_VERSION``.
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
+
+#: 1.0.7: инвентарь отключён в релизе (1.1.0 остаётся в разработке).
+INVENTORY_ENABLED = False
 
 #: Ассеты, которые обязаны попасть в сборку (prepare_build_ru/spec).
 BRAND_ASSETS = ("icon.ico", "tray.png", "tray@2x.png", "logo_256.png",
@@ -69,5 +72,6 @@ def data_dir_name():
     return APP_NAME
 
 
-__all__ = ["APP_NAME", "APP_VERSION", "BRAND_ASSETS", "OLD_APP_DIR_NAMES",
+__all__ = ["APP_NAME", "APP_VERSION", "INVENTORY_ENABLED", "BRAND_ASSETS",
+           "OLD_APP_DIR_NAMES",
            "app_title", "brand_roots", "brand_path", "data_dir_name"]
