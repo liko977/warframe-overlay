@@ -970,6 +970,7 @@ def build_market_browser():
             self._catalog = []
             self._items_by_slug = {}
             self._items_by_id = {}
+            self._resolved_ids = set()
             self._selected_slug = ""
             self._details = {}
             self._orders = []
@@ -1409,8 +1410,13 @@ def build_market_browser():
         def _apply_catalog(self, catalog):
             self._busy_catalog = False
             self._catalog = list(catalog or [])
-            self._items_by_slug = {item.get("slug"): item for item in self._catalog}
-            self._items_by_id = {item.get("id"): item for item in self._catalog}
+            self._items_by_slug = {
+                item.get("slug"): item for item in self._catalog
+                if item.get("slug")}
+            self._items_by_id = {
+                item.get("id"): item for item in self._catalog
+                if item.get("id")}
+            self._resolved_ids = set()
             self._apply_filter()
             if self._orders:
                 # каталог пришёл позже ордеров — обновим названия предметов
@@ -1998,15 +2004,31 @@ def build_market_browser():
         def _order_item_name(self, order):
             embedded = (order.get("item")
                         if isinstance(order.get("item"), dict) else {})
-            item_id = order.get("itemId") or embedded.get("id")
+            item_id = str(order.get("itemId") or embedded.get("id") or "")
             item = self._items_by_id.get(item_id) or {}
-            if item.get("name"):
-                return item["name"]
+            if not item and embedded.get("slug"):
+                item = self._items_by_slug.get(embedded.get("slug")) or {}
+            if not item and embedded:
+                item = embedded
             i18n = (embedded.get("i18n")
                     if isinstance(embedded.get("i18n"), dict) else {})
             ru = i18n.get("ru") if isinstance(i18n.get("ru"), dict) else {}
-            return (ru.get("name") or embedded.get("name")
-                    or order.get("itemId") or "предмет")
+            en = i18n.get("en") if isinstance(i18n.get("en"), dict) else {}
+            name = (item.get("name") or item.get("market_name")
+                    or ru.get("name") or en.get("name")
+                    or embedded.get("name") or "предмет")
+            if str(name).strip().lower() == item_id.lower():
+                name = "предмет"
+            if item_id and item_id not in getattr(self, "_resolved_ids", set()):
+                try:
+                    self._resolved_ids.add(item_id)
+                    self._log(
+                        f"Ордер: itemId={item_id} → slug="
+                        f"{item.get('slug') or embedded.get('slug') or '?'} "
+                        f"name={name}")
+                except Exception:
+                    pass
+            return name
 
         def _order_dialog_item(self, order):
             """Предмет для формы правки — строго из ордера, не из «Поиска».
@@ -2019,15 +2041,17 @@ def build_market_browser():
             order = dict(order or {})
             embedded = (order.get("item")
                         if isinstance(order.get("item"), dict) else {})
-            item_id = order.get("itemId") or embedded.get("id") or ""
+            item_id = str(order.get("itemId") or embedded.get("id") or "")
             item = dict(self._items_by_id.get(item_id) or {}) if item_id else {}
+            if not item and embedded.get("slug"):
+                item = dict(self._items_by_slug.get(embedded.get("slug")) or {})
             if not item and embedded:               # вложенный item из ордера
                 item = dict(embedded)
             name = self._order_item_name(order)
-            item.setdefault("id", item_id or embedded.get("id"))
+            item.setdefault("id", item_id or embedded.get("id") or "")
             item.setdefault("slug", embedded.get("slug") or "")
-            item.setdefault("name", name)
-            item.setdefault("market_name", item.get("name") or name)
+            item["name"] = name
+            item["market_name"] = name
             return item
 
         def _make_order_row(self, order, index):
