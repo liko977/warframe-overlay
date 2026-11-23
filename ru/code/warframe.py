@@ -75,7 +75,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
+try:
+    from branding import INVENTORY_ENABLED
+except Exception:
+    INVENTORY_ENABLED = False
+_APPLYING_SETTINGS = False
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -155,6 +160,7 @@ DEFAULT_CONFIG = {
     "hotkey_scan": "alt+q",          # скан экрана наград (плашки)
     "hotkey_editor": "f8",           # список выбранного (редактор)
     "hotkey_events": "alt+e",        # панель игровых событий (сортис, разломы…)
+    "hotkey_inventory": "alt+i",     # 1.1.0: цены прямо в инвентаре
     "hotkey_market": "alt+m",        # окно «Маркет» (поиск, график, ордера)
     "hotkey_window": "f8",           # единое окно с вкладками
     "hotkey_aliases": True,          # Alt+E/Alt+M — быстрые алиасы вкладок
@@ -209,8 +215,8 @@ DEFAULT_CONFIG = {
     "ui_scaling": 0.0,
     # 1.0.0: тема интерфейса для диагностики: "auto" или имя темы (19 тем)
     "game_theme": "auto",
-    "overlay_offset_y": 14,          # отступ плашки от низа карточки
-    "overlay_layout": "bottom",      # "under_cards" | "bottom"
+    "overlay_offset_y": 6,           # отступ плашки от низа карточки
+    "overlay_layout": "under_cards",  # "under_cards" | "bottom"
     "overlay_top": 830,              # для layout=bottom: верх плашек (y в базовых 1080)
     "summary_top": 84,               # верх блока «Итого»
     "selected_top": 700,             # панель «Выбрано из реликвий»: верх
@@ -241,7 +247,8 @@ DEFAULT_CONFIG = {
     "currency_ducats_color": "#C9A66B",    # цвет дукатов в UI
     "show_summary": True,            # показывать блок «Итого» над плашками
     "show_item_icons": True,         # иконки предметов WFCD в UI
-    "overlay_show_set_price": True,   # «компл. N p» на карточке части
+    "overlay_show_set_price": True,
+    "show_set_progress": True,      # 1.1.0: строка набора в плашке   # «компл. N p» на карточке части
     "currency_icons": True,           # 1.0.0: иконки платины/дукатов вместо «p»/«дк»
     # ── пакет иконок предметов (1.0.0, см. icon_pack.py) ───────────────
     "icons_pack_enabled": True,      # пакет иконок включён (кнопки в настройках)
@@ -327,35 +334,34 @@ DEFAULT_CONFIG = {
 #  Мелкие утилиты
 # ─────────────────────────────────────────────────────────────────────────
 def app_log_path():
+    env = os.environ.get("WF_LOG_FILE")
+    if env:
+        return str(env)
     return os.path.join(DATA_DIR, "app.log")
 
 
 _LOG_LOCK = threading.Lock()
-LOG_MAX_BYTES = 1024 * 1024
-LOG_BACKUPS = 3
+LOG_MAX_BYTES = 8 * 1024 * 1024
+LOG_BACKUPS = 1
 
 
 def _rotate_log(path):
+    """Один архив app.log.1 при размере > 8 МБ."""
     try:
         if os.path.getsize(path) < LOG_MAX_BYTES:
-            return
-        for index in range(LOG_BACKUPS - 1, 0, -1):
-            src = f"{path}.{index}"
-            dst = f"{path}.{index + 1}"
-            if os.path.exists(src):
-                try:
-                    os.replace(src, dst)
-                except Exception:
-                    pass
+            return False
         try:
+            if os.path.exists(path + ".1"):
+                os.remove(path + ".1")
             os.replace(path, path + ".1")
         except Exception:
             try:
                 os.remove(path)
             except Exception:
                 pass
+        return True
     except Exception:
-        pass
+        return False
 
 
 def log(msg=""):
@@ -365,8 +371,10 @@ def log(msg=""):
         os.makedirs(DATA_DIR, exist_ok=True)
         path = app_log_path()
         with _LOG_LOCK:
-            _rotate_log(path)
+            rotated = _rotate_log(path)
             with open(path, "a", encoding="utf-8") as handle:
+                if rotated:
+                    handle.write("Лог: ротация (app.log → app.log.1)\n")
                 handle.write(text + "\n")
     except Exception:
         pass
@@ -1285,8 +1293,11 @@ class MarketAPI:
             return False
         rows = (data or {}).get("data") or []
         slug_to_ref = {}
+        id_by_slug = {}
         for it in rows:
             slug, ref = it.get("slug"), it.get("gameRef")
+            if slug:
+                id_by_slug[slug] = it.get("id") or ""
             if slug and ref:
                 slug_to_ref[slug] = ref
         if not slug_to_ref:
@@ -1296,7 +1307,11 @@ class MarketAPI:
             self.ref_to_slug = {ref: slug for slug, ref in slug_to_ref.items()}
             # заодно дополняем кэш предметов путями, чтобы не запрашивать снова
             for v in self.items.values():
-                if not isinstance(v, dict) or v.get("gameRef"):
+                if not isinstance(v, dict):
+                    continue
+                if not v.get("id"):
+                    v["id"] = id_by_slug.get(v.get("slug")) or ""
+                if v.get("gameRef"):
                     continue
                 ref = slug_to_ref.get(v.get("slug"))
                 if ref:
@@ -1349,6 +1364,7 @@ class MarketAPI:
                     key = normalize_name(name)
                     if key and key not in items:
                         items[key] = {"slug": slug, "name": name, "lang": lang,
+                                      "id": it.get("id") or "",
                                       "gameRef": game_ref,
                                       "icon": icon, "thumb": thumb,
                                       # 1.0.0: флаг торговли из /v2/items
@@ -1776,9 +1792,15 @@ class OcrEngine:
                     pass
             except Exception:
                 pass
-        self.reader = easyocr.Reader(
-            list(cfg.get("ocr_languages") or ["ru", "en"]),
-            gpu=use_gpu, model_storage_directory=models_dir())
+        try:
+            self.reader = easyocr.Reader(
+                list(cfg.get("ocr_languages") or ["ru", "en"]),
+                gpu=use_gpu, model_storage_directory=models_dir(),
+                quantize=not use_gpu)
+        except TypeError:
+            self.reader = easyocr.Reader(
+                list(cfg.get("ocr_languages") or ["ru", "en"]),
+                gpu=use_gpu, model_storage_directory=models_dir())
         log(f"EasyOCR готов за {time.time()-t:.1f} с")
         self._warm_done = False
 
@@ -1809,6 +1831,30 @@ class OcrEngine:
                                         decoder="greedy")
         except Exception as e:
             log(f"  OCR ошибка: {e}")
+            return []
+
+    def detect(self, img):
+        """t137: один детект CRAFT на весь кадр."""
+        return self.reader.detect(img, canvas_size=1280, mag_ratio=1.0)
+
+    def recognize(self, gray, horizontal_list, free_list):
+        """t137: одно распознавание всех боксов."""
+        return self.reader.recognize(
+            gray, horizontal_list=horizontal_list, free_list=free_list,
+            decoder="greedy", batch_size=8, detail=1, paragraph=False)
+
+    def read_proc_batch(self, procs, allowlist=None):
+        """t134: один батч EasyOCR на несколько кропов."""
+        if not procs:
+            return []
+        try:
+            kwargs = dict(paragraph=False, mag_ratio=1.0, canvas_size=960,
+                          width_ths=0.7, decoder="greedy", batch_size=8)
+            if allowlist:
+                kwargs["allowlist"] = allowlist
+            return self.reader.readtext_batched(list(procs), **kwargs)
+        except Exception as e:
+            log(f"  OCR batch ошибка: {e}")
             return []
 
 
@@ -1997,15 +2043,34 @@ def _cards_from_words(words, cfg, frames_found=None):
             groups[idx].append(w)
         note = f"  Карточек (принудительно): {n_best}"
     elif frames in (1, 2, 3, 4):
-        # источник истины — рамки детектора: 2 карточки = 2 позиции
         n_best = frames
+        # 1.1.0: 3 рамки, но текст реально в 4 канонических слотах — это
+        # 4 карточки. Считаем занятые слоты, а не слова: у одной карточки
+        # название может состоять из 2–3 слов и не должно давать фантомы.
+        _slots4 = card_lefts(4, cfg)
+        _occupied = set()
+        for _w in words:
+            _slot = min(range(4), key=lambda i: abs(
+                _w["cx"] - (_slots4[i] + cfg["card_width"] / 2.0)))
+            if abs(_w["cx"] - (_slots4[_slot] + cfg["card_width"] / 2.0)) \
+                    <= cfg["card_width"] * 0.25:
+                _occupied.add(_slot)
+        texts4 = len(_occupied)
+        if frames in (2, 3) and texts4 >= 4:
+            n_best = 4
+            frames_note = ("  Карточек: 4 (рамок: %d, текстов: %d — "
+                           "беру канонический ряд)" % (frames, texts4))
+        else:
+            frames_note = ""
+        if frames_note:
+            pass
         lefts = card_lefts(n_best, cfg)
         groups = {i: [] for i in range(n_best)}
         for w in words:
             idx = min(range(n_best),
                       key=lambda i: abs(w["cx"] - (lefts[i] + cfg["card_width"] / 2.0)))
             groups[idx].append(w)
-        note = ""
+        note = frames_note
     elif not words:
         return _empty_cards(cfg, 4), "  Нечитаемый кадр: 4 позиции «?»"
     else:
@@ -2042,11 +2107,15 @@ def _cards_from_words(words, cfg, frames_found=None):
                 pass
         if name:
             # 1.0.0: автокоррекция OCR по словарю ДО матчинга
+            card_raw = name
             name, corrected = _ocr_fix_name(name, cfg)
             name, _bp, _key = normalize_card_name(name)
+        else:
+            card_raw = ""
         cards.append({"left": float(lefts[i]),
                       "top": float(cfg["card_top"]),
-                      "name": name,
+                      "height": float(cfg.get("card_height") or 235),
+                      "name": name, "_ocr_raw": card_raw,
                       "ocr_corrected": bool(corrected),
                       "unrecognized": not bool(name)})
     if not note:
@@ -2057,45 +2126,91 @@ def _cards_from_words(words, cfg, frames_found=None):
 
 
 def _retry_unrecognized_card(base_img, card, cfg, ocr):
-    """Точечный повтор OCR только кропа названия (апскейл 1.8 + контраст)."""
+    """t112: нижние 35–45 % карточки, все строки, второй проход выше."""
     try:
         import cv2
         left = int(round(float(card.get("left") or 0)))
-        top = int(round(float(cfg["card_top"] + cfg["name_offset_y"])))
+        top = float(card.get("top") or cfg["card_top"])
+        height = float(card.get("height") or cfg["card_height"])
         width = int(cfg["card_width"])
-        height = int(cfg["name_height"])
-        x0 = max(0, left - 4)
-        y0 = max(0, top - 8)
-        x1 = min(base_img.shape[1], left + width + 4)
-        y1 = min(base_img.shape[0], top + height + 8)
-        crop = base_img[y0:y1, x0:x1]
-        if crop.size == 0:
-            return ""
-        gray = _to_gray(crop)
-        gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
-        scale = 1.8
-        proc = cv2.resize(gray, None, fx=scale, fy=scale,
-                          interpolation=cv2.INTER_CUBIC)
-        res = ocr.read_proc(proc)
-        words = _word_boxes(res, {"left": x0, "top": y0}, scale)
-        return join_words(words)
+        x0 = max(0, left)
+        x1 = min(base_img.shape[1], left + width)
+        bbox = (x0, int(top), x1 - x0, int(height))
+        best_text = ""
+        best_score = 0.0
+        for shift in (0, 12):
+            y0 = max(0, int(top + height * 0.55) - shift)
+            y1 = min(base_img.shape[0], int(top + height - 2))
+            crop = base_img[y0:y1, x0:x1]
+            if crop.size == 0:
+                continue
+            card["_crop"] = crop.copy()
+            gray = _to_gray(crop)
+            gray = cv2.createCLAHE(clipLimit=3.0,
+                                   tileGridSize=(8, 8)).apply(gray)
+            proc = cv2.resize(gray, None, fx=2.0, fy=2.0,
+                              interpolation=cv2.INTER_CUBIC)
+            try:
+                res = ocr.read_proc(proc)
+            except Exception:
+                res = []
+            words = _word_boxes(res, {"left": x0, "top": y0}, 2.0)
+            words.sort(key=lambda w: (w.get("cy", 0), w.get("cx", 0)))
+            text = join_words(words)
+            if not text:
+                continue
+            # фильтр служебных подписей игры + чистка
+            try:
+                import card_text
+                text = card_text.clean_card_name(text, cfg.get("known_nicks") or ())
+            except Exception:
+                pass
+            score = _ocr_fix_name(text, cfg)[0] and 1.0 or 0.0
+            if len(text) > len(best_text):
+                best_text, best_score = text, score
+            if best_text:
+                break
+        card["_ocr_bbox"] = bbox
+        return best_text
     except Exception:
         return ""
 
 
-def retry_unrecognized_cards(base_img, cards, cfg, ocr):
-    """Повторный OCR только для карточек без имени (не весь кадр)."""
+def retry_unrecognized_cards(base_img, cards, cfg, ocr, matcher=None,
+                             threshold=0.80):
+    """t112: повторный OCR при пустом имени или score < threshold."""
     retried = 0
     for card in cards:
-        if card.get("name"):
+        old = str(card.get("name") or "")
+        old_score = 0.0
+        if matcher and old:
+            try:
+                old_score = float(matcher(old) or 0.0)
+            except Exception:
+                old_score = 0.0
+        if old and (matcher is None or old_score >= threshold):
             continue
         retried += 1
         text = _retry_unrecognized_card(base_img, card, cfg, ocr)
-        if text:
-            name, _bp, _key = normalize_card_name(text)
-            if name:
-                card["name"] = name
-                card["unrecognized"] = False
+        card["_ocr_raw"] = text
+        if not text:
+            continue
+        try:
+            import card_text
+            text = card_text.clean_card_name(text,
+                                              cfg.get("known_nicks") or ())
+        except Exception:
+            pass
+        name, _bp, _key = normalize_card_name(text)
+        new_score = 0.0
+        if name and matcher:
+            try:
+                new_score = float(matcher(name) or 0.0)
+            except Exception:
+                new_score = 0.0
+        if name and (not old or new_score >= old_score or new_score >= 0.60):
+            card["name"] = name
+            card["unrecognized"] = not bool(name)
     return retried
 
 
@@ -2464,7 +2579,8 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
     if not cards:
         return []
     # точечный повтор только для нераспознанных карточек
-    retry_unrecognized_cards(base_img, cards, cfg_eff, ocr)
+    retry_unrecognized_cards(base_img, cards, cfg_eff, ocr,
+                            matcher=matcher)
     if matcher:
         # t85: имя валидно только при совпадении с каталогом
         for card in cards:
@@ -2477,6 +2593,15 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
     else:
         matched_now = sum(1 for c in cards if c.get("name"))
     log(f"  наград: {len(cards)}, распознано {matched_now}")
+    if matched_now == 0:
+        for index, card in enumerate(cards, 1):
+            raw = str(card.get("_ocr_raw") or "")
+            bbox = card.get("_ocr_bbox") or (int(card.get("left") or 0),
+                                             int(card.get("top") or 0),
+                                             int(card.get("width") or 0),
+                                             int(card.get("height") or 0))
+            log(f"  имя: raw={raw!r} ({'пусто после OCR' if not raw else 'OCR'}) "
+                f"score={float(card.get('score') or 0):.2f} bbox={bbox}")
     for index, card in enumerate(cards, 1):
         score = 0.0
         if matcher and card.get("name"):
@@ -2742,6 +2867,10 @@ def build_overlays():
             set_row.addWidget(self.lbl_set)
             set_row.addWidget(self.btn_set_market)
             set_row.addStretch(1)
+            self.lbl_set_progress = QLabel("")
+            self.lbl_set_progress.setStyleSheet(
+                "color:#93A1B5; background:transparent; font-size:10px;")
+            self.lbl_set_progress.setVisible(False)
 
             bot = QHBoxLayout()
             bot.setContentsMargins(0, 0, 0, 0)
@@ -2770,6 +2899,7 @@ def build_overlays():
             lay.addLayout(chip_row)
             lay.addLayout(mid)
             lay.addLayout(set_row)
+            lay.addWidget(self.lbl_set_progress)
             lay.addLayout(bot)
 
             outer.addWidget(self.frame)
@@ -2792,6 +2922,18 @@ def build_overlays():
             except Exception:
                 pass
 
+        def show(self):
+            if globals().get("_APPLYING_SETTINGS"):
+                log("показ заблокирован: применяются настройки")
+                return
+            super().show()
+
+        def apply_cfg(self, cfg):
+            """t111: применить настройки без показа скрытой плашки."""
+            self.cfg.update(dict(cfg or {}))
+            self._on_currency_changed()
+            return self
+
         def _on_currency_changed(self):
             try:
                 self.lbl_price.setStyleSheet(
@@ -2803,7 +2945,7 @@ def build_overlays():
                 self.lbl_price.setToolTip(theme.currency_tooltip("platinum"))
                 self.lbl_ducats.setToolTip(theme.currency_tooltip("ducats"))
                 if self._last_data:
-                    self.set_data(self._last_data)
+                    self.set_data(self._last_data, show=self.isVisible())
             except Exception:
                 pass
 
@@ -2947,7 +3089,7 @@ def build_overlays():
                 self.lbl_set.clear()
                 self.lbl_set.setVisible(False)
 
-        def set_data(self, d):
+        def set_data(self, d, show=True):
             self._last_data = dict(d) if d else None
             if not d:
                 self.hide()
@@ -2992,6 +3134,17 @@ def build_overlays():
             except Exception:
                 self._set_placeholder_icon()
             self._update_set_label(d)
+            progress = d.get("set_progress") or ""
+            if isinstance(progress, dict):
+                progress_text = str(progress.get("label")
+                                    or progress.get("short") or "")
+            else:
+                progress_text = str(progress)
+            show_progress = bool(self.cfg.get("show_set_progress", True))
+            self.lbl_set_progress.setVisible(bool(progress_text)
+                                             and show_progress)
+            self.lbl_set_progress.setText(progress_text if show_progress
+                                          else "")
 
             owned_txt = d.get("owned") or ""
             self.lbl_owned.setVisible(bool(owned_txt))
@@ -3054,7 +3207,8 @@ def build_overlays():
                 self.lbl_price.setText("<span style='color:#6c7789; font-size:15px;'>нет на рынке</span>")
                 self.lbl_ducats.setText("")
                 self.lbl_sold.setText("")
-            self.show()
+            if show:
+                self.show()
 
     class _SummaryOverlay(QWidget):
         def __init__(self, cfg):
@@ -3097,6 +3251,12 @@ def build_overlays():
                     lambda _p, _d: self._on_currency_changed())
             except Exception:
                 pass
+
+        def show(self):
+            if globals().get("_APPLYING_SETTINGS"):
+                log("показ заблокирован: применяются настройки")
+                return
+            super().show()
 
         def apply_cfg(self, cfg):
             """1.0.0 (t46): настройки без показа скрытого «Итого» (t95)."""
@@ -7207,6 +7367,12 @@ class Scanner:
         self._ui_scale, self._ui_source = warframe_ui_scale(cfg)
         self._theme_checked = False
         self.detected_theme = {}
+        self._recovery = None
+        self._recovery_retry = False
+        self._scan_number = 0
+        self.window_hider = None
+        self._token = None
+        self.set_progress_fn = None
         self._init_wfinfo_geometry()
         try:
             import scan_cache
@@ -7279,11 +7445,9 @@ class Scanner:
             return
         with self._lock:
             if self.busy:
-                if not self._pending_scan:
-                    self._pending_scan = True
-                    log("Alt+Q: скан уже идёт, повторю после него")
-                # повторные нажатия не спамят лог
-                return
+                if self._token is not None:
+                    self._token.cancel("новый Alt+Q")
+                log("Alt+Q: предыдущий скан отменён, новый запущен")
             self.busy = True
             self._pending_scan = False
             self.generation += 1
@@ -7301,12 +7465,50 @@ class Scanner:
             return True
         return False
 
+    def _watchdog_timeout(self, gen):
+        if gen != self.generation:
+            return
+        with self._lock:
+            self.busy = False
+        log("Скан: watchdog — лок снят")
+
+    def _hide_scan_windows(self):
+        hider = getattr(self, "window_hider", None)
+        if not callable(hider):
+            return None
+        try:
+            hidden = hider()
+            log("Скан: окна скрыты на время снимка")
+            return hidden
+        except Exception:
+            return None
+
     def _run(self, gen):
         t0 = time.time()
+        try:
+            import scan_token
+            token = scan_token.ScanToken(gen, logger=log)
+        except Exception:
+            token = None
+        if gen == self.generation:
+            self._token = token
+
+        def _cancelled(stage):
+            return bool(token is not None and token.check(stage))
         perf = {"capture": 0.0, "ocr": 0.0, "match": 0.0,
                 "prices": 0.0, "render": 0.0}
         log("\n" + "─" * 60)
-        log(f"Скан {datetime.datetime.now().strftime('%H:%M:%S')}")
+        self._scan_number = int(getattr(self, "_scan_number", 0)) + 1
+        try:
+            import scan_recovery
+            self._scan_watchdog = scan_recovery.ScanWatchdog(
+                float(self.cfg.get("scan_watchdog_sec", 30) or 30),
+                on_timeout=lambda: self._watchdog_timeout(gen))
+            self._scan_watchdog.start()
+        except Exception:
+            self._scan_watchdog = None
+        log(f"Скан #{self._scan_number} "
+            f"{datetime.datetime.now().strftime('%H:%M:%S')}")
         try:
             # экран наград может быть ещё в анимации — пробуем несколько раз
             attempts = max(1, int(self.cfg.get("scan_retries", 2)) + 1)
@@ -7329,9 +7531,19 @@ class Scanner:
             calib_info = {}
             for attempt in range(attempts):
                 started = time.time()
-                full, mon = grab(self.cfg)
+                hidden_windows = self._hide_scan_windows()
+                try:
+                    full, mon = grab(self.cfg)
+                finally:
+                    try:
+                        import scan_recovery
+                        scan_recovery.restore_windows(hidden_windows)
+                    except Exception:
+                        pass
                 base = to_base(full, self.cfg)
                 perf["capture"] += time.time() - started
+                if _cancelled("capture"):
+                    return
                 sx = float(self.geom.get("sx") or 1.0)
                 sy = float(self.geom.get("sy") or 1.0)
                 # 1.0.0: тема интерфейса — один раз за сессию (данные WFInfo)
@@ -7355,7 +7567,14 @@ class Scanner:
                                      matcher=matcher, cache=self.cache,
                                      calib_cache=self._calib_cache,
                                      calib_out=calib_info)
+                if callable(getattr(self, "set_progress_fn", None)):
+                    try:
+                        self.set_progress_fn(cards)
+                    except Exception:
+                        pass
                 perf["ocr"] += time.time() - started
+                if _cancelled("ocr"):
+                    return
                 if cards or attempt == attempts - 1:
                     break
                 log(f"  Карточек не видно — переснимаю через {int(delay * 1000)} мс")
@@ -7385,7 +7604,44 @@ class Scanner:
                     self._preset_warned = preset_id
                     log(f"Раскладка: распознано {named}/{len(preliminary)} "
                         "— попробуйте другой пресет")
+            if _cancelled("match"):
+                return
             named = sum(1 for d in preliminary if d.get("name"))
+            if named < 2:
+                try:
+                    import scan_recovery
+                    if self._recovery is None:
+                        self._recovery = scan_recovery.Recovery()
+                    meta = {"scan": self._scan_number,
+                            "theme": self.detected_theme,
+                            "scale": getattr(self, "_ui_scale", 1.0),
+                            "preset": self.cfg.get("scan_preset"),
+                            "cards": len(cards),
+                            "named": named}
+                    dump = scan_recovery.dump_failure(
+                        self.cfg.get("debug_dir"), frame=full, cards=cards,
+                        meta=meta, logger=log)
+                    log(scan_recovery.scan_result_line(
+                        self._scan_number, named, len(cards or []), dump))
+                    reset = lambda: (self._calib_cache.clear(),
+                                     setattr(self, "_theme_checked", False),
+                                     self.cache.clear() if self.cache else None)
+                    if self._recovery.note(named, reset_fn=reset, logger=log):
+                        self._recovery_retry = True
+                except Exception as _exc:
+                    log(f"Скан: дамп не создан "
+                        f"({type(_exc).__name__})")
+            elif self._recovery is not None:
+                self._recovery.zero_streak = 0
+            if _cancelled("prices"):
+                return
+            if named >= 2:
+                try:
+                    import scan_recovery
+                    log(scan_recovery.scan_result_line(
+                        self._scan_number, named, len(preliminary)))
+                except Exception:
+                    pass
             if named == 0:
                 preset = str(self.cfg.get("scan_preset") or "auto")
                 log("Награды не найдены — плашки скрыты "
@@ -7444,6 +7700,8 @@ class Scanner:
                 self.api, list(unique.keys()), cache=self.cache,
                 workers=int(self.cfg.get("workers", 4) or 4),
                 timeout=2.5, logger=log)
+            if _cancelled("prices"):
+                return
             for name, indexes in unique.items():
                 value = resolved.get(name) or {
                     "name": name, "price": None, "matched": False,
@@ -7567,10 +7825,22 @@ class Scanner:
             log(f"ОШИБКА СКАНА: {type(e).__name__}: {e}")
             log_exception("Скан: подробности")
         finally:
+            try:
+                if getattr(self, "_scan_watchdog", None) is not None:
+                    self._scan_watchdog.cancel()
+            except Exception:
+                pass
             with self._lock:
-                self.busy = False
+                if gen == self.generation:
+                    self.busy = False
             log("─" * 60 + "\n")
-            self._drain_pending_scan()
+            if gen != self.generation:
+                return
+            if getattr(self, "_recovery_retry", False):
+                self._recovery_retry = False
+                threading.Timer(0.2, self.request_scan).start()
+            else:
+                self._drain_pending_scan()
 
     def _write_report(self, data):
         path = os.path.join(DATA_DIR, "last_rewards.txt")
@@ -7682,6 +7952,10 @@ def run_gui(cfg):
         notification_full = pyqtSignal(dict)  # центр уведомлений: запись целиком
         pick_reward = pyqtSignal(int)     # Alt+1…4: взята награда из скана
         stats_changed = pyqtSignal()      # 1.0.0: «Дроп» — данные изменились
+        inventory_names = pyqtSignal(object)   # t119: имена → GUI-поток
+        inventory_prices = pyqtSignal(object, object)  # t119: цены/статистика
+        inventory_progress = pyqtSignal(str)   # t119: прогресс цен
+        inventory_error = pyqtSignal(str)      # t119: ошибка в GUI-лог
 
     # ── вход через браузер: готовим Qt ДО QApplication (только webview) ──
     # Основной способ входа — браузер пользователя по CDP (Chromium 87 не
@@ -7755,6 +8029,18 @@ def run_gui(cfg):
     _STARTUP["catalog_ms"] = (time.time() - _t_catalog) * 1000
     api.refresh_items_async()
     ui = _UiBridge()
+    if cfg.get("debug_ui"):
+        try:
+            from PyQt5.QtCore import QTimer as _QTimer
+            _ui_beat_t0 = time.time()
+            _ui_beat = _QTimer(app)
+            _ui_beat.setInterval(2000)
+            _ui_beat.timeout.connect(
+                lambda: log(f"UI: жив (t={time.time() - _ui_beat_t0:.0f})"))
+            _ui_beat.start()
+            globals()["_UI_HEARTBEAT"] = _ui_beat
+        except Exception:
+            pass
 
     # Модули проверяем заранее: единое окно собирается только если есть все
     # три панели (редактор, маркет, события) и клиент рынка.
@@ -7810,6 +8096,85 @@ def run_gui(cfg):
             log(f"Дроп: сборщик не создан ({type(e).__name__}: {e})")
             collector = None
 
+    set_progress_mod = None
+    try:
+        if not INVENTORY_ENABLED:
+            raise ImportError("inventory disabled")
+        import set_progress as set_progress_mod
+    except Exception:
+        set_progress_mod = None
+
+    def _sets_owned():
+        if set_progress_mod is None:
+            return {}, {}, set(), {}
+        catalog = {"items": getattr(api, "items", None) or {}}
+        sets, index = set_progress_mod.load_sets(catalog, DATA_DIR)
+        inventory = set_progress_mod.load_inventory(DATA_DIR)
+        picks = []
+        if collector is not None:
+            try:
+                for session in collector.completed_sessions(200):
+                    picks.extend(session.get("picks") or [])
+            except Exception:
+                pass
+        manual = set_progress_mod.load_manual(DATA_DIR)
+        owned, stats = set_progress_mod.collect_owned(
+            inventory=inventory, picks=picks, manual=manual)
+        return sets, index, owned, stats
+
+    def _annotate_cards(cards):
+        sets, index, owned, a_stats = _sets_owned()
+        if set_progress_mod is not None:
+            set_progress_mod.annotate_cards(cards, sets, index, owned)
+            log(set_progress_mod.log_line(sets, owned, a_stats))
+        return cards
+
+    def _refresh_sets(cells=None):
+        sets, index, owned, stats = _sets_owned()
+        if set_progress_mod is None:
+            return
+        panel = (getattr(unified, "inventory_panel", None)
+                 if unified is not None else None)
+        if panel is not None and cells is not None:
+            set_progress_mod.annotate_cards(cells, sets, index, owned)
+            panel.set_rows(cells)
+        rows = set_progress_mod.collection(sets, owned)
+        if panel is not None:
+            panel.set_collection(rows)
+        log(set_progress_mod.log_line(sets, owned, stats))
+
+    def _owned_selected(selected):
+        if set_progress_mod is None:
+            return
+        for row in selected or []:
+            slug = str(row.get("slug") or row.get("item_slug") or "")
+            if not slug:
+                try:
+                    import display_name
+                    slug = display_name.slugify(row.get("name") or "")
+                except Exception:
+                    slug = ""
+            if slug:
+                set_progress_mod.mark_manual(DATA_DIR, slug, True)
+        sets, index, owned, _stats = _sets_owned()
+        for card in list(getattr(manager, "cards", []) or []):
+            data = getattr(card, "_last_data", None)
+            if not data:
+                continue
+            try:
+                set_progress_mod.annotate_cards([data], sets, index, owned)
+                card.set_data(data, show=card.isVisible())
+            except Exception:
+                pass
+        _refresh_sets()
+        panel = (getattr(unified, "inventory_panel", None)
+                 if unified is not None else None)
+        if panel is not None:
+            try:
+                panel.set_rows(panel.rows)
+            except Exception:
+                pass
+
     pool = None
     if pool_mod is not None:
         name_index = {}
@@ -7841,6 +8206,11 @@ def run_gui(cfg):
     manager = Manager(cfg, geom, market=market, api=api,
                       embedded_ui=use_unified)
     scanner = Scanner(cfg, ocr, api, manager, geom)
+    try:  # t108: прогресс наборов в плашках (после создания Scanner)
+        if scanner is not None:
+            scanner.set_progress_fn = _annotate_cards
+    except Exception as exc:
+        log(f"Наборы: прогресс в плашках не подключён ({type(exc).__name__}: {exc})")
 
     def _warm_ocr_background():
         started = time.time()
@@ -8333,6 +8703,8 @@ def run_gui(cfg):
                           if cfg.get("restore_game_focus", True) else None),
                 hotkey_aliases=cfg.get("hotkey_aliases", True))
             manager.unified_window = unified
+            if getattr(unified, "inventory_panel", None) is not None:
+                unified.inventory_panel.on_owned = _owned_selected
         except Exception as e:
             log(f"Единое окно не создано ({type(e).__name__}: {e}) — "
                 "работаю со старыми окнами.")
@@ -8497,6 +8869,35 @@ def run_gui(cfg):
             toast_stack = ToastStack(
                 cfg, on_click=lambda record: _toast_activated(record),
                 login_check=login_in_progress, logger=log)
+
+            def _scan_hide_windows():
+                hidden = []
+                for widget in list(getattr(manager, "cards", []) or []):
+                    try:
+                        if widget.isVisible():
+                            widget.hide()
+                            hidden.append(widget)
+                    except Exception:
+                        pass
+                summary = getattr(manager, "summary", None)
+                try:
+                    if summary is not None and summary.isVisible():
+                        summary.hide()
+                        hidden.append(summary)
+                except Exception:
+                    pass
+                try:
+                    toast_stack.hide_all()
+                except Exception:
+                    pass
+                try:
+                    app.processEvents()
+                except Exception:
+                    pass
+                return hidden
+
+            if scanner is not None:
+                scanner.window_hider = _scan_hide_windows
         except Exception as e:
             log(f"Центр уведомлений: тосты не созданы "
                 f"({type(e).__name__}: {e})")
@@ -8875,8 +9276,18 @@ def run_gui(cfg):
             return
         if unified is not None:
             unified.toggle()
+            try:
+                visible = bool(unified.isVisible())
+            except Exception:
+                visible = False
+            log(f"F8: переключение (visible={visible})")
         else:
             toggle_selected()
+            try:
+                log(f"F8: переключение "
+                    f"(visible={bool(manager.selected.isVisible())})")
+            except Exception:
+                pass
 
     def toggle_events():
         """Alt+E: алиас вкладки «События» или старое окно событий."""
@@ -9039,6 +9450,220 @@ def run_gui(cfg):
     ui.screen_closed.connect(manager.hide_all)
     ui.pick_reward.connect(pick_reward)
 
+    inventory_overlay = None
+    inventory_price_cache = None
+    inventory_guard = None
+    inventory_started = [0.0]
+
+    def _inventory_action():
+        """Alt+I: снимок инвентаря → сетка/имена → цены → оверлей."""
+        nonlocal inventory_overlay, inventory_price_cache, inventory_guard
+        if inventory_guard is None:
+            try:
+                import inventory_guard as guard_mod
+                inventory_guard = guard_mod.InventoryBusyGuard(60.0)
+            except Exception:
+                inventory_guard = None
+        if inventory_guard is not None:
+            if not inventory_guard.enter(log):
+                log("Инвентарь: скан уже идёт — Alt+I пропущен")
+                return
+        inventory_started[0] = time.time()
+
+        def _stage(name):
+            log(f"Инвентарь: стадия={name} "
+                f"t={time.time() - inventory_started[0]:.1f}с")
+
+        _stage("capture")
+        try:
+            import inventory_scan
+            # t119: никаких QWidget-операций из потока хоткея; Alt+I не
+            # скрывает окна (иначе hide/show шли бы из рабочего потока).
+            frame, _mon = grab(cfg)
+            _stage("capture")
+            if frame is None:
+                log("Инвентарь: нет кадра")
+                return
+            matcher = None
+            if api is not None:
+                matcher = lambda name: (api.match(name) or {}).get("score", 0.0)
+            ocr = getattr(scanner, "ocr", None) if scanner is not None else None
+            grid = inventory_scan.scan_inventory(
+                frame, ocr=ocr, matcher=matcher, cfg=cfg,
+                nicknames=cfg.get("known_nicks") or ())
+            _stage("ocr")
+            try:
+                brightness = float(grid.get("brightness",
+                                            frame.mean()))
+            except Exception:
+                brightness = 0.0
+            log(f"Инвентарь: кадр {frame.shape[1]}×{frame.shape[0]}, "
+                f"средняя яркость {brightness:.0f}, "
+                f"monitor={cfg.get('monitor', 1)}, "
+                f"scale={cfg.get('ui_scaling', 1.0)}")
+            if brightness < 8.0:
+                log("Инвентарь: кадр слишком тёмный (игра не в фокусе?)")
+            if not grid.get("ok"):
+                log(grid.get("error") or inventory_scan.GRID_ERROR)
+                try:
+                    import scan_recovery
+                    dump = scan_recovery.dump_failure(
+                        cfg.get("debug_dir"), frame=frame, cards=[],
+                        meta={"monitor": cfg.get("monitor", 1),
+                              "scale": cfg.get("ui_scaling", 1.0),
+                              "size": f"{frame.shape[1]}x{frame.shape[0]}",
+                              "brightness": round(brightness, 1),
+                              "error": grid.get("error", "")}, logger=log)
+                    if dump:
+                        log(f"Инвентарь: дамп {dump}")
+                except Exception:
+                    pass
+                return
+            cells = grid["cells"]
+            if sum(1 for c in cells if c.get("matched")) == 0:
+                try:
+                    import scan_recovery
+                    dump = scan_recovery.dump_failure(
+                        cfg.get("debug_dir"), frame=frame, cards=cells,
+                        meta={"monitor": cfg.get("monitor", 1),
+                              "scale": cfg.get("ui_scaling", 1.0),
+                              "size": f"{frame.shape[1]}x{frame.shape[0]}",
+                              "brightness": round(brightness, 1),
+                              "recognized": 0,
+                              "reason": grid.get("reason", "")}, logger=log)
+                    for index, cell in enumerate(cells[:3], 1):
+                        log(f"  OCR[{index}]: raw={cell.get('_ocr_raw', '')!r} "
+                            f"conf={float(cell.get('_ocr_conf') or 0):.2f} "
+                            f"bbox=({int(cell.get('left') or 0)},"
+                            f"{int(cell.get('top') or 0)},"
+                            f"{int(cell.get('width') or 0)},"
+                            f"{int(cell.get('height') or 0)})")
+                    if dump:
+                        log(f"Инвентарь: дамп {dump}")
+                except Exception as exc:
+                    log(f"Инвентарь: дамп не создан ({type(exc).__name__})")
+            log(inventory_scan.grid_log(grid))
+            # t119: виджеты создаём/меняем только в GUI-потоке
+            ui.inventory_names.emit(cells)
+            _stage("overlay")
+            if inventory_price_cache is None:
+                inventory_price_cache = inventory_scan.PriceCache(600)
+            names = inventory_scan.price_names(cells)
+
+            def _progress(total, done):
+                ui.inventory_progress.emit(
+                    inventory_scan.progress_text(cells, done))
+
+            _stage("prices")
+            lookup = (api.lookup if api is not None
+                      else (lambda name: None))
+            prices, stats = inventory_scan.parallel_prices(
+                names, lookup, cache=inventory_price_cache, workers=4,
+                timeout=3.0, progress=_progress, logger=log)
+            inventory_scan.apply_price_map(cells, prices)
+            ui.inventory_prices.emit(cells, stats)
+        except Exception as exc:
+            message = f"Инвентарь: ошибка ({type(exc).__name__}: {exc})"
+            log(message)
+            try:
+                ui.inventory_error.emit(message)
+            except Exception:
+                pass
+        finally:
+            if inventory_guard is not None:
+                inventory_guard.leave()
+            try:
+                import gc
+                gc.collect()
+                import inventory_scan as _inv
+                log(f"RAM: после скана "
+                    f"{_inv.process_memory_mb():.0f} МБ")
+            except Exception:
+                pass
+            log(f"Инвентарь: готово за "
+                f"{time.time() - inventory_started[0]:.1f} с")
+
+    def _inventory_panel():
+        return (getattr(unified, "inventory_panel", None)
+                if unified is not None else None)
+
+    def _inventory_toast(title, text, kind="inventory"):
+        try:
+            if not bool(cfg.get("notify_enabled", True)):
+                return None
+            events = cfg.get("notify_events") or []
+            if isinstance(events, str):
+                events = [x.strip() for x in events.split(",")]
+            if events and kind not in events:
+                return None
+            if center_mod is None or not callable(
+                    getattr(center_mod, "dispatch_toast_only", None)):
+                return None
+            return center_mod.dispatch_toast_only(
+                {"kind": kind, "title": title, "text": text,
+                 "action": "inventory"}, cfg=cfg, toast_stack=toast_stack,
+                login_check=login_in_progress, force=True)
+        except Exception as exc:
+            log(f"Инвентарь: тост не показан ({type(exc).__name__})")
+            return None
+
+    def _inventory_names(cells):
+        """GUI-поток: прогресс без плашек над игрой (t138)."""
+        try:
+            panel = _inventory_panel()
+            done = sum(1 for c in cells or [] if c.get("matched"))
+            if panel is not None:
+                panel.set_status(f"Сканирование… {done}/{len(cells or [])}")
+        except Exception as exc:
+            log(f"Инвентарь: статус не обновлён ({type(exc).__name__})")
+
+    def _inventory_prices(cells, stats):
+        """GUI-поток: таблица, сохранение инвентаря, тост."""
+        try:
+            import inventory_scan
+            data = inventory_scan.totals(cells)
+            panel = _inventory_panel()
+            if panel is not None:
+                panel.set_rows(cells)
+                panel.set_status(
+                    f"Готово: {data['count']} предметов · {data['total']} p "
+                    f"· {time.strftime('%H:%M')}")
+            log(inventory_scan.log_line(cells))
+            log(inventory_scan.summary_log(cells, stats))
+            log(f"Инвентарь: готово ({data['count']} предметов, "
+                f"{data['total']} p), плашки отключены")
+            _inventory_toast(
+                "Инвентарь",
+                f"{data['count']} предметов · {data['total']} p — "
+                "можно сканировать дальше")
+            if set_progress_mod is not None:
+                store = set_progress_mod.InventoryStore().from_cells(cells)
+                set_progress_mod.save_inventory(DATA_DIR, store)
+                _refresh_sets(cells)
+        except Exception as exc:
+            log(f"Инвентарь: UI-обновление не удалось ({type(exc).__name__})")
+
+    def _inventory_progress(text):
+        try:
+            panel = _inventory_panel()
+            if panel is not None:
+                panel.set_status(str(text))
+        except Exception:
+            pass
+
+    def _inventory_error(message):
+        _inventory_toast("Инвентарь", "не удалось (сетка не найдена)")
+
+    ui.inventory_names.connect(_inventory_names)
+    ui.inventory_prices.connect(_inventory_prices)
+    ui.inventory_progress.connect(_inventory_progress)
+    ui.inventory_error.connect(_inventory_error)
+
+    if INVENTORY_ENABLED and keyboard is not None:
+        register_hotkey(keyboard, cfg.get("hotkey_inventory", "alt+i"),
+                        _inventory_action)
+    elif not INVENTORY_ENABLED:
+        log("Инвентарь: отключён в этой версии")
     # старые хоткеи — ровно как раньше, но в обеих раскладках
     if unified is None:
         register_hotkey(keyboard, cfg.get("hotkey_editor", "f8"),
@@ -9104,6 +9729,10 @@ def run_gui(cfg):
 
     def _settings_side_effects(settings_cfg, _values):
         """Применить настройки к уже работающему приложению (без перезапуска)."""
+        visible_before = bool(
+            any(w.isVisible() for w in (getattr(manager, "cards", []) or []))
+            or (getattr(manager, "summary", None) is not None
+                and manager.summary.isVisible()))
         # t92: фильтр уведомлений читает актуальный cfg, а не копию
         try:
             if notifier is not None and callable(
@@ -9132,6 +9761,9 @@ def run_gui(cfg):
                         settings_cfg.get("overlay_show_set_price", True))
                     card.cfg["show_item_icons"] = bool(
                         settings_cfg.get("show_item_icons", True))
+                    apply_cfg = getattr(card, "apply_cfg", None)
+                    if callable(apply_cfg):
+                        apply_cfg(settings_cfg)
                 except Exception:
                     pass
                 apply_icon = getattr(card, "apply_icon_setting", None)
@@ -9248,15 +9880,22 @@ def run_gui(cfg):
                 unified.set_unread_badge(*notification_store.badge(settings_cfg))
             except Exception:
                 pass
+        if not visible_before:
+            log("Настройки: плашки не показывались (visible_before=False)")
         log("Настройки применены без перезапуска.")
 
     def _apply_settings(values):
         """Сохранить настройки (config.json + бэкап) и применить на лету."""
         if settings_mod is None:
             return {"ok": False, "error": "модуль settings_ui.py не найден"}
-        result = settings_mod.apply_settings(
-            cfg, values, hotkey_binder, CONFIG_PATH,
-            extra_apply=_settings_side_effects)
+        global _APPLYING_SETTINGS
+        _APPLYING_SETTINGS = True
+        try:
+            result = settings_mod.apply_settings(
+                cfg, values, hotkey_binder, CONFIG_PATH,
+                extra_apply=_settings_side_effects)
+        finally:
+            _APPLYING_SETTINGS = False
         if result.get("ok"):
             log("Настройки сохранены в config.json"
                 + (f" (бэкап: {os.path.basename(result.get('backup'))})"
@@ -9503,7 +10142,8 @@ def run_gui(cfg):
         auto_update_watcher = None
 
     log("=" * 60)
-    log(f"VoidFrameRU {APP_VERSION} — готово.")
+    log(f"VoidFrameRU {APP_VERSION} — готово "
+        f"(инвентарь: {'включён' if INVENTORY_ENABLED else 'выключен'}).")
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
     if unified is not None:
         hotkey = (cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")).upper()
