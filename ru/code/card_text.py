@@ -7,6 +7,9 @@ _TIME_RE = re.compile(r"\b\d{1,2}\s*[чh]\s*\d{1,2}\s*[мm]?\b",
                       re.IGNORECASE)
 _LONG_DIGITS = re.compile(r"\b\d{5,}\b")
 _JUNK_WORDS = ("совпедать", "совпадать", "не жопт", "1ч", "1m")
+_SERVICE_RE = re.compile(
+    r"(\b1?\s*В\s*НАЛИЧИИ|компл\.?\s*\d{0,4}|онлайн|"
+    r"[✓✔×x]\s*\d{1,4})", re.IGNORECASE)
 
 
 def _norm(text):
@@ -29,6 +32,7 @@ def clean_card_name(text, nicknames=()):
     raw = str(text or "")
     if not raw:
         return ""
+    raw = _SERVICE_RE.sub(" ", raw)
     raw = _TIME_RE.sub(" ", raw)
     raw = _LONG_DIGITS.sub(" ", raw)
     nicks = _nick_set(nicknames)
