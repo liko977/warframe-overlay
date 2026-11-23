@@ -1179,14 +1179,9 @@ def build_settings_dialog():
             form.addRow(QLabel(""), self.chk_show_item_icons)
             self.chk_show_set_price = QCheckBox("Показывать цену комплекта")
             self.chk_show_set_price.setFont(font(11))
-            self.chk_show_set_progress = QCheckBox(
-                "Показывать прогресс наборов")
-            self.chk_show_set_progress.setFont(font(11))
-            self.chk_show_set_progress.setChecked(True)
             self.chk_show_set_price.setToolTip(
                 "На плашках частей — мелкая строка «компл. N p»")
             form.addRow(QLabel(""), self.chk_show_set_price)
-            form.addRow(QLabel(""), self.chk_show_set_progress)
             # 1.0.0: цены картинками платины/дукатов вместо «p»/«дк»
             self.chk_currency_icons = QCheckBox("Показывать иконки валют")
             self.chk_currency_icons.setFont(font(11))
@@ -1563,9 +1558,6 @@ def build_settings_dialog():
                 bool(values.get("show_item_icons", True)))
             self.chk_show_set_price.setChecked(
                 bool(values.get("overlay_show_set_price", True)))
-            if hasattr(self, "chk_show_set_progress"):
-                self.chk_show_set_progress.setChecked(
-                    bool(values.get("show_set_progress", True)))
             self.chk_currency_icons.setChecked(
                 bool(values.get("currency_icons", True)))
             # 1.0.0: ручной выбор темы интерфейса (иначе «Авто»)
@@ -1656,9 +1648,6 @@ def build_settings_dialog():
                 "icons_update_days": int(self.spin_icons_update_days.value()),
                 "game_theme": str(self.cmb_game_theme.currentData() or "auto"),
                 "overlay_show_set_price": self.chk_show_set_price.isChecked(),
-                "show_set_progress": bool(
-                    getattr(self, "chk_show_set_progress", None)
-                    and self.chk_show_set_progress.isChecked()),
                 "currency_icons": self.chk_currency_icons.isChecked(),
                 "update_check": self.chk_update_check.isChecked(),
                 "update_url": (self.edit_update_url.text().strip()
