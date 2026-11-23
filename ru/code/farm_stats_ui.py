@@ -29,6 +29,15 @@ except Exception:                       # pragma: no cover
     _currency_icons = None
 
 
+def _dlog(message):
+    """Лог в app.log без жёсткой зависимости от warframe."""
+    try:
+        import warframe
+        warframe.log(str(message))
+    except Exception:
+        pass
+
+
 def _money_text(amount, currency="platinum", cfg=None):
     """Сумма + иконка валюты (или «N p»/«N дк», если иконок нет)."""
     suffix = "дк" if str(currency).lower() == "ducats" else "p"
@@ -705,9 +714,13 @@ def build_drops_panel():
             reset = getattr(self, "btn_reset", None)
             if reset is not None:
                 current = self._session_view == "current"
+                reset.setVisible(current)
                 reset.setEnabled(current)
-                reset.setToolTip("сброс только для текущего сеанса"
-                                 if not current else "Сбросить текущий сеанс")
+                reset.setToolTip("Сбросить текущий сеанс" if current
+                                 else "доступно только для текущего сеанса")
+                if not current:
+                    _dlog(f"Дроп: сеанс={self._session_view} — "
+                          "кнопки продажи скрыты")
 
         @staticmethod
         def _short(text, limit=30):
@@ -910,6 +923,9 @@ def build_drops_panel():
                 item = self.loot_lay.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
+                    # t109: убрать из дерева сразу, чтобы старые кнопки
+                    # не находились до DeferredDelete
+                    widget.setParent(None)
                     widget.deleteLater()
             self.loot_lay.setAlignment(Qt.AlignTop)
             loot = []
@@ -1078,27 +1094,24 @@ def build_drops_panel():
                     drop_chip.deleteLater()
                 line.addWidget(price)
                 line.addWidget(qty)
-                market = QPushButton("↗")
-                market.setFont(make_font(9, True))
-                market.setStyleSheet(theme.button_qss(small=True))
-                market.setCursor(Qt.PointingHandCursor)
-                market.setFixedSize(22, 22)
-                slug = str((drop or {}).get("slug") or "")
-                market.setEnabled(bool(slug))
-                market.setToolTip("Открыть на маркете")
-                market.clicked.connect(
-                    lambda _=False, s=slug: self._open_market(s))
-                line.addWidget(market)
                 if history:
-                    sell_button = QPushButton("Продать")
-                    sell_button.setFont(make_font(9, True))
-                    sell_button.setStyleSheet(theme.button_qss(small=True))
-                    sell_button.setFixedHeight(22)
-                    sell_button.setEnabled(False)
-                    sell_button.setToolTip(
-                        "доступно только для текущего сеанса")
-                    line.addWidget(sell_button)
+                    # t109: история только для просмотра — без кнопок
+                    view_note = QLabel("только просмотр")
+                    view_note.setFont(make_font(9))
+                    view_note.setStyleSheet(theme.muted_qss(9))
+                    line.addWidget(view_note)
                 else:
+                    market = QPushButton("↗")
+                    market.setFont(make_font(9, True))
+                    market.setStyleSheet(theme.button_qss(small=True))
+                    market.setCursor(Qt.PointingHandCursor)
+                    market.setFixedSize(22, 22)
+                    slug = str((drop or {}).get("slug") or "")
+                    market.setEnabled(bool(slug))
+                    market.setToolTip("Открыть на маркете")
+                    market.clicked.connect(
+                        lambda _=False, s=slug: self._open_market(s))
+                    line.addWidget(market)
                     line.addWidget(self._sell_button(drop))
                 self.loot_lay.addWidget(row)
             self.loot_lay.setAlignment(Qt.AlignTop)
