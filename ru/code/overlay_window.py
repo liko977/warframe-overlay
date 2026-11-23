@@ -312,6 +312,13 @@ def build_overlay_window():
             if chat_widget is not None:
                 self._chat_index = len(self.titles)
                 self.titles.append("Чат")
+            try:
+                from branding import INVENTORY_ENABLED
+            except Exception:
+                INVENTORY_ENABLED = False
+            self._inventory_index = len(self.titles)
+            if INVENTORY_ENABLED:
+                self.titles.append("Инвентарь")
             self.market_client = market_client
             self.token_factory = token_factory
             # auth_factory(parent) -> QDialog — окно входа через браузер
@@ -555,12 +562,30 @@ def build_overlay_window():
             tabs_lay.addStretch(1)
 
             self.stack = QStackedWidget()
+            self.market_widget.setObjectName("marketPage")
             self.stack.addWidget(self.market_widget)
+            # 1.1.0: отдельная страница «Мои ордера» (реальный список ордеров
+            # рисует market_widget, страница нужна для соответствия вкладок)
+            self.orders_page = QWidget()
+            self.orders_page.setObjectName("ordersPage")
+            self.stack.addWidget(self.orders_page)
+            self.events_widget.setObjectName("eventsPage")
             self.stack.addWidget(self.events_widget)
             if self.drops_widget is not None:
                 self.stack.addWidget(self.drops_widget)
             if self.chat_widget is not None:
                 self.stack.addWidget(self.chat_widget)
+            # 1.1.0: вкладка «Инвентарь» (Alt+I наполняет её и оверлей)
+            self.inventory_panel = None
+            if INVENTORY_ENABLED:
+                try:
+                    import inventory_ui
+                    self.inventory_panel = inventory_ui.build_inventory_panel()(
+                        self.cfg)
+                    self.inventory_panel.setObjectName("inventoryPage")
+                    self.stack.addWidget(self.inventory_panel)
+                except Exception:
+                    self.inventory_panel = None
             self.stack.setStyleSheet("background: transparent;")
 
             lay.addWidget(self.header)
@@ -811,8 +836,16 @@ def build_overlay_window():
                 self.stack.setCurrentWidget(self.drops_widget)
             elif self.chat_widget is not None and index == self._chat_index:
                 self.stack.setCurrentWidget(self.chat_widget)
+            elif (getattr(self, "inventory_panel", None) is not None
+                  and index == self._inventory_index):
+                self.stack.setCurrentWidget(self.inventory_panel)
             else:
                 self.stack.setCurrentWidget(self.market_widget)
+            try:
+                import warframe
+                warframe.log("Вкладка: " + self.titles[index])
+            except Exception:
+                pass
             self.lbl_status.setText(self._provider(index))
             if save:
                 self.save_values({"last_tab": index})
