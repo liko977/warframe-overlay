@@ -75,11 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.7"
-try:
-    from branding import INVENTORY_ENABLED
-except Exception:
-    INVENTORY_ENABLED = False
+APP_VERSION = "1.0.8"
 _APPLYING_SETTINGS = False
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
@@ -160,7 +156,6 @@ DEFAULT_CONFIG = {
     "hotkey_scan": "alt+q",          # скан экрана наград (плашки)
     "hotkey_editor": "f8",           # список выбранного (редактор)
     "hotkey_events": "alt+e",        # панель игровых событий (сортис, разломы…)
-    "hotkey_inventory": "alt+i",     # 1.1.0: цены прямо в инвентаре
     "hotkey_market": "alt+m",        # окно «Маркет» (поиск, график, ордера)
     "hotkey_window": "f8",           # единое окно с вкладками
     "hotkey_aliases": True,          # Alt+E/Alt+M — быстрые алиасы вкладок
@@ -248,7 +243,6 @@ DEFAULT_CONFIG = {
     "show_summary": True,            # показывать блок «Итого» над плашками
     "show_item_icons": True,         # иконки предметов WFCD в UI
     "overlay_show_set_price": True,
-    "show_set_progress": True,      # 1.1.0: строка набора в плашке   # «компл. N p» на карточке части
     "currency_icons": True,           # 1.0.0: иконки платины/дукатов вместо «p»/«дк»
     # ── пакет иконок предметов (1.0.0, см. icon_pack.py) ───────────────
     "icons_pack_enabled": True,      # пакет иконок включён (кнопки в настройках)
@@ -333,11 +327,13 @@ DEFAULT_CONFIG = {
 # ─────────────────────────────────────────────────────────────────────────
 #  Мелкие утилиты
 # ─────────────────────────────────────────────────────────────────────────
+_FIXED_LOG_PATH = (str(os.environ.get("WF_LOG_FILE"))
+                   if os.environ.get("WF_LOG_FILE")
+                   else os.path.join(DATA_DIR, "app.log"))
+
+
 def app_log_path():
-    env = os.environ.get("WF_LOG_FILE")
-    if env:
-        return str(env)
-    return os.path.join(DATA_DIR, "app.log")
+    return _FIXED_LOG_PATH
 
 
 _LOG_LOCK = threading.Lock()
@@ -730,6 +726,12 @@ def load_config(path=CONFIG_PATH):
         except Exception as e:
             log(f"Конфиг не создан: {e}")
     cfg, _migrated = _migrate_config(cfg, raw)
+    try:
+        _uiscale = float(cfg.get("ui_scaling") or 0)
+        if not (0 < _uiscale <= 3):
+            cfg["ui_scaling"] = 1.0
+    except Exception:
+        cfg["ui_scaling"] = 1.0
     if _migrated:
         _write_config(cfg, path)
     # миграция со старых конфигов: F8 был сканом, теперь это редактор
@@ -845,6 +847,40 @@ def ocr_correct_module():
     """Модуль ``ocr_correct.py`` (автокоррекция OCR, 1.0.0)."""
     return _load_local_module("ocr_correct.py", "ocr_correct",
                               _OCR_CORRECT_MODULE)
+
+
+#: 1.0.8: неторгуемые награды — показываем имя даже без записи в каталоге.
+_UNTRADEABLE_NAMES = {
+    "форма", "форма чертеж", "кредиты", "эссенция стали", "кува",
+    "следы", "чертеж формы", "blueprint forma",
+}
+
+
+def _untradeable_reason(name, cfg=None):
+    """Вернуть причину, почему имя можно оставить без каталога, или ''."""
+    raw = str(name or "").strip().lower()
+    base = re.sub(r"[\(\[]\s*(?:черт[её]ж|чертеж|blueprint)\s*[\)\]]",
+                  " ", raw)
+    base = re.sub(r"\s+", " ", base).strip(" :-")
+    if raw in _UNTRADEABLE_NAMES or base in _UNTRADEABLE_NAMES:
+        return "whitelist"
+    try:
+        import card_text
+        if not card_text.is_valid_card_text(name):
+            return ""
+    except Exception:
+        return ""
+    try:
+        import ocr_dictionary
+        known = set(ocr_dictionary.tokens() or {})
+        words = [w for w in re.findall(r"[A-Za-zА-Яа-яЁё0-9'’\-]+", base)
+                 if len(w) >= 3]
+        hits = sum(1 for w in words if w.lower() in known)
+        if len(words) >= 2 and hits >= 2:
+            return "dictionary"
+    except Exception:
+        pass
+    return ""
 
 
 def _ocr_fix_name(name, cfg=None):
@@ -1598,6 +1634,8 @@ class MarketAPI:
             out["sell_online"] = 0
             out["buy_online"] = 0
             out["sell_offline"] = False
+            out["median"] = None
+            out["outliers"] = 0
             out["price"] = None
             return out
         if detail:
@@ -1608,6 +1646,8 @@ class MarketAPI:
         out["sell_online"] = info.get("sell_online", 0)
         out["buy_online"] = info.get("buy_online", 0)
         out["sell_offline"] = info.get("sell_offline", False)
+        out["median"] = info.get("median")
+        out["outliers"] = info.get("outliers", 0)
         out["price"] = (out["best_sell"] if out["best_sell"] is not None
                         else out["best_buy"])
         return out
@@ -1729,9 +1769,23 @@ def summarize_orders(orders):
         "buy_total": len(buys_on) + len(buys_off),
         "sell_offline": False,
         "offline_sell_min": min(sells_off) if sells_off else None,
+        "median": None, "outliers": 0,
     }
     if sells_on:
-        info["best_sell"] = min(sells_on)
+        import statistics
+        median = float(statistics.median(sells_on))
+        floor = max(2.0, 0.4 * median)
+        filtered = [p for p in sells_on if p >= floor]
+        outliers = [p for p in sells_on if p < floor]
+        info["median"] = median
+        info["outliers"] = len(outliers)
+        if filtered:
+            info["best_sell"] = min(filtered)
+        else:
+            info["best_sell"] = min(sells_on)
+        if outliers:
+            log(f"Цена: отброшен выброс {min(outliers)}p "
+                f"(медиана {median:.0f}p, ордеров {len(sells_on)})")
     elif sells_off:
         # нет онлайн-продавцов: показываем минимум по оффлайну с пометкой
         info["best_sell"] = min(sells_off)
@@ -2019,6 +2073,32 @@ def _expand_canonical_grid(groups, lefts, cfg):
     return slots, groups4
 
 
+def _panel_count(base_img, cfg):
+    """t149: тема-независимая занятость канонических слотов (Canny)."""
+    try:
+        import cv2
+        gray = cv2.cvtColor(base_img, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 40, 100)
+        top = int(cfg.get("card_top") or 224)
+        width = int(cfg.get("card_width") or 242)
+        height = int(cfg.get("card_height") or 235)
+        for n in (4, 3, 2, 1):
+            lefts = [int(round(x)) for x in card_lefts(n, cfg)]
+            scores = []
+            for x in lefts:
+                if x < 0 or x + width > gray.shape[1]:
+                    scores.append(0.0)
+                    continue
+                roi_w = max(40, int(width * 0.75))
+                roi = edges[top:top + height, x:x + roi_w]
+                scores.append(float(roi.mean()) if roi.size else 0.0)
+            if scores and min(scores) >= 20.0:
+                return n, lefts
+    except Exception:
+        pass
+    return 0, []
+
+
 def _cards_from_words(words, cfg, frames_found=None):
     """Превращает слова в карточки 1..4; пустые позиции сохраняются.
 
@@ -2095,6 +2175,13 @@ def _cards_from_words(words, cfg, frames_found=None):
     cards = []
     for i in range(n_best):
         name = join_words(groups.get(i, []))
+        qty = 1
+        _qm = re.match(r"^\s*(\d{1,3})\s*[xXхХ]\s+", name)
+        if _qm:
+            try:
+                qty = max(1, int(_qm.group(1)))
+            except Exception:
+                qty = 1
         corrected = False
         if name:
             try:
@@ -2110,12 +2197,16 @@ def _cards_from_words(words, cfg, frames_found=None):
             card_raw = name
             name, corrected = _ocr_fix_name(name, cfg)
             name, _bp, _key = normalize_card_name(name)
+            if not name:
+                # t145: бейдж/«×2» не должен обнулять имя
+                name, _bp, _key = normalize_card_name(card_raw)
         else:
             card_raw = ""
         cards.append({"left": float(lefts[i]),
                       "top": float(cfg["card_top"]),
                       "height": float(cfg.get("card_height") or 235),
-                      "name": name, "_ocr_raw": card_raw,
+                      "name": name, "quantity": qty, "_ocr_raw": card_raw,
+                      "_ocr_name_raw": card_raw,
                       "ocr_corrected": bool(corrected),
                       "unrecognized": not bool(name)})
     if not note:
@@ -2473,6 +2564,10 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
             frames_found = int((_det or {}).get("frames_found") or 0)
         except Exception:
             frames_found = 0
+    contour_frames = frames_found
+    panels_found, panel_lefts = _panel_count(base_img, cfg_eff)
+    if panels_found:
+        frames_found = max(frames_found, panels_found)
     band = dict(cfg_eff["scan_band"])
     x0 = max(0, int(band["left"]))
     y0 = max(0, int(band["top"]))
@@ -2564,6 +2659,36 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
         cards, note = _cards_from_words(words, cfg, frames_found=frames_found)
     if note:
         log(note)
+    names_n = sum(1 for c in cards or [] if c.get("name"))
+    if cards:
+        lefts_log = [int(round(c["left"])) for c in cards]
+        log(f"Скан: панелей {panels_found or len(cards)} "
+            f"(имена {names_n}, контуры {contour_frames}) → N={len(cards)}, "
+            f"lefts={lefts_log}, плашки под карточками")
+    # t145: последний шанс — собрать имя из сырого OCR (бейдж/×N не мешают)
+    for _card in cards:
+        _raw_name = _card.get("_ocr_name_raw") or _card.get("_ocr_raw")
+        if not _card.get("name") and _raw_name:
+            _nm, _bp, _key = normalize_card_name(_raw_name)
+            if _nm:
+                _card["name"] = _nm
+                _card["unrecognized"] = False
+                log(f"карточка {cards.index(_card) + 1}: "
+                    f"'{_raw_name}' → '{_nm}' "
+                    f"(qty {_card.get('quantity', 1)})")
+    # 1.0.8: дамп при неполном наборе или пустом имени
+    try:
+        if len(cards) < 4 or any(not c.get("name") for c in cards):
+            import scan_recovery
+            _dump = scan_recovery.dump_failure(
+                cfg.get("debug_dir"), frame=base_img, cards=cards,
+                meta={"panels": panels_found, "names_row": names_n,
+                      "chosen_N": len(cards), "layout": "cards",
+                      "ui_scaling": cfg.get("ui_scaling")}, logger=log)
+            if _dump:
+                log(f"Скан: дамп {_dump}")
+    except Exception:
+        pass
     if calib_out is not None:
         calib_out.clear()
         calib_out.update({"geometry": geometry, "source": source,
@@ -2582,12 +2707,23 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
     retry_unrecognized_cards(base_img, cards, cfg_eff, ocr,
                             matcher=matcher)
     if matcher:
-        # t85: имя валидно только при совпадении с каталогом
+        # t85/t150: каталог — не единственный фильтр; неторгуемые оставляем
         for card in cards:
             n = str(card.get("name") or "")
-            if n and (matcher(n) or 0.0) < 0.60:
-                card["name"] = ""
-                card["unrecognized"] = True
+            if not n:
+                continue
+            score = matcher(n) or 0.0
+            if score >= 0.60:
+                continue
+            reason = _untradeable_reason(n, cfg)
+            if reason:
+                card["untradeable"] = True
+                card["price"] = None
+                log(f"карточка {cards.index(card) + 1}: матчер {score:.1f} "
+                    f"→ имя по словарю '{n}' (неторгуемое)")
+                continue
+            card["name"] = ""
+            card["unrecognized"] = True
         matched_now = sum(1 for c in cards if c.get("name")
                           and (matcher(c["name"]) or 0.0) >= 0.80)
     else:
@@ -3158,7 +3294,16 @@ def build_overlays():
             platinum = theme.currency_platinum()
             ducats = theme.currency_ducats()
             # 1.0.0: подсказки сбрасываем для каждого состояния
-            self.lbl_price.setToolTip(theme.currency_tooltip("platinum"))
+            price_tip = theme.currency_tooltip("platinum")
+            try:
+                _out = int(d.get("outliers") or 0)
+                _med = d.get("median")
+                if _out and _med is not None:
+                    price_tip += (f"\n~ медиана {float(_med):.0f} p · "
+                                  f"отброшено выбросов: {_out}")
+            except Exception:
+                pass
+            self.lbl_price.setToolTip(price_tip)
             self.lbl_ducats.setToolTip(theme.currency_tooltip("ducats"))
             if d.get("tradable") is False:
                 # неторгуемый предмет: цены нет, дукаты/онлайн не выводим
@@ -3876,11 +4021,13 @@ def build_overlays():
                                     d.get("price") == best_price)
                 self.cards[i].set_data(d)
                 left = d["card_left"]
-                self.place(self.cards[i], left, self.panel_y(),
-                           above_base=(self.cfg["card_top"] - 6
-                                       if self.cfg.get("overlay_layout") != "bottom"
-                                       else None))
+                # 1.0.8: плашки всегда под найденной карточкой
+                plate_y = (float(self.cfg["card_top"])
+                           + float(self.cfg["card_height"]) + 6)
+                self.place(self.cards[i], left, plate_y)
                 shown += 1
+            if shown:
+                log(f"Плашки: под карточками (N={shown})")
             if shown:
                 if self.cfg.get("show_summary", True):
                     self.summary.cfg = self.cfg
@@ -7372,7 +7519,6 @@ class Scanner:
         self._scan_number = 0
         self.window_hider = None
         self._token = None
-        self.set_progress_fn = None
         self._init_wfinfo_geometry()
         try:
             import scan_cache
@@ -7567,11 +7713,6 @@ class Scanner:
                                      matcher=matcher, cache=self.cache,
                                      calib_cache=self._calib_cache,
                                      calib_out=calib_info)
-                if callable(getattr(self, "set_progress_fn", None)):
-                    try:
-                        self.set_progress_fn(cards)
-                    except Exception:
-                        pass
                 perf["ocr"] += time.time() - started
                 if _cancelled("ocr"):
                     return
@@ -7952,10 +8093,6 @@ def run_gui(cfg):
         notification_full = pyqtSignal(dict)  # центр уведомлений: запись целиком
         pick_reward = pyqtSignal(int)     # Alt+1…4: взята награда из скана
         stats_changed = pyqtSignal()      # 1.0.0: «Дроп» — данные изменились
-        inventory_names = pyqtSignal(object)   # t119: имена → GUI-поток
-        inventory_prices = pyqtSignal(object, object)  # t119: цены/статистика
-        inventory_progress = pyqtSignal(str)   # t119: прогресс цен
-        inventory_error = pyqtSignal(str)      # t119: ошибка в GUI-лог
 
     # ── вход через браузер: готовим Qt ДО QApplication (только webview) ──
     # Основной способ входа — браузер пользователя по CDP (Chromium 87 не
@@ -8096,85 +8233,6 @@ def run_gui(cfg):
             log(f"Дроп: сборщик не создан ({type(e).__name__}: {e})")
             collector = None
 
-    set_progress_mod = None
-    try:
-        if not INVENTORY_ENABLED:
-            raise ImportError("inventory disabled")
-        import set_progress as set_progress_mod
-    except Exception:
-        set_progress_mod = None
-
-    def _sets_owned():
-        if set_progress_mod is None:
-            return {}, {}, set(), {}
-        catalog = {"items": getattr(api, "items", None) or {}}
-        sets, index = set_progress_mod.load_sets(catalog, DATA_DIR)
-        inventory = set_progress_mod.load_inventory(DATA_DIR)
-        picks = []
-        if collector is not None:
-            try:
-                for session in collector.completed_sessions(200):
-                    picks.extend(session.get("picks") or [])
-            except Exception:
-                pass
-        manual = set_progress_mod.load_manual(DATA_DIR)
-        owned, stats = set_progress_mod.collect_owned(
-            inventory=inventory, picks=picks, manual=manual)
-        return sets, index, owned, stats
-
-    def _annotate_cards(cards):
-        sets, index, owned, a_stats = _sets_owned()
-        if set_progress_mod is not None:
-            set_progress_mod.annotate_cards(cards, sets, index, owned)
-            log(set_progress_mod.log_line(sets, owned, a_stats))
-        return cards
-
-    def _refresh_sets(cells=None):
-        sets, index, owned, stats = _sets_owned()
-        if set_progress_mod is None:
-            return
-        panel = (getattr(unified, "inventory_panel", None)
-                 if unified is not None else None)
-        if panel is not None and cells is not None:
-            set_progress_mod.annotate_cards(cells, sets, index, owned)
-            panel.set_rows(cells)
-        rows = set_progress_mod.collection(sets, owned)
-        if panel is not None:
-            panel.set_collection(rows)
-        log(set_progress_mod.log_line(sets, owned, stats))
-
-    def _owned_selected(selected):
-        if set_progress_mod is None:
-            return
-        for row in selected or []:
-            slug = str(row.get("slug") or row.get("item_slug") or "")
-            if not slug:
-                try:
-                    import display_name
-                    slug = display_name.slugify(row.get("name") or "")
-                except Exception:
-                    slug = ""
-            if slug:
-                set_progress_mod.mark_manual(DATA_DIR, slug, True)
-        sets, index, owned, _stats = _sets_owned()
-        for card in list(getattr(manager, "cards", []) or []):
-            data = getattr(card, "_last_data", None)
-            if not data:
-                continue
-            try:
-                set_progress_mod.annotate_cards([data], sets, index, owned)
-                card.set_data(data, show=card.isVisible())
-            except Exception:
-                pass
-        _refresh_sets()
-        panel = (getattr(unified, "inventory_panel", None)
-                 if unified is not None else None)
-        if panel is not None:
-            try:
-                panel.set_rows(panel.rows)
-            except Exception:
-                pass
-
     pool = None
     if pool_mod is not None:
         name_index = {}
@@ -8206,11 +8264,6 @@ def run_gui(cfg):
     manager = Manager(cfg, geom, market=market, api=api,
                       embedded_ui=use_unified)
     scanner = Scanner(cfg, ocr, api, manager, geom)
-    try:  # t108: прогресс наборов в плашках (после создания Scanner)
-        if scanner is not None:
-            scanner.set_progress_fn = _annotate_cards
-    except Exception as exc:
-        log(f"Наборы: прогресс в плашках не подключён ({type(exc).__name__}: {exc})")
 
     def _warm_ocr_background():
         started = time.time()
@@ -8703,8 +8756,6 @@ def run_gui(cfg):
                           if cfg.get("restore_game_focus", True) else None),
                 hotkey_aliases=cfg.get("hotkey_aliases", True))
             manager.unified_window = unified
-            if getattr(unified, "inventory_panel", None) is not None:
-                unified.inventory_panel.on_owned = _owned_selected
         except Exception as e:
             log(f"Единое окно не создано ({type(e).__name__}: {e}) — "
                 "работаю со старыми окнами.")
@@ -9450,220 +9501,6 @@ def run_gui(cfg):
     ui.screen_closed.connect(manager.hide_all)
     ui.pick_reward.connect(pick_reward)
 
-    inventory_overlay = None
-    inventory_price_cache = None
-    inventory_guard = None
-    inventory_started = [0.0]
-
-    def _inventory_action():
-        """Alt+I: снимок инвентаря → сетка/имена → цены → оверлей."""
-        nonlocal inventory_overlay, inventory_price_cache, inventory_guard
-        if inventory_guard is None:
-            try:
-                import inventory_guard as guard_mod
-                inventory_guard = guard_mod.InventoryBusyGuard(60.0)
-            except Exception:
-                inventory_guard = None
-        if inventory_guard is not None:
-            if not inventory_guard.enter(log):
-                log("Инвентарь: скан уже идёт — Alt+I пропущен")
-                return
-        inventory_started[0] = time.time()
-
-        def _stage(name):
-            log(f"Инвентарь: стадия={name} "
-                f"t={time.time() - inventory_started[0]:.1f}с")
-
-        _stage("capture")
-        try:
-            import inventory_scan
-            # t119: никаких QWidget-операций из потока хоткея; Alt+I не
-            # скрывает окна (иначе hide/show шли бы из рабочего потока).
-            frame, _mon = grab(cfg)
-            _stage("capture")
-            if frame is None:
-                log("Инвентарь: нет кадра")
-                return
-            matcher = None
-            if api is not None:
-                matcher = lambda name: (api.match(name) or {}).get("score", 0.0)
-            ocr = getattr(scanner, "ocr", None) if scanner is not None else None
-            grid = inventory_scan.scan_inventory(
-                frame, ocr=ocr, matcher=matcher, cfg=cfg,
-                nicknames=cfg.get("known_nicks") or ())
-            _stage("ocr")
-            try:
-                brightness = float(grid.get("brightness",
-                                            frame.mean()))
-            except Exception:
-                brightness = 0.0
-            log(f"Инвентарь: кадр {frame.shape[1]}×{frame.shape[0]}, "
-                f"средняя яркость {brightness:.0f}, "
-                f"monitor={cfg.get('monitor', 1)}, "
-                f"scale={cfg.get('ui_scaling', 1.0)}")
-            if brightness < 8.0:
-                log("Инвентарь: кадр слишком тёмный (игра не в фокусе?)")
-            if not grid.get("ok"):
-                log(grid.get("error") or inventory_scan.GRID_ERROR)
-                try:
-                    import scan_recovery
-                    dump = scan_recovery.dump_failure(
-                        cfg.get("debug_dir"), frame=frame, cards=[],
-                        meta={"monitor": cfg.get("monitor", 1),
-                              "scale": cfg.get("ui_scaling", 1.0),
-                              "size": f"{frame.shape[1]}x{frame.shape[0]}",
-                              "brightness": round(brightness, 1),
-                              "error": grid.get("error", "")}, logger=log)
-                    if dump:
-                        log(f"Инвентарь: дамп {dump}")
-                except Exception:
-                    pass
-                return
-            cells = grid["cells"]
-            if sum(1 for c in cells if c.get("matched")) == 0:
-                try:
-                    import scan_recovery
-                    dump = scan_recovery.dump_failure(
-                        cfg.get("debug_dir"), frame=frame, cards=cells,
-                        meta={"monitor": cfg.get("monitor", 1),
-                              "scale": cfg.get("ui_scaling", 1.0),
-                              "size": f"{frame.shape[1]}x{frame.shape[0]}",
-                              "brightness": round(brightness, 1),
-                              "recognized": 0,
-                              "reason": grid.get("reason", "")}, logger=log)
-                    for index, cell in enumerate(cells[:3], 1):
-                        log(f"  OCR[{index}]: raw={cell.get('_ocr_raw', '')!r} "
-                            f"conf={float(cell.get('_ocr_conf') or 0):.2f} "
-                            f"bbox=({int(cell.get('left') or 0)},"
-                            f"{int(cell.get('top') or 0)},"
-                            f"{int(cell.get('width') or 0)},"
-                            f"{int(cell.get('height') or 0)})")
-                    if dump:
-                        log(f"Инвентарь: дамп {dump}")
-                except Exception as exc:
-                    log(f"Инвентарь: дамп не создан ({type(exc).__name__})")
-            log(inventory_scan.grid_log(grid))
-            # t119: виджеты создаём/меняем только в GUI-потоке
-            ui.inventory_names.emit(cells)
-            _stage("overlay")
-            if inventory_price_cache is None:
-                inventory_price_cache = inventory_scan.PriceCache(600)
-            names = inventory_scan.price_names(cells)
-
-            def _progress(total, done):
-                ui.inventory_progress.emit(
-                    inventory_scan.progress_text(cells, done))
-
-            _stage("prices")
-            lookup = (api.lookup if api is not None
-                      else (lambda name: None))
-            prices, stats = inventory_scan.parallel_prices(
-                names, lookup, cache=inventory_price_cache, workers=4,
-                timeout=3.0, progress=_progress, logger=log)
-            inventory_scan.apply_price_map(cells, prices)
-            ui.inventory_prices.emit(cells, stats)
-        except Exception as exc:
-            message = f"Инвентарь: ошибка ({type(exc).__name__}: {exc})"
-            log(message)
-            try:
-                ui.inventory_error.emit(message)
-            except Exception:
-                pass
-        finally:
-            if inventory_guard is not None:
-                inventory_guard.leave()
-            try:
-                import gc
-                gc.collect()
-                import inventory_scan as _inv
-                log(f"RAM: после скана "
-                    f"{_inv.process_memory_mb():.0f} МБ")
-            except Exception:
-                pass
-            log(f"Инвентарь: готово за "
-                f"{time.time() - inventory_started[0]:.1f} с")
-
-    def _inventory_panel():
-        return (getattr(unified, "inventory_panel", None)
-                if unified is not None else None)
-
-    def _inventory_toast(title, text, kind="inventory"):
-        try:
-            if not bool(cfg.get("notify_enabled", True)):
-                return None
-            events = cfg.get("notify_events") or []
-            if isinstance(events, str):
-                events = [x.strip() for x in events.split(",")]
-            if events and kind not in events:
-                return None
-            if center_mod is None or not callable(
-                    getattr(center_mod, "dispatch_toast_only", None)):
-                return None
-            return center_mod.dispatch_toast_only(
-                {"kind": kind, "title": title, "text": text,
-                 "action": "inventory"}, cfg=cfg, toast_stack=toast_stack,
-                login_check=login_in_progress, force=True)
-        except Exception as exc:
-            log(f"Инвентарь: тост не показан ({type(exc).__name__})")
-            return None
-
-    def _inventory_names(cells):
-        """GUI-поток: прогресс без плашек над игрой (t138)."""
-        try:
-            panel = _inventory_panel()
-            done = sum(1 for c in cells or [] if c.get("matched"))
-            if panel is not None:
-                panel.set_status(f"Сканирование… {done}/{len(cells or [])}")
-        except Exception as exc:
-            log(f"Инвентарь: статус не обновлён ({type(exc).__name__})")
-
-    def _inventory_prices(cells, stats):
-        """GUI-поток: таблица, сохранение инвентаря, тост."""
-        try:
-            import inventory_scan
-            data = inventory_scan.totals(cells)
-            panel = _inventory_panel()
-            if panel is not None:
-                panel.set_rows(cells)
-                panel.set_status(
-                    f"Готово: {data['count']} предметов · {data['total']} p "
-                    f"· {time.strftime('%H:%M')}")
-            log(inventory_scan.log_line(cells))
-            log(inventory_scan.summary_log(cells, stats))
-            log(f"Инвентарь: готово ({data['count']} предметов, "
-                f"{data['total']} p), плашки отключены")
-            _inventory_toast(
-                "Инвентарь",
-                f"{data['count']} предметов · {data['total']} p — "
-                "можно сканировать дальше")
-            if set_progress_mod is not None:
-                store = set_progress_mod.InventoryStore().from_cells(cells)
-                set_progress_mod.save_inventory(DATA_DIR, store)
-                _refresh_sets(cells)
-        except Exception as exc:
-            log(f"Инвентарь: UI-обновление не удалось ({type(exc).__name__})")
-
-    def _inventory_progress(text):
-        try:
-            panel = _inventory_panel()
-            if panel is not None:
-                panel.set_status(str(text))
-        except Exception:
-            pass
-
-    def _inventory_error(message):
-        _inventory_toast("Инвентарь", "не удалось (сетка не найдена)")
-
-    ui.inventory_names.connect(_inventory_names)
-    ui.inventory_prices.connect(_inventory_prices)
-    ui.inventory_progress.connect(_inventory_progress)
-    ui.inventory_error.connect(_inventory_error)
-
-    if INVENTORY_ENABLED and keyboard is not None:
-        register_hotkey(keyboard, cfg.get("hotkey_inventory", "alt+i"),
-                        _inventory_action)
-    elif not INVENTORY_ENABLED:
-        log("Инвентарь: отключён в этой версии")
     # старые хоткеи — ровно как раньше, но в обеих раскладках
     if unified is None:
         register_hotkey(keyboard, cfg.get("hotkey_editor", "f8"),
@@ -10142,8 +9979,7 @@ def run_gui(cfg):
         auto_update_watcher = None
 
     log("=" * 60)
-    log(f"VoidFrameRU {APP_VERSION} — готово "
-        f"(инвентарь: {'включён' if INVENTORY_ENABLED else 'выключен'}).")
+    log(f"VoidFrameRU {APP_VERSION} — готово (инвентарь: выключен).")
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
     if unified is not None:
         hotkey = (cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")).upper()
