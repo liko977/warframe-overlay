@@ -147,6 +147,47 @@ class ScanWatchdog:
             self._timer = None
 
 
+def copy_sample(data_dir, frame=None, meta=None, logger=None, keep=30):
+    """t152: сохранить проблемный кадр в DATA_DIR/samples (ротация)."""
+    try:
+        import os
+        import shutil
+        import time
+        root = os.path.join(data_dir, "samples")
+        os.makedirs(root, exist_ok=True)
+        stamp = (time.strftime("%Y%m%d_%H%M%S")
+                 + f"_{time.time_ns() % 1_000_000:06d}")
+        path = os.path.join(root, f"sample_{stamp}.png")
+        if frame is not None and not _imwrite(path, frame):
+            return ""
+        if meta is not None:
+            try:
+                import json
+                with open(os.path.join(root, f"sample_{stamp}.txt"), "w",
+                          encoding="utf-8") as handle:
+                    json.dump(meta, handle, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+        files = sorted((os.path.join(root, name)
+                        for name in os.listdir(root)
+                        if name.startswith("sample_") and name.endswith(".png")),
+                       key=os.path.getmtime)
+        while len(files) > keep:
+            old = files.pop(0)
+            try:
+                os.remove(old)
+                stem = os.path.splitext(old)[0]
+                if os.path.isfile(stem + ".txt"):
+                    os.remove(stem + ".txt")
+            except Exception:
+                pass
+        if logger:
+            logger(f"Скан: sample сохранён {path}")
+        return path
+    except Exception:
+        return ""
+
+
 def hide_windows(app, logger=None):
     """Скрыть видимые top-level окна; вернуть список для restore()."""
     hidden = []
