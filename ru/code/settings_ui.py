@@ -1476,6 +1476,11 @@ def build_settings_dialog():
             self.btn_open_log.setCursor(Qt.PointingHandCursor)
             self.btn_open_log.clicked.connect(self.open_log)
             row.addWidget(self.btn_open_log)
+            self.btn_open_diag = QPushButton("Открыть папку диагностики")
+            self.btn_open_diag.setStyleSheet(button_qss())
+            self.btn_open_diag.setCursor(Qt.PointingHandCursor)
+            self.btn_open_diag.clicked.connect(self.open_diagnostics)
+            row.addWidget(self.btn_open_diag)
             row.addStretch(1)
             outer.addLayout(row)
             self.lbl_data_dir = QLabel(str(self.data_dir or "—"))
@@ -1961,6 +1966,14 @@ def build_settings_dialog():
                 self._set_status("Папка данных открыта.")
                 return True
             self._set_status("Не удалось открыть папку данных.", warn=True)
+            return False
+
+        def open_diagnostics(self):
+            path = os.path.join(self.data_dir, "ocr_debug")
+            if open_data_folder(path, opener=self.on_open_data_dir):
+                self._set_status("Папка диагностики открыта.")
+                return True
+            self._set_status("Дампов пока нет.", warn=True)
             return False
 
         def open_log(self):
