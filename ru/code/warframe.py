@@ -75,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 _APPLYING_SETTINGS = False
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
@@ -2073,6 +2073,58 @@ def _expand_canonical_grid(groups, lefts, cfg):
     return slots, groups4
 
 
+def _nick_bottom(base_img, left, card_bottom, width=242):
+    """t153: низ строки ников под карточкой (яркий текст в полосе +70)."""
+    try:
+        import cv2
+        import numpy as np
+        x0 = max(0, int(left))
+        x1 = min(base_img.shape[1], int(left) + int(width))
+        y0 = max(0, int(card_bottom) + 2)
+        y1 = min(base_img.shape[0], int(card_bottom) + 82)
+        crop = base_img[y0:y1, x0:x1]
+        if crop.size == 0:
+            return int(card_bottom) + 52
+        b, g, r = cv2.split(crop)
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        mask = ((gray > 105) & (r > 90) & (r >= b - 10)).astype(np.uint8)
+        counts = mask.sum(axis=1)
+        rows = [i for i, count in enumerate(counts) if count >= 4]
+        if not rows:
+            return int(card_bottom) + 52
+        return y0 + max(rows)
+    except Exception:
+        return int(card_bottom) + 52
+
+
+def _bonus_top(base_img, card_bottom, cfg=None):
+    """1.0.9: верх строки «Бесконечный Бонус …» (жёлтый текст под никами).
+
+    Возвращает y первой жёлтой текстовой строки в полосе
+    ``card_bottom + 60 … card_bottom + 300`` или None.
+    """
+    try:
+        import cv2
+        import numpy as np
+        h, w = base_img.shape[:2]
+        y0 = max(0, int(card_bottom) + 120)
+        y1 = min(h, int(card_bottom) + 380)
+        if y1 - y0 < 10:
+            return None
+        crop = base_img[y0:y1, 0:w]
+        b, g, r = cv2.split(crop)
+        # золотой текст игры: ~#F5C451; строка бонуса — широкая (≥120 px)
+        mask = ((r > 150) & (g > 120) & (b < 130)
+                & (r.astype(np.int16) - b.astype(np.int16) > 60))
+        counts = mask.sum(axis=1)
+        rows = [i for i, count in enumerate(counts) if count >= 120]
+        if not rows:
+            return None
+        return y0 + rows[0]
+    except Exception:
+        return None
+
+
 def _panel_count(base_img, cfg):
     """t149: тема-независимая занятость канонических слотов (Canny)."""
     try:
@@ -2216,54 +2268,127 @@ def _cards_from_words(words, cfg, frames_found=None):
     return cards, note
 
 
-def _retry_unrecognized_card(base_img, card, cfg, ocr):
-    """t112: нижние 35–45 % карточки, все строки, второй проход выше."""
+_OCR_PROCS = {"count": 0}
+_SCAN_QUALITY = {"scans": 0, "names": 0, "cards": 0, "prices": 0,
+                "procs": 0}
+
+
+def _prepare_name_variant(gray, name):
+    """t152: 4 варианта предобработки полосы имени."""
+    import cv2
+    if name == "native":
+        return gray
+    if name == "otsu×2":
+        proc = cv2.resize(gray, None, fx=2.0, fy=2.0,
+                          interpolation=cv2.INTER_CUBIC)
+        _, proc = cv2.threshold(proc, 0, 255,
+                                cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return proc
+    if name == "invert":
+        return cv2.bitwise_not(gray)
+    proc = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
+    _, proc = cv2.threshold(proc, 0, 255,
+                            cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return proc
+
+
+def _record_scan_quality(cards):
+    """t152: метрики каждого скана + сводка раз в 20."""
+    try:
+        cards = list(cards or [])
+        names = sum(1 for c in cards if c.get("name"))
+        prices = sum(1 for c in cards
+                     if c.get("price") is not None
+                     or (c.get("price") == 0))
+        scans = _SCAN_QUALITY["scans"] + 1
+        procs = _OCR_PROCS["count"] - _SCAN_QUALITY.get("procs", 0)
+        _SCAN_QUALITY.update({"scans": scans,
+                              "procs": _OCR_PROCS["count"],
+                              "names": _SCAN_QUALITY["names"] + names,
+                              "cards": _SCAN_QUALITY["cards"] + len(cards),
+                              "prices": _SCAN_QUALITY["prices"] + prices})
+        log(f"Скан #{scans}: карточек {len(cards)}, имён {names}, "
+            f"цен {prices}, проходов {max(0, procs)}")
+        if scans % 20 == 0:
+            total = _SCAN_QUALITY["cards"]
+            got = _SCAN_QUALITY["names"]
+            pct = (100.0 * got / total) if total else 0.0
+            log(f"Скан: качество {got}/{total} имён ({pct:.0f} %)")
+            if pct < 80 and total >= 5:
+                log("Скан: качество ниже 80 % — пришлите дамп из "
+                    "Настройки → Оверлей → «Открыть папку диагностики»")
+    except Exception:
+        pass
+
+
+def _name_score(text, matcher, cfg=None):
+    if not text:
+        return 0.0
+    name, _bp, _key = normalize_card_name(text)
+    if not name:
+        return 0.0
+    if matcher:
+        try:
+            return float(matcher(name) or 0.0)
+        except Exception:
+            return 0.0
+    if _untradeable_reason(name, cfg):
+        return 1.0
+    return 0.5
+
+
+def _retry_unrecognized_card(base_img, card, cfg, ocr, matcher=None):
+    """t152: до 4 проходов OCR полосы имени, лучший по score."""
     try:
         import cv2
+        import time
         left = int(round(float(card.get("left") or 0)))
         top = float(card.get("top") or cfg["card_top"])
         height = float(card.get("height") or cfg["card_height"])
         width = int(cfg["card_width"])
         x0 = max(0, left)
         x1 = min(base_img.shape[1], left + width)
-        bbox = (x0, int(top), x1 - x0, int(height))
-        best_text = ""
-        best_score = 0.0
-        for shift in (0, 12):
-            y0 = max(0, int(top + height * 0.55) - shift)
-            y1 = min(base_img.shape[0], int(top + height - 2))
-            crop = base_img[y0:y1, x0:x1]
-            if crop.size == 0:
-                continue
-            card["_crop"] = crop.copy()
-            gray = _to_gray(crop)
-            gray = cv2.createCLAHE(clipLimit=3.0,
-                                   tileGridSize=(8, 8)).apply(gray)
-            proc = cv2.resize(gray, None, fx=2.0, fy=2.0,
-                              interpolation=cv2.INTER_CUBIC)
+        y0 = max(0, int(top + height * 0.55))
+        y1 = min(base_img.shape[0], int(top + height - 2))
+        crop = base_img[y0:y1, x0:x1]
+        if crop.size == 0:
+            return ""
+        card["_crop"] = crop.copy()
+        gray = _to_gray(crop)
+        best_text, best_score = "", 0.0
+        started = time.time()
+        for idx, variant in enumerate(("native", "otsu×2", "invert",
+                                       "clahe"), 1):
+            if time.time() - started > 1.5:
+                break
+            proc = _prepare_name_variant(gray, variant)
             try:
                 res = ocr.read_proc(proc)
             except Exception:
                 res = []
-            words = _word_boxes(res, {"left": x0, "top": y0}, 2.0)
+            _OCR_PROCS["count"] += 1
+            words = _word_boxes(res, {"left": x0, "top": y0}, 1.0)
             words.sort(key=lambda w: (w.get("cy", 0), w.get("cx", 0)))
             text = join_words(words)
-            if not text:
-                continue
-            # фильтр служебных подписей игры + чистка
             try:
                 import card_text
-                text = card_text.clean_card_name(text, cfg.get("known_nicks") or ())
+                text = card_text.clean_card_name(
+                    text, cfg.get("known_nicks") or ())
             except Exception:
                 pass
-            score = _ocr_fix_name(text, cfg)[0] and 1.0 or 0.0
-            if len(text) > len(best_text):
+            score = _name_score(text, matcher, cfg)
+            if score > best_score:
                 best_text, best_score = text, score
-            if best_text:
+            card["_ocr_pass"] = idx
+            if text and score >= 0.85:
+                log(f"карточка: проход {idx} ({variant}) → "
+                    f"'{normalize_card_name(text)[0]}' score {score:.2f}")
                 break
-        card["_ocr_bbox"] = bbox
+        card["_ocr_bbox"] = (x0, y0, x1 - x0, y1 - y0)
+        card["_ocr_passes"] = int(card.get("_ocr_passes") or 0) + 1
         return best_text
-    except Exception:
+    except Exception as exc:
+        log(f"OCR: проход не удался ({type(exc).__name__}: {exc})")
         return ""
 
 
@@ -2282,7 +2407,11 @@ def retry_unrecognized_cards(base_img, cards, cfg, ocr, matcher=None,
         if old and (matcher is None or old_score >= threshold):
             continue
         retried += 1
-        text = _retry_unrecognized_card(base_img, card, cfg, ocr)
+        try:
+            text = _retry_unrecognized_card(base_img, card, cfg, ocr,
+                                            matcher=matcher)
+        except TypeError:
+            text = _retry_unrecognized_card(base_img, card, cfg, ocr)
         card["_ocr_raw"] = text
         if not text:
             continue
@@ -2659,6 +2788,22 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
         cards, note = _cards_from_words(words, cfg, frames_found=frames_found)
     if note:
         log(note)
+    _nick_values = []
+    for _card in cards or []:
+        _top = float(_card.get("top") or cfg["card_top"])
+        _h = float(_card.get("height") or cfg.get("card_height") or 235)
+        _nick_values.append(_nick_bottom(
+            base_img, _card.get("left") or 0, _top + _h,
+            int(cfg.get("card_width") or 242)))
+    _nick_row = max(_nick_values) if _nick_values else \
+        float(cfg["card_top"] + cfg["card_height"] + 52)
+    _bonus_row = _bonus_top(
+        base_img,
+        float(cfg["card_top"] + cfg["card_height"]), cfg)
+    for _card in cards or []:
+        _card["nick_bottom"] = _nick_row
+        if _bonus_row is not None:
+            _card["bonus_top"] = _bonus_row
     names_n = sum(1 for c in cards or [] if c.get("name"))
     if cards:
         lefts_log = [int(round(c["left"])) for c in cards]
@@ -2680,11 +2825,13 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
     try:
         if len(cards) < 4 or any(not c.get("name") for c in cards):
             import scan_recovery
+            _meta = {"panels": panels_found, "names_row": names_n,
+                     "chosen_N": len(cards), "layout": "cards",
+                     "ui_scaling": cfg.get("ui_scaling")}
             _dump = scan_recovery.dump_failure(
                 cfg.get("debug_dir"), frame=base_img, cards=cards,
-                meta={"panels": panels_found, "names_row": names_n,
-                      "chosen_N": len(cards), "layout": "cards",
-                      "ui_scaling": cfg.get("ui_scaling")}, logger=log)
+                meta=_meta, logger=log)
+            scan_recovery.copy_sample(DATA_DIR, base_img, _meta, logger=log)
             if _dump:
                 log(f"Скан: дамп {_dump}")
     except Exception:
@@ -2702,6 +2849,7 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
                                       if not c.get("unrecognized")),
                          "source": source})
     if not cards:
+        _record_scan_quality(cards)
         return []
     # точечный повтор только для нераспознанных карточек
     retry_unrecognized_cards(base_img, cards, cfg_eff, ocr,
@@ -4021,9 +4169,33 @@ def build_overlays():
                                     d.get("price") == best_price)
                 self.cards[i].set_data(d)
                 left = d["card_left"]
-                # 1.0.8: плашки всегда под найденной карточкой
-                plate_y = (float(self.cfg["card_top"])
-                           + float(self.cfg["card_height"]) + 6)
+                # 1.0.9: плашки под никами игроков
+                card_bottom = (float(self.cfg["card_top"])
+                               + float(self.cfg["card_height"]))
+                try:
+                    nick_bottom = (float(d["nick_bottom"])
+                                   if d.get("nick_bottom") is not None
+                                   else card_bottom + 52.0)
+                except Exception:
+                    nick_bottom = card_bottom + 52.0
+                # 1.0.9: плашки — в свободной полосе НАД строкой «Бонус»
+                try:
+                    bonus_top = (float(d["bonus_top"])
+                                 if d.get("bonus_top") is not None else None)
+                except Exception:
+                    bonus_top = None
+                if bonus_top is not None and bonus_top > nick_bottom:
+                    plate_y = bonus_top - 24.0
+                    if plate_y < nick_bottom + 8.0:
+                        plate_y = (nick_bottom + bonus_top) / 2.0
+                    plate_y = min(plate_y, bonus_top - 10.0)
+                else:
+                    plate_y = max(card_bottom + 110.0, nick_bottom + 6.0)
+                if not getattr(self, "_nick_logged", False):
+                    self._nick_logged = True
+                    log(f"плашки: над бонусом (nick_bottom={nick_bottom:.0f}, "
+                        f"bonus_top={bonus_top if bonus_top else '—'}, "
+                        f"y={plate_y:.0f})")
                 self.place(self.cards[i], left, plate_y)
                 shown += 1
             if shown:
