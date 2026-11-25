@@ -109,19 +109,6 @@ def path_to_gameref(path):
     return p.replace(GAMEREF_FROM, GAMEREF_TO)
 
 
-def gameref_index(items):
-    """Строит обратный индекс ``{gameRef: slug}`` из словаря предметов API."""
-    out = {}
-    for v in (items or {}).values():
-        if not isinstance(v, dict):
-            continue
-        ref = v.get("gameRef")
-        slug = v.get("slug")
-        if ref and slug and ref not in out:
-            out[ref] = slug
-    return out
-
-
 def slug_from_path(path, api=None):
     """Внутриигровой путь → слаг warframe.market (или ``None``).
 
