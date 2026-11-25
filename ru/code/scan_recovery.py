@@ -147,6 +147,9 @@ class ScanWatchdog:
             self._timer = None
 
 
+_SAMPLE_SEQ = 0
+
+
 def copy_sample(data_dir, frame=None, meta=None, logger=None, keep=30):
     """t152: сохранить проблемный кадр в DATA_DIR/samples (ротация)."""
     try:
@@ -155,8 +158,9 @@ def copy_sample(data_dir, frame=None, meta=None, logger=None, keep=30):
         import time
         root = os.path.join(data_dir, "samples")
         os.makedirs(root, exist_ok=True)
-        stamp = (time.strftime("%Y%m%d_%H%M%S")
-                 + f"_{time.time_ns() % 1_000_000:06d}")
+        global _SAMPLE_SEQ
+        _SAMPLE_SEQ += 1
+        stamp = f"{time.time_ns():020d}_{_SAMPLE_SEQ:06d}"
         path = os.path.join(root, f"sample_{stamp}.png")
         if frame is not None and not _imwrite(path, frame):
             return ""
@@ -168,10 +172,9 @@ def copy_sample(data_dir, frame=None, meta=None, logger=None, keep=30):
                     json.dump(meta, handle, ensure_ascii=False, indent=2)
             except Exception:
                 pass
-        files = sorted((os.path.join(root, name)
-                        for name in os.listdir(root)
-                        if name.startswith("sample_") and name.endswith(".png")),
-                       key=os.path.getmtime)
+        files = sorted(os.path.join(root, name)
+                       for name in os.listdir(root)
+                       if name.startswith("sample_") and name.endswith(".png"))
         while len(files) > keep:
             old = files.pop(0)
             try:
