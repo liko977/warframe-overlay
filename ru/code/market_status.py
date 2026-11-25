@@ -154,10 +154,6 @@ def migrate_status_config(cfg):
     return changed
 
 
-def duration_menu_spec():
-    return list(DURATION_PRESETS)
-
-
 def ws_request_headers(token=""):
     """Заголовки WS-апгрейда (Cloudflare требует Origin/UA; cookie JWT)."""
     headers = {"Origin": ORIGIN, "User-Agent": USER_AGENT,
