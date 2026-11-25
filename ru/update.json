@@ -1,13 +1,13 @@
 {
-  "version": "1.1.0",
-  "notes": "Дизайн E: строгие строки, моноширинные цены и метки частей в Маркете и Ордерах. Alt+D — выделите карточку и получите цену; карточка исчезает через 5 секунд. Плашки наград: цена, дукаты и комплект видны сразу и исчезают через 5 секунд. Без сокращений: КОМПЛЕКТ, Рукоять, 12 платина, 15 дукаты. Комплект больше не показывает 1 платину из-за одиночного ордера. Карточка «2 X Чертёж: Форма» распознаётся — 4 из 4 наград.",
-  "updated_at": "2026-11-25T18:58:56Z",
+  "version": "1.1.1",
+  "notes": "Alt+D: цена распознаётся сразу после запуска (движок OCR подключается динамически). Alt+D: кнопка «Выставить на маркет» — ордер по актуальной цене, без перехода на сайт. Мои ордера: названия предметов вместо «предмет», работает и без сети — из локального каталога. Мелкие фиксы стабильности.",
+  "updated_at": "2026-11-25T19:37:12Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "578668c8e482d30f7b6460bf810fcd3ffc1c59ffd0005fa8d65a74f5df0afde2",
+      "sha256": "ea0bd1013d63a5f88163566172b0dae3b4fce9cb8acb643b4bb1c871d1028ddc",
       "size": 2946
     },
     {
@@ -25,8 +25,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "6d870e1637e985e43320815611863edd484ec417dadb91fa9dcd32a3daa74235",
-      "size": 18492
+      "sha256": "68dca5439336b5ae0ce85176e22484545bc589f5bc5fefe3c17ca5aced445bf9",
+      "size": 17501
     },
     {
       "path": "chat_client.py",
@@ -109,8 +109,8 @@
     {
       "path": "market_browser.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_browser.py",
-      "sha256": "120df9d3ac2534ff0bd3f1628923346afaa1473246b794a1c84768923adec5cf",
-      "size": 113104
+      "sha256": "0bd9b464eddd09d55e096dd2582f41cfbe2b1ad64b68685c3a55a90a33d72da5",
+      "size": 114270
     },
     {
       "path": "market_browser_login.py",
@@ -163,8 +163,8 @@
     {
       "path": "region_price.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/region_price.py",
-      "sha256": "5bc01a39218af3f62a4641e2d715e31bc58bcaa4c11540ff7d02413d2bd8de9b",
-      "size": 12829
+      "sha256": "a0739a176845762125503e8a9687988501a053bdee7a8391259d3475b0dc7dd3",
+      "size": 20720
     },
     {
       "path": "relic_pool.py",
@@ -253,8 +253,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "37113221dc1f2b2dc4916eae564456268da276baf82e4550952687b3118bf776",
-      "size": 494032
+      "sha256": "a70a652cec2957b1104e7e683c25c373161613bdff3487e251a7df0849aa2a38",
+      "size": 494720
     }
   ]
 }
