@@ -1839,17 +1839,3 @@ def build_toast_stack():
 
     return ToastStack
 
-
-def notification_center_defaults():
-    """Ключи конфига, которые добавляет центр (для settings/тестов)."""
-    return {
-        "notify_mode": "overlay",
-        "notify_toast_sec": 6,
-        "notify_toast_opacity": 0.95,
-        "notify_chat_color": DEFAULT_CHAT_COLOR,
-        "notify_market_color": DEFAULT_MARKET_COLOR,
-        "notify_price_color": DEFAULT_PRICE_COLOR,
-        "notify_sound_choice": "auto",
-        "notify_sound_file": "",
-    }
-
