@@ -55,10 +55,11 @@ def age_text(seconds):
     if sec < 60:
         return f"{sec} с"
     if sec < 3600:
-        return f"{sec // 60} мин"
+        return f"{sec // 60} минут"
     if sec < 86400:
         hours, rem = divmod(sec, 3600)
-        return f"{hours} ч {rem // 60:02d} мин" if rem // 60 else f"{hours} ч"
+        return (f"{hours} часов {rem // 60:02d} минут"
+                if rem // 60 else f"{hours} часов")
     days, rem = divmod(sec, 86400)
     return f"{days} д {rem // 3600} ч" if rem // 3600 else f"{days} д"
 
@@ -887,28 +888,26 @@ def build_market_browser():
             self.item_data = dict(item)
             self.cfg = dict(cfg or {})
             self.setObjectName("mRow")
-            self.setFixedHeight(48)
+            self.setFixedHeight(theme.ROW_H)
             self.set_style(selected=False, zebra=False)
             lay = QHBoxLayout(self)
-            lay.setContentsMargins(8, 4, 8, 4)
+            lay.setContentsMargins(8, 0, 8, 0)
             lay.setSpacing(8)
             self.lbl_name = QLabel(str(item.get("name") or item.get("slug") or "?"))
-            self.lbl_name.setFont(make_font(12))
+            self.lbl_name.setFont(make_font(10))
             self.lbl_name.setStyleSheet(f"color:{theme.PALETTE['text']};")
             self.lbl_name.setMinimumWidth(0)
-            self.icon = item_icon_label(item, 40, cfg)
-            if self.icon is not None:
-                lay.addWidget(self.icon, 0, Qt.AlignVCenter)
+            self.icon = item_icon_label(item, 24, cfg)
             self.lbl_sell = QLabel("")
-            self.lbl_sell.setFont(make_font(11, True))
+            self.lbl_sell.setFont(make_font(9, True))
             self.lbl_sell.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
             self.lbl_sell.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_buy = QLabel("")
-            self.lbl_buy.setFont(make_font(11, True))
+            self.lbl_buy.setFont(make_font(9, True))
             self.lbl_buy.setStyleSheet(f"color:{theme.PALETTE['platinum']};")
             self.lbl_buy.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_online = QLabel("")
-            self.lbl_online.setFont(make_font(10))
+            self.lbl_online.setFont(make_font(9))
             self.lbl_online.setStyleSheet(f"color:{theme.PALETTE['muted']};")
             lay.addWidget(self.lbl_name, 1)
             import item_icons
@@ -916,9 +915,23 @@ def build_market_browser():
                 str(item.get("slug") or ""), str(item.get("name") or ""),
                 self)
             if self.part_chip is not None and self.part_chip.text():
-                lay.addWidget(self.part_chip, 0, Qt.AlignVCenter)
+                _word = self.part_chip.text().strip("[]")
+                self.part_chip.setText(f"[{_word.upper()}]")
+                self.part_chip.setFixedWidth(140)
+                self.part_chip.setStyleSheet(theme.chip_qss(_word))
+                lay.insertWidget(1, self.part_chip, 0, Qt.AlignVCenter)
             elif self.part_chip is not None:
                 self.part_chip.deleteLater()
+            if self.part_chip is None or not self.part_chip.text():
+                spacer = QWidget()
+                spacer.setFixedWidth(140)
+                lay.insertWidget(0, spacer)
+            self.lbl_sell.setFixedWidth(70)
+            self.lbl_sell.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.lbl_buy.setFixedWidth(70)
+            self.lbl_buy.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self.lbl_online.setFixedWidth(60)
+            self.lbl_online.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             lay.addWidget(self.lbl_sell)
             lay.addWidget(self.lbl_buy)
             lay.addWidget(self.lbl_online)
@@ -1004,7 +1017,7 @@ def build_market_browser():
             # шапка: заголовок, табы, закрыть
             head = QHBoxLayout()
             head.setSpacing(10)
-            self.lbl_title = QLabel("Маркет")
+            self.lbl_title = QLabel("МАРКЕТ")
             self.lbl_title.setFont(make_font(theme.size("window"), True))
             self.lbl_title.setStyleSheet(f"color:{theme.PALETTE['text']};")
             self.btn_tab_search = QPushButton("Поиск")
@@ -1094,7 +1107,7 @@ def build_market_browser():
             left = QFrame()
             left.setObjectName("panel")
             left.setStyleSheet(theme.panel_qss("panel", 6) + theme.scroll_qss())
-            left.setFixedWidth(360)
+            left.setFixedWidth(520)
             left_lay = QVBoxLayout(left)
             left_lay.setContentsMargins(10, 10, 10, 10)
             left_lay.setSpacing(8)
@@ -1119,6 +1132,21 @@ def build_market_browser():
             self.list_results.currentRowChanged.connect(self._on_row_changed)
             self.list_results.itemActivated.connect(lambda _item: self._on_search_enter())
             left_lay.addLayout(search_row)
+            head = QHBoxLayout()
+            head.setContentsMargins(8, 0, 8, 0)
+            head.setSpacing(8)
+            for text, width in (("МЕТКА", 140), ("ПРЕДМЕТ", 0),
+                                ("ЦЕНА", 70), ("ДУКАТЫ", 70),
+                                ("ОНЛАЙН", 60)):
+                lbl = QLabel(text)
+                lbl.setStyleSheet(theme.caps_header_qss())
+                if width:
+                    lbl.setFixedWidth(width)
+                    lbl.setAlignment(
+                        (Qt.AlignLeft if text == "МЕТКА" else Qt.AlignRight)
+                        | Qt.AlignVCenter)
+                head.addWidget(lbl, 1 if not width else 0)
+            left_lay.addLayout(head)
             left_lay.addWidget(self.list_results, 1)
 
             right = QFrame()
@@ -1132,6 +1160,8 @@ def build_market_browser():
             self.lbl_detail_name.setStyleSheet(
                 f"color:{theme.PALETTE['text']}; background: transparent;")
             self.lbl_detail_name.setWordWrap(True)
+            self.lbl_detail_set = QLabel("КОМПЛЕКТ: —")
+            self.lbl_detail_set.setStyleSheet(theme.mono_qss(10))
             self.badges_host = QWidget()
             self.badges_box = QHBoxLayout(self.badges_host)
             self.badges_box.setContentsMargins(0, 0, 0, 0)
@@ -1184,7 +1214,10 @@ def build_market_browser():
             self.btn_refresh_details.clicked.connect(lambda: self._load_details(force=True))
             for button in (self.btn_sell, self.btn_buy, self.btn_site,
                            self.btn_refresh_details):
-                button.setFont(make_font(theme.size("button")))
+                button.setFont(make_font(10))
+                button.setFixedHeight(24)
+                button.setStyleSheet(button.styleSheet()
+                                     + " border-radius:0px;")
                 button.setCursor(Qt.PointingHandCursor)
                 actions.addWidget(button)
             actions.addStretch(1)
@@ -1218,6 +1251,7 @@ def build_market_browser():
             info_col = QVBoxLayout()
             info_col.setSpacing(6)
             info_col.addWidget(self.lbl_detail_name)
+            info_col.addWidget(self.lbl_detail_set)
             info_col.addWidget(self.badges_host)
             info_col.addWidget(self.lbl_set_parts)
             info_col.addStretch(1)
@@ -1374,6 +1408,20 @@ def build_market_browser():
                 self._load_catalog(force=True)
 
         # ── каталог и поиск ────────────────────────────────────────────
+        def _set_items(self, items):
+            merged = {}
+            for item in list(self._offline_catalog) + list(items or []):
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("id") or item.get("slug")
+                if key:
+                    merged[key] = item
+            values = list(merged.values())
+            self._items_by_slug = {
+                item.get("slug"): item for item in values if item.get("slug")}
+            self._items_by_id = {
+                item.get("id"): item for item in values if item.get("id")}
+
         def _load_catalog(self, force=False):
             if self._busy_catalog:
                 return
@@ -1439,7 +1487,7 @@ def build_market_browser():
             self._result_rows = []
             for index, item in enumerate(self._result_items):
                 list_item = QListWidgetItem()
-                list_item.setSizeHint(QSize(10, 48))
+                list_item.setSizeHint(QSize(10, theme.ROW_H))
                 self.list_results.addItem(list_item)
                 row = _ResultRow(item, self, self.cfg)
                 row.set_style(zebra=(index % 2 == 1))
@@ -1602,6 +1650,13 @@ def build_market_browser():
             self._details = {"meta": meta, "top": top, "series": series}
             name = str(meta.get("name") or payload.get("slug") or "")
             self.lbl_detail_name.setText(name)
+            _sp = meta.get("set_price")
+            _so = meta.get("sell_online") or meta.get("set_online") or 0
+            if _sp:
+                self.lbl_detail_set.setText(
+                    f"КОМПЛЕКТ: {int(_sp)} платина · {int(_so)} ОНЛАЙН")
+            else:
+                self.lbl_detail_set.setText("КОМПЛЕКТ: —")
             self._fill_badges(meta)
             parts = meta.get("set_parts") or []
             self.lbl_set_parts.setText(
@@ -2006,17 +2061,22 @@ def build_market_browser():
                         if isinstance(order.get("item"), dict) else {})
             item_id = str(order.get("itemId") or embedded.get("id") or "")
             item = self._items_by_id.get(item_id) or {}
-            if not item and embedded.get("slug"):
-                item = self._items_by_slug.get(embedded.get("slug")) or {}
+            _slug = (embedded.get("slug") or order.get("itemSlug")
+                     or order.get("slug") or "")
+            if not item and _slug:
+                item = self._items_by_slug.get(_slug) or {}
             if not item and embedded:
                 item = embedded
             i18n = (embedded.get("i18n")
                     if isinstance(embedded.get("i18n"), dict) else {})
             ru = i18n.get("ru") if isinstance(i18n.get("ru"), dict) else {}
             en = i18n.get("en") if isinstance(i18n.get("en"), dict) else {}
+            _display = (order.get("display_name")
+                        if isinstance(order.get("display_name"), dict) else {})
             name = (item.get("name") or item.get("market_name")
                     or ru.get("name") or en.get("name")
-                    or embedded.get("name") or "предмет")
+                    or embedded.get("name")
+                    or _display.get("canonical_name") or "предмет")
             if str(name).strip().lower() == item_id.lower():
                 name = "предмет"
             if item_id and item_id not in getattr(self, "_resolved_ids", set()):
@@ -2062,7 +2122,7 @@ def build_market_browser():
             card.setObjectName("mRow")
             card.setProperty("order_id", order.get("id"))
             card.setProperty("order_kind", kind)
-            card.setFixedHeight(48)
+            card.setFixedHeight(theme.ROW_H)
             card.setStyleSheet(theme.row_qss(zebra=(index % 2 == 1)))
             lay = QHBoxLayout(card)
             lay.setContentsMargins(8, 0, 8, 0)
@@ -2070,7 +2130,7 @@ def build_market_browser():
             lay.addWidget(badge_label("SELL" if kind == "sell" else "BUY",
                                       color, "#0d141c"))
             icon_item = self._order_dialog_item(order)
-            icon = item_icon_label(icon_item, 40, self.cfg)
+            icon = item_icon_label(icon_item, 24, self.cfg)
             if icon is not None:
                 lay.addWidget(icon, 0, Qt.AlignVCenter)
             name = QLabel(str(self._order_item_name(order)))
