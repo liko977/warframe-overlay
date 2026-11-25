@@ -91,6 +91,10 @@ DEFAULT_VALUES = {
     "notify_sound_choice": "auto",
     "notify_sound_file": "",
     "overlay_layout": "bottom",
+    "plates_click_through": False,
+    "plate_boxes": {},
+    "region_card_ttl": 5.0,
+    "overlay_ttl": 5.0,
     "font_scale": 1.0,
     "overlay_opacity": 1.0,
     "currency_platinum_color": "#E7F1FF",
@@ -916,7 +920,9 @@ def build_settings_dialog():
             self.setWindowTitle("Настройки")
             self.setModal(True)
             self.setMinimumSize(760, 640)
-            self.setStyleSheet(qss())
+            self.setStyleSheet(
+                qss() + " QLineEdit, QSpinBox, QDoubleSpinBox {"
+                " font-family:'Consolas', monospace; }")
             try:
                 import login_mode
                 login_mode.register_dialog(self)      # B2: F9 закроет окно
@@ -1157,6 +1163,31 @@ def build_settings_dialog():
             self.cmb_layout.addItem("Под карточками (сверху)", "under_cards")
             self.cmb_layout.setFont(font(11))
             form.addRow(QLabel("Положение плашек"), self.cmb_layout)
+            self.chk_plates_click = QCheckBox(
+                "Плашки не мешают мыши (click-through)")
+            self.chk_plates_click.setFont(font(11))
+            form.addRow(QLabel(""), self.chk_plates_click)
+            self.btn_reset_boxes = QPushButton("Сбросить расположение")
+            self.btn_reset_boxes.setStyleSheet(button_qss())
+            self.btn_reset_boxes.clicked.connect(self.reset_plate_boxes)
+            form.addRow(QLabel(""), self.btn_reset_boxes)
+            self.spin_region_ttl = QDoubleSpinBox()
+            self.spin_region_ttl.setRange(0.0, 30.0)
+            self.spin_region_ttl.setSingleStep(1.0)
+            self.spin_region_ttl.setDecimals(1)
+            self.spin_region_ttl.setSuffix(" с")
+            self.spin_region_ttl.setSpecialValueText("не скрывать")
+            form.addRow(QLabel("Карточка Alt+D: скрывать через"),
+                        self.spin_region_ttl)
+            self.spin_overlay_ttl = QDoubleSpinBox()
+            self.spin_overlay_ttl.setRange(0.0, 30.0)
+            self.spin_overlay_ttl.setSingleStep(1.0)
+            self.spin_overlay_ttl.setDecimals(1)
+            self.spin_overlay_ttl.setSuffix(" с")
+            self.spin_overlay_ttl.setSpecialValueText("не скрывать")
+            self.spin_overlay_ttl.setToolTip("0 — не скрывать")
+            form.addRow(QLabel("Плашки наград: скрывать через"),
+                        self.spin_overlay_ttl)
             self.spin_font_scale = QDoubleSpinBox()
             self.spin_font_scale.setRange(0.8, 1.6)
             self.spin_font_scale.setSingleStep(0.05)
@@ -1329,7 +1360,7 @@ def build_settings_dialog():
             form.addRow(QLabel("URL манифеста обновлений"), self.edit_update_url)
             self.spin_update_interval = QSpinBox()
             self.spin_update_interval.setRange(15, 1440)
-            self.spin_update_interval.setSuffix(" мин")
+            self.spin_update_interval.setSuffix(" минут")
             self.spin_update_interval.setFont(font(11))
             self.spin_update_interval.setToolTip(
                 "Как часто проверять обновления, пока приложение запущено")
@@ -1550,6 +1581,12 @@ def build_settings_dialog():
                 sound_index if sound_index >= 0 else 0)
             self.edit_sound_file.setText(
                 str(values.get("notify_sound_file") or ""))
+            self.chk_plates_click.setChecked(
+                bool(values.get("plates_click_through", False)))
+            self.spin_region_ttl.setValue(
+                float(values.get("region_card_ttl", 5.0) or 0))
+            self.spin_overlay_ttl.setValue(
+                float(values.get("overlay_ttl", 5.0) or 0))
             layout_value = str(values.get("overlay_layout") or "bottom")
             index = self.cmb_layout.findData(layout_value)
             self.cmb_layout.setCurrentIndex(index if index >= 0 else 0)
@@ -1642,6 +1679,12 @@ def build_settings_dialog():
                                             or "auto"),
                 "notify_sound_file": self.edit_sound_file.text().strip(),
                 "overlay_layout": str(self.cmb_layout.currentData() or "bottom"),
+                "plates_click_through": bool(
+                    self.chk_plates_click.isChecked()),
+                "region_card_ttl": round(float(
+                    self.spin_region_ttl.value()), 1),
+                "overlay_ttl": round(float(
+                    self.spin_overlay_ttl.value()), 1),
                 "font_scale": round(float(self.spin_font_scale.value()), 2),
                 "overlay_opacity": round(float(self.spin_opacity.value()), 2),
                 "currency_platinum_color": str(
@@ -1967,6 +2010,16 @@ def build_settings_dialog():
                 return True
             self._set_status("Не удалось открыть папку данных.", warn=True)
             return False
+
+        def reset_plate_boxes(self):
+            self.cfg["plate_boxes"] = {}
+            try:
+                import warframe
+                warframe._write_config(self.cfg, warframe.CONFIG_PATH)
+            except Exception:
+                pass
+            self._set_status("Расположение плашек сброшено.")
+            return True
 
         def open_diagnostics(self):
             path = os.path.join(self.data_dir, "ocr_debug")
