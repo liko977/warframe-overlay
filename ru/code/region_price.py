@@ -5,7 +5,9 @@ import time
 
 from PyQt5.QtCore import Qt, QPoint, QRect, QSize, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QPainter, QPen
-from PyQt5.QtWidgets import QApplication, QFrame, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (QApplication, QCheckBox, QFrame, QHBoxLayout,
+                             QLabel, QPushButton, QSpinBox, QVBoxLayout,
+                             QWidget)
 
 CARD_FONT = "font-family:'Segoe UI', Arial, sans-serif;"
 MIN_BOX = QSize(180, 60)
@@ -164,10 +166,18 @@ class RegionSelector(QWidget):
 class PriceCard(DragResizeMixin, QWidget):
     closed = pyqtSignal()
 
-    def __init__(self, cfg=None, on_save=None, log=print):
+    def __init__(self, cfg=None, on_save=None, log=print, client=None,
+                 on_open_orders=None, toast=None):
         super().__init__()
         self.cfg = dict(cfg or {})
         self._log = log
+        self._client = client
+        self._on_open_orders = on_open_orders
+        self._toast = toast
+        self._item_id = ""
+        self._slug = ""
+        self._name = ""
+        self._price = None
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                             | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -193,6 +203,42 @@ class PriceCard(DragResizeMixin, QWidget):
         lay.addWidget(self.lbl_name)
         lay.addWidget(self.lbl_price)
         lay.addWidget(self.lbl_info)
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color:#93A1B5;font-size:10px;")
+        lay.addWidget(self.lbl_status)
+        actions = QHBoxLayout()
+        self.btn_sell = QPushButton("Выставить на маркет")
+        self.btn_open = QPushButton("Открыть на маркете")
+        for button in (self.btn_sell, self.btn_open):
+            button.setFixedHeight(24)
+            button.setStyleSheet(
+                "QPushButton{background:#17212e;border:1px solid #24344a;"
+                "border-radius:0;color:#e6edf6;font-size:10px;}")
+            button.setCursor(Qt.PointingHandCursor)
+        self.btn_open.clicked.connect(self._open_market)
+        self.btn_sell.clicked.connect(self._show_confirm)
+        actions.addWidget(self.btn_sell)
+        actions.addWidget(self.btn_open)
+        lay.addLayout(actions)
+        self.confirm = QWidget()
+        confirm_lay = QHBoxLayout(self.confirm)
+        confirm_lay.setContentsMargins(0, 2, 0, 0)
+        self.spin_price = QSpinBox()
+        self.spin_price.setRange(1, 100000)
+        self.spin_qty = QSpinBox()
+        self.spin_qty.setRange(1, 999)
+        self.chk_visible = QCheckBox("видим")
+        self.chk_visible.setChecked(True)
+        self.btn_submit = QPushButton("Выставить")
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_submit.clicked.connect(self._submit_order)
+        self.btn_cancel.clicked.connect(self._hide_confirm)
+        for widget in (QLabel("цена"), self.spin_price, QLabel("количество"),
+                       self.spin_qty, self.chk_visible, self.btn_submit,
+                       self.btn_cancel):
+            confirm_lay.addWidget(widget)
+        self.confirm.setVisible(False)
+        lay.addWidget(self.confirm)
         outer.addWidget(self.frame)
         self.resize(260, 86)
         self.set_click_through(bool(self.cfg.get("plates_click_through")))
@@ -223,17 +269,102 @@ class PriceCard(DragResizeMixin, QWidget):
         except Exception:
             pass
 
-    def set_data(self, name, price, info="", score=None):
-        title = name or "не распознано"
+    def set_data(self, name, price, info="", score=None, item_id="",
+                 slug=""):
+        self._name = str(name or "")
+        self._price = price
+        self._item_id = str(item_id or "")
+        self._slug = str(slug or "")
+        title = name or "НЕ РАСПОЗНАНО"
         if score is not None and score < 0.6:
-            title = f"не распознано: {name or '?'}"
+            title = f"НЕ РАСПОЗНАНО: {name or '—'}"
         self.lbl_name.setText(title)
         self.lbl_price.setText(
             "—" if price is None else f"{int(price)} платина")
         self.lbl_info.setText(info)
+        self._refresh_sell()
         self.adjustSize()
         self.resize(max(180, min(520, self.width())),
                     max(60, min(160, self.height())))
+
+    def _refresh_sell(self):
+        reason = ""
+        if not self._name or "НЕ РАСПОЗНАНО" in self._name:
+            reason = "сначала распознайте предмет"
+        elif self._price is None:
+            reason = "цена неизвестна"
+        elif not self._item_id:
+            reason = "нет item_id предмета"
+        elif self._client is None or not getattr(
+                self._client, "has_token", lambda: False)():
+            reason = "нужен токен warframe.market"
+        self.btn_sell.setEnabled(not reason)
+        if reason:
+            self.btn_sell.setToolTip(reason)
+            self.btn_sell.setText("Выставить на маркет")
+        else:
+            self.btn_sell.setToolTip("Выставить SELL-ордер")
+            self.btn_sell.setText(
+                f"Выставить на маркет — {int(self._price)} платина")
+
+    def _show_confirm(self):
+        if not self.btn_sell.isEnabled():
+            return
+        self.spin_price.setValue(max(1, int(self._price)))
+        self.spin_qty.setValue(max(
+            1, int(self.cfg.get("market_default_quantity", 1) or 1)))
+        self.chk_visible.setChecked(True)
+        self.confirm.setVisible(True)
+        self.adjustSize()
+
+    def _hide_confirm(self):
+        self.confirm.setVisible(False)
+        self.adjustSize()
+
+    def _open_market(self):
+        if self._on_open_orders is not None:
+            self._on_open_orders()
+            return
+        import warframe
+        warframe.open_market_page(self._slug or self._name)
+
+    def _submit_order(self):
+        client = self._client
+        if client is None:
+            return False
+        price = self.spin_price.value()
+        qty = self.spin_qty.value()
+        try:
+            valid = client.validate_order(price, qty)
+        except Exception as exc:
+            valid = {"ok": False, "error": type(exc).__name__}
+        if isinstance(valid, dict) and valid.get("ok") is False:
+            self.lbl_status.setText(str(valid.get("error") or "ошибка"))
+            return False
+        try:
+            order = client.create_order(
+                self._item_id, price, qty, visible=self.chk_visible.isChecked())
+        except Exception as exc:
+            self.lbl_status.setText(f"ошибка: {type(exc).__name__}")
+            self._log(f"Alt+D: выставить — ошибка {exc}")
+            return False
+        order = order if isinstance(order, dict) else {}
+        order_id = order.get("id") or order.get("order_id") or "?"
+        self.lbl_status.setText("выставлено")
+        self.btn_sell.setText("Открыть ордера")
+        try:
+            self.btn_sell.clicked.disconnect()
+        except Exception:
+            pass
+        self.btn_sell.clicked.connect(self._open_market)
+        self.btn_sell.setEnabled(True)
+        self.confirm.setVisible(False)
+        if self._toast:
+            self._toast(f"Ордер выставлен: {self._name} — "
+                        f"{price} платина ×{qty}")
+        self._log(f"Alt+D: выставить {self._slug} — {price} p ×{qty} "
+                  f"→ ордер {order_id}")
+        return True
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -248,11 +379,16 @@ class PriceCard(DragResizeMixin, QWidget):
 
 class RegionPrice:
     """Контроллер Alt+D: выделение → OCR → цена → PriceCard."""
-    def __init__(self, cfg, api, ocr, log=print, capture_fn=None,
-                 parent=None):
+    def __init__(self, cfg, api, ocr=None, log=print, capture_fn=None,
+                 parent=None, ocr_getter=None, client=None,
+                 on_open_orders=None, toast=None):
         self.cfg = dict(cfg or {})
         self.api = api
         self.ocr = ocr
+        self.ocr_getter = ocr_getter
+        self.client = client
+        self.on_open_orders = on_open_orders
+        self.toast = toast
         self.log = log
         self.capture_fn = capture_fn
         self.card = None
@@ -283,8 +419,25 @@ class RegionPrice:
         self.last_box = (x, y, w, h)
         self.log(f"Alt+D: область={w}x{h}")
         frame = self.capture(x, y, w, h)
-        name, score = self.recognize(frame)
+        name, score, ready = self.recognize(frame)
+        self.log(f"Alt+D: ocr={'ready' if ready else 'warming'}, "
+                 f"область={w}x{h}, имя={name!r}, score={score:.2f}")
+        self.card = PriceCard(self.cfg, on_save=self._save_box,
+                              log=self.log, client=self.client,
+                              on_open_orders=self.on_open_orders,
+                              toast=self.toast)
+        if not ready:
+            self.card.lbl_name.setText("OCR готовится…")
+            self.card.lbl_price.setText("—")
+            self.card.lbl_info.setText("попробуйте через пару секунд")
+            self._place_card(x, y, w, h)
+            self.card.show()
+            return self.card
         info = self.api.lookup(name) if name else {}
+        slug = str(info.get("slug") or "")
+        item_id = str(info.get("id") or info.get("item_id") or "")
+        if not item_id and slug:
+            item_id = self._cache_item_id(slug)
         price = info.get("price")
         parts = []
         if info.get("ducats"):
@@ -292,12 +445,9 @@ class RegionPrice:
         if info.get("sell_online"):
             parts.append(f"онлайн {info['sell_online']}")
         if info.get("set_price"):
-            parts.append(f"компл. {info['set_price']} p")
-        if not info.get("matched"):
-            parts.append("не распознано")
-        self.card = PriceCard(self.cfg, on_save=self._save_box,
-                              log=self.log)
-        self.card.set_data(name, price, " · ".join(parts), score)
+            parts.append(f"комплект {info['set_price']} платина")
+        self.card.set_data(name, price, " · ".join(parts), score,
+                           item_id=item_id, slug=slug)
         self._place_card(x, y, w, h)
         self.card.show()
         self.log(f"Alt+D: область={w}x{h}, имя={name!r}, score={score:.2f}, "
@@ -315,18 +465,33 @@ class RegionPrice:
                                      "height": h}))
         return cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
 
+    def _read(self, gray):
+        import cv2
+        proc = cv2.resize(gray, None, fx=2.0, fy=2.0,
+                          interpolation=cv2.INTER_CUBIC)
+        return self._ocr.read_proc(proc)
+
     def recognize(self, frame):
         import cv2
         import card_text
+        self._ocr = (self.ocr_getter() if self.ocr_getter is not None
+                     else self.ocr)
+        if self._ocr is None:
+            self.log("Alt+D: OCR недоступен (None)")
+            return "", 0.0, False
         if frame is None or getattr(frame, "size", 0) == 0:
-            return "", 0.0
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            return "", 0.0, True
         try:
-            res = self.ocr.read_proc(gray)
-        except Exception:
-            res = []
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            res = self._read(gray) or []
+            if not res:
+                top = gray[:max(1, gray.shape[0] // 2), :]
+                res = self._read(top) or []
+        except Exception as exc:
+            self.log(f"Alt+D: OCR недоступен ({type(exc).__name__})")
+            return "", 0.0, True
         words = []
-        for bbox, text, _conf in res or []:
+        for bbox, text, _conf in res:
             ys = [p[1] for p in bbox]
             xs = [p[0] for p in bbox]
             words.append((sum(ys) / len(ys), sum(xs) / len(xs), str(text)))
@@ -337,7 +502,21 @@ class RegionPrice:
             score = float((self.api.match(name) or {}).get("score") or 0.0)
         except Exception:
             pass
-        return name, score
+        return name, score, True
+
+    def _cache_item_id(self, slug):
+        try:
+            import json
+            path = os.path.join(self.cfg.get("data_dir") or "", 
+                                "items_cache_ru.json")
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            for item in (data.get("items") or {}).values():
+                if isinstance(item, dict) and item.get("slug") == slug:
+                    return str(item.get("id") or "")
+        except Exception:
+            pass
+        return ""
 
     def _place_card(self, x, y, w, h):
         screen = QApplication.desktop().availableGeometry()
