@@ -27,7 +27,7 @@ import sys
 CURRENCIES = ("platinum", "ducats")
 
 #: Текстовые суффиксы, если иконка недоступна/выключена.
-SUFFIX = {"platinum": "p", "ducats": "дк"}
+SUFFIX = {"platinum": "платина", "ducats": "дукаты"}
 
 #: Имя файла ассета (в assets/currency: cur_platinum_*, cur_ducat_*).
 ASSET_NAME = {"platinum": "platinum", "ducats": "ducat"}
