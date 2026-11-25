@@ -33,7 +33,3 @@ class ScanToken:
                 except Exception:
                     pass
         return True
-
-
-def stage_check(token, stage):
-    return bool(token is not None and token.check(stage))
