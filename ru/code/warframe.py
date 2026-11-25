@@ -81,7 +81,7 @@ if (os.environ.get("WF_LOG_FILE") is None
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 _APPLYING_SETTINGS = False
 
 from scan_geometry import (_bonus_top, _nick_bottom, _panel_count)
@@ -9971,7 +9971,22 @@ def run_gui(cfg):
         try:
             import region_price
             if region_ctl is None:
-                region_ctl = region_price.RegionPrice(cfg, api, ocr, log=log)
+                def _region_toast(text):
+                    try:
+                        if center_mod is not None:
+                            center_mod.dispatch_toast_only(
+                                {"kind": "pick", "title": "Маркет",
+                                 "text": text}, cfg=cfg,
+                                toast_stack=toast_stack, force=True)
+                    except Exception:
+                        pass
+
+                region_ctl = region_price.RegionPrice(
+                    cfg, api, ocr, log=log,
+                    ocr_getter=lambda: getattr(scanner, "ocr", None),
+                    client=market, toast=_region_toast,
+                    on_open_orders=(lambda: unified.show_tab(1)
+                                    if unified is not None else None))
             region_ctl.open()
         except Exception as exc:
             log(f"Alt+D: не открыт ({type(exc).__name__}: {exc})")
@@ -10458,7 +10473,7 @@ def run_gui(cfg):
         auto_update_watcher = None
 
     log("=" * 60)
-    log(f"VoidFrameRU {APP_VERSION} — готово (инвентарь: выключен).")
+    log(f"VoidFrameRU {APP_VERSION} — готово.")
     log(f"{cfg.get('hotkey_scan', 'alt+q').upper()} — сканировать награды (плашки).")
     if unified is not None:
         hotkey = (cfg.get("hotkey_window") or cfg.get("hotkey_editor", "f8")).upper()
