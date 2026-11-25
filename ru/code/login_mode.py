@@ -406,14 +406,6 @@ def register_interactive_window(window):
     return window
 
 
-def reset_interactive_windows():
-    """Забыть окна (тесты/закрытие приложения)."""
-    try:
-        INTERACTIVE_WINDOWS[:] = []
-    except Exception:
-        pass
-
-
 def ensure_interactive_windows(activate=False):
     """Вернуть кликабельность зарегистрированным окнам приложения (BUG-1).
 
