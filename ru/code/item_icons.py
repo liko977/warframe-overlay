@@ -182,6 +182,8 @@ def badge_text_color(background):
 def part_badge_pixmap(value="", name="", width=28, height=16, size=None):
     if size in ("small", "mini"):
         width, height = part_badge_size(value, name, mini=(size == "mini"))
+    elif size is None:
+        width, height = part_badge_size(value, name)
     """QPixmap бейджа: тип по slug/name/типу; кэш по (тип, размер)."""
     style = part_style(value, name)
     badge = part_badge_text(value, name)
@@ -242,25 +244,15 @@ def part_word(value="", name=""):
 
 
 def part_badge_text(value="", name=""):
-    """Сокращение слова части: 2 буквы при len≤4, иначе 3."""
-    word = part_word(value, name)
-    if not word:
-        return ""
-    low = word.lower().replace("ё", "е")
-    if low in ("ствол", "связь"):
-        return word[:2][:1].upper() + word[1:2].lower()
-    length = 2 if len(word) <= 4 else 3
-    letters = word[:length]
-    return letters[:1].upper() + letters[1:].lower()
+    """t165: полное слово части, без сокращений."""
+    return part_word(value, name)
 
 
 def part_badge_size(value="", name="", mini=False):
     """Размер бейджа: 3 буквы 28×14 (мини 24×12), 2 — 22×13 (20×12)."""
     text = part_badge_text(value, name)
-    three = len(text) >= 3
-    if mini:
-        return (24, 12) if three else (20, 12)
-    return (28, 14) if three else (22, 13)
+    width = max(28, min(96, 7 * len(text) + 8))
+    return (max(24, int(width * 0.86)), 12) if mini else (width, 16)
 
 
 def part_chip_html(value="", name=""):
@@ -437,53 +429,6 @@ def compact_name(text):
 def camel_name(text):
     words = re.split(r"[^A-Za-z0-9]+", str(text or ""))
     return "".join(word[:1].upper() + word[1:] for word in words if word)
-
-
-def image_variants(image, name="", slug="", game_ref=""):
-    """Возможные имена файлов CDN: базовое, без Prime/частей, CamelCase, Ak/Dual."""
-    base = image_name(image)
-    out = []
-
-    def add(value):
-        value = image_name(value)
-        if value and value not in out:
-            out.append(value)
-
-    add(base)
-    stem = base.rsplit(".", 1)[0] if base else ""
-    original_stem = stem
-    add(stem.replace("Prime", ""))
-    for token in _PARTS:
-        stem2 = re.sub(rf"{re.escape(token)}", "", stem, flags=re.IGNORECASE)
-        if stem2 and stem2 != stem:
-            add(stem2)
-            stem = stem2
-    for value in (name, slug.replace("_", " "), game_ref.rsplit("/", 1)[-1]):
-        value = str(value or "")
-        if not value:
-            continue
-        camel = camel_name(value)
-        add(camel)
-        add(camel.replace("Prime", ""))
-        # оружие с префиксом Ak/Dual/Twin: BoltoPrime → AkboltoPrime
-        for prefix in ("Ak", "Dual", "Twin"):
-            if camel and not camel.lower().startswith(prefix.lower()):
-                tail = camel[:1].lower() + camel[1:]
-                add(prefix + tail)
-                add(prefix + tail.replace("Prime", ""))
-    if stem:
-        add(stem + "Weapon")
-        add(stem.replace("Prime", "") + "PrimeWeapon")
-        add("Ak" + original_stem[:1].lower() + original_stem[1:])
-        add("Ak" + (original_stem[:1].lower() + original_stem[1:]).replace(
-            "Prime", ""))
-        add("Ak" + stem[:1].lower() + stem[1:])
-        add("Ak" + (stem[:1].lower() + stem[1:]).replace("Prime", ""))
-        if "Kavasa" in stem:
-            add(stem + "Collar")
-            add(original_stem + "Collar")
-            add(stem.replace("Prime", "") + "Collar")
-    return out
 
 
 class _Bridge:
