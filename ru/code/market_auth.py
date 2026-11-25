@@ -189,11 +189,6 @@ def engine_status(refresh=False):
     return bool(_ENGINE["ok"]), str(_ENGINE["reason"])
 
 
-def webengine_available(refresh=False):
-    """True, если встроенный браузер можно использовать."""
-    return engine_status(refresh=refresh)[0]
-
-
 def engine_unavailable_text(reason=""):
     """Понятное объяснение для окна входа (когда движка нет)."""
     reason = reason or engine_status()[1] or "движок браузера не установлен"
