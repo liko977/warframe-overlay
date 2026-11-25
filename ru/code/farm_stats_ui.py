@@ -590,12 +590,12 @@ def build_drops_panel():
                 card = QFrame()
                 card.setObjectName(f"statCard_{key}")
                 card.setStyleSheet(theme.row_qss(name=f"statCard_{key}",
-                                                 radius=4))
+                                                 radius=0))
                 card.setMaximumHeight(32)
                 line = QHBoxLayout(card)
                 line.setContentsMargins(8, 1, 8, 1)
                 line.setSpacing(6)
-                caption = QLabel(title)
+                caption = QLabel(title.upper())
                 caption.setFont(make_font(9))
                 caption.setStyleSheet(theme.muted_qss(9))
                 caption.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -605,9 +605,10 @@ def build_drops_panel():
                 icon_lay.setContentsMargins(0, 0, 0, 0)
                 icon_lay.setSpacing(0)
                 value = QLabel("—")
-                value.setFont(make_font(12, True))
+                value.setFont(QFont("Consolas", 18, QFont.Bold))
                 value.setStyleSheet(
-                    f"color:{theme.PALETTE['text']}; background: transparent;")
+                    f"color:{theme.PALETTE['text']}; background: transparent;"
+                    " font-family:'Consolas';")
                 line.addWidget(caption)
                 line.addWidget(icon_host)
                 line.addStretch(1)
@@ -1020,16 +1021,16 @@ def build_drops_panel():
                 day = group_label(_entry_utc(drop, session))
                 if history and day != current_day:
                     current_day = day
-                    head = QLabel(day)
+                    head = QLabel(str(day).upper())
                     head.setFont(self._f_detail)
-                    head.setStyleSheet(theme.section_qss())
+                    head.setStyleSheet(theme.caps_header_qss())
                     self.loot_lay.addWidget(head)
                 row = QFrame()
                 row.setObjectName("lootRow")
-                row.setFixedHeight(44)
-                row.setStyleSheet(theme.row_qss(name="lootRow", radius=4))
+                row.setFixedHeight(theme.ROW_H)
+                row.setStyleSheet(theme.row_qss(name="lootRow", radius=0))
                 line = QHBoxLayout(row)
-                line.setContentsMargins(8, 3, 8, 3)
+                line.setContentsMargins(8, 0, 8, 0)
                 line.setSpacing(7)
                 when = format_pick_time(drop, session)
                 t = QLabel(when)
@@ -1037,7 +1038,7 @@ def build_drops_panel():
                 t.setFixedWidth(42)
                 t.setStyleSheet(theme.muted_qss(10))
                 t.setToolTip(pick_time_tooltip(drop, session) or when)
-                icon = _item_icon_label(self.cfg, drop, 34)
+                icon = _item_icon_label(self.cfg, drop, 24)
                 full_name = str(drop.get("picked_name") or "")
                 if not full_name:
                     try:
@@ -1089,7 +1090,11 @@ def build_drops_panel():
                 drop_chip = item_icons.part_chip_label(
                     str(drop.get("slug") or ""), full_name, row)
                 if drop_chip is not None and drop_chip.text():
-                    line.addWidget(drop_chip, 0, Qt.AlignVCenter)
+                    _w = drop_chip.text().strip("[]")
+                    drop_chip.setText(f"[{_w.upper()}]")
+                    drop_chip.setStyleSheet(theme.chip_qss(_w))
+                    line.insertWidget(line.indexOf(name), drop_chip, 0,
+                                      Qt.AlignVCenter)
                 elif drop_chip is not None:
                     drop_chip.deleteLater()
                 line.addWidget(price)
