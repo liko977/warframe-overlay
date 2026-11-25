@@ -1464,6 +1464,7 @@ def build_market_browser():
             self._items_by_id = {
                 item.get("id"): item for item in self._catalog
                 if item.get("id")}
+            self._merge_items(getattr(self, "_offline_items", []))
             self._resolved_ids = set()
             self._apply_filter()
             if self._orders:
@@ -1944,8 +1945,34 @@ def build_market_browser():
             self.lbl_orders_empty.setText(f"Не удалось загрузить ордера: {message}")
             self._set_status(f"мои ордера: {message}", stale=True, sticky=True)
 
+        def _load_offline_items(self):
+            if getattr(self, "_offline_items", None):
+                return
+            self._offline_items = []
+            try:
+                import warframe as _wf
+                _api = _wf.MarketAPI(self.cfg)
+                if _api.load_items():
+                    self._offline_items = [
+                        dict(v) for v in (_api.items or {}).values()
+                        if isinstance(v, dict)]
+                    self._merge_items(self._offline_items)
+            except Exception as exc:
+                self._log(f"Ордера: локальный кэш не прочитан "
+                          f"({type(exc).__name__})")
+
+        def _merge_items(self, items):
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("slug"):
+                    self._items_by_slug.setdefault(item["slug"], item)
+                if item.get("id"):
+                    self._items_by_id.setdefault(item["id"], item)
+
         def _apply_orders(self, orders):
             self._busy_orders = False
+            self._load_offline_items()
             self._orders = [dict(x) for x in (orders or []) if isinstance(x, dict)]
             self._render_orders()
             self._last_ts = time.time()
