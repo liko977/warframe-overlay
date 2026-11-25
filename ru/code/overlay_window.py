@@ -375,7 +375,7 @@ def build_overlay_window():
             outer.setContentsMargins(0, 0, 0, 0)
             self.frame = QFrame()
             self.frame.setObjectName("win")
-            self.frame.setStyleSheet(theme.window_qss("win", 10) + """
+            self.frame.setStyleSheet(theme.window_qss("win", 2) + """
                 QFrame#ovHeader {
                     background-color: #121a25;
                     border: none;
@@ -1098,7 +1098,7 @@ def build_overlay_window():
             duration_menu = menu.addMenu("На время")
             for label, status in (("Онлайн", "online"), ("В игре", "ingame")):
                 sub = duration_menu.addMenu(label)
-                for seconds, title in ((1800, "30 мин"), (3600, "1 ч"),
+                for seconds, title in ((1800, "30 минут"), (3600, "1 час"),
                                        (7200, "2 ч"), (14400, "4 ч")):
                     act = sub.addAction(title)
                     act.triggered.connect(
