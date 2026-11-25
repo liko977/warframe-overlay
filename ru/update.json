@@ -1,13 +1,13 @@
 {
-  "version": "1.0.9",
-  "notes": "Плашки наград опущены в свободную полосу над строкой «Бесконечный Бонус» — ники и бонусная строка видны. Проблемные карточки читаются со второй-четвёртой попытки (мульти-проход OCR). Эталонный набор кадров в тестах: 100% по количеству карточек. Диагностика: при неполном распознавании кадр сохраняется в samples.",
-  "updated_at": "2026-11-24T16:27:47Z",
+  "version": "1.1.0",
+  "notes": "Дизайн E: строгие строки, моноширинные цены и метки частей в Маркете и Ордерах. Alt+D — выделите карточку и получите цену; карточка исчезает через 5 секунд. Плашки наград: цена, дукаты и комплект видны сразу и исчезают через 5 секунд. Без сокращений: КОМПЛЕКТ, Рукоять, 12 платина, 15 дукаты. Комплект больше не показывает 1 платину из-за одиночного ордера. Карточка «2 X Чертёж: Форма» распознаётся — 4 из 4 наград.",
+  "updated_at": "2026-11-25T18:58:56Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "0345e0e4e6a4fdc2b2252fed442e7c1165957b84a2673f71d037778ceb3fbdc6",
+      "sha256": "578668c8e482d30f7b6460bf810fcd3ffc1c59ffd0005fa8d65a74f5df0afde2",
       "size": 2946
     },
     {
@@ -25,8 +25,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "58881655928d9d24ec085610e1e1eb6937104da89adea39e481da73187faea89",
-      "size": 17603
+      "sha256": "6d870e1637e985e43320815611863edd484ec417dadb91fa9dcd32a3daa74235",
+      "size": 18492
     },
     {
       "path": "chat_client.py",
@@ -37,8 +37,8 @@
     {
       "path": "currency_icons.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/currency_icons.py",
-      "sha256": "55093b3ad73c912620410c41e1ce1716dafbf479e5429dd2b94d3d4226c2b57e",
-      "size": 9688
+      "sha256": "1b4ef137158322cbbd1d6d52e7c15294d21ab10b318eb981e78b239d9a8de183",
+      "size": 9709
     },
     {
       "path": "data_migration.py",
@@ -67,8 +67,8 @@
     {
       "path": "farm_stats_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/farm_stats_ui.py",
-      "sha256": "e47ff5a2e33e50ef4d7f2437ee8374f93e8d5122314375cf98ab3ca084ead91e",
-      "size": 71637
+      "sha256": "6a81da45a5ee8be4d6e2b5f532215ef4169a15b9eced42ee0637fce445a04905",
+      "size": 71968
     },
     {
       "path": "game_themes.py",
@@ -85,32 +85,32 @@
     {
       "path": "item_icons.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/item_icons.py",
-      "sha256": "bae83dafab14be7ec7c0f19244b40d91deac7b5df9f3f857d5100f9014f04c3c",
-      "size": 51234
+      "sha256": "faf8706f5e3e5f1f61b3bb8b32f849be66a1212127a6af83135430bc3f38e1c0",
+      "size": 49171
     },
     {
       "path": "log_parser.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/log_parser.py",
-      "sha256": "b90342f38c811361f8bfe14475ddb934dc82f29f4df4dd6d2acd8486863f9400",
-      "size": 20617
+      "sha256": "21ce39a02ac9f49bb29abcc6ec67b9f9a1ebf453eeb598cc98d7e0f6b772ff5b",
+      "size": 20218
     },
     {
       "path": "login_mode.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/login_mode.py",
-      "sha256": "01cad6e6437a2ef86d237364319d1d9c3a0dff34d4a8914e742227e4894031df",
-      "size": 20968
+      "sha256": "259e73f40aa16b2a333dd80b6364d0528e891da1fbd7d731b059797de07d70c6",
+      "size": 20769
     },
     {
       "path": "market_auth.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_auth.py",
-      "sha256": "bd5cf1203e238de91e817c29a0634a40542541118e844a5b96a959dfc48167d1",
-      "size": 66822
+      "sha256": "c0325710f501b416cf1a53a2d3954bba8c8232a1aaaefcbb436c9d1a3db75b1a",
+      "size": 66637
     },
     {
       "path": "market_browser.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_browser.py",
-      "sha256": "1509aaff53f2c7a96f4e96b830a941bbd4e4d24cda6e1714b7681b2ca8ee6f97",
-      "size": 110061
+      "sha256": "120df9d3ac2534ff0bd3f1628923346afaa1473246b794a1c84768923adec5cf",
+      "size": 113104
     },
     {
       "path": "market_browser_login.py",
@@ -127,20 +127,20 @@
     {
       "path": "market_status.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/market_status.py",
-      "sha256": "2b29c07f3240730dbfe7b840ec32e58cdf325900cb00dcefe9e8c93be07061f4",
-      "size": 30323
+      "sha256": "2b3d062d5c8b4a0a51c7383753809a606263f16a3e5c123b64187a6c81c68d8e",
+      "size": 30261
     },
     {
       "path": "notification_center.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/notification_center.py",
-      "sha256": "e8559bc8d8090d1676f5dadf58c743ab5ad662bcbd6810513792d21e4a5d6c62",
-      "size": 77899
+      "sha256": "425dd7440f737e0e03d94415e033baf239806718777c29acd7a6e3f5e8b29be4",
+      "size": 77400
     },
     {
       "path": "notifications.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/notifications.py",
-      "sha256": "435af5afdeac770d81971610c65898060c8fb31226aaeb50449e66ec9a1ea258",
-      "size": 46490
+      "sha256": "122fe3c3a0e24ec9edf76e694cf2e6feabb2adbe39f7d8987786c099fa4e2cbf",
+      "size": 46526
     },
     {
       "path": "ocr_correct.py",
@@ -157,8 +157,14 @@
     {
       "path": "overlay_window.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/overlay_window.py",
-      "sha256": "0a4812cba3ed14fb4b9d8a682b21c4e9838cb8ef9713cdad646bf80c3ba76d5e",
-      "size": 88944
+      "sha256": "b65359f8403e2250e4e423b6cccefee7cd4c326ce8ab7862ac9e73d4ce181463",
+      "size": 88951
+    },
+    {
+      "path": "region_price.py",
+      "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/region_price.py",
+      "sha256": "5bc01a39218af3f62a4641e2d715e31bc58bcaa4c11540ff7d02413d2bd8de9b",
+      "size": 12829
     },
     {
       "path": "relic_pool.py",
@@ -185,6 +191,12 @@
       "size": 53796
     },
     {
+      "path": "scan_geometry.py",
+      "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/scan_geometry.py",
+      "sha256": "29fe1486bb6a694800d597587e22dec2c0e78aef060ba9a78b662bbcd92a61e1",
+      "size": 3117
+    },
+    {
       "path": "scan_presets.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/scan_presets.py",
       "sha256": "1b0381e7462149623ac4628716e68b382f01a17d4d3864cb6759ff84e8dd31a1",
@@ -193,20 +205,20 @@
     {
       "path": "scan_recovery.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/scan_recovery.py",
-      "sha256": "cbef371cca8658b57fa76bd34fbf2d0dd962b0a035b75aa5eb7c2367e93a272b",
-      "size": 7448
+      "sha256": "a5dfbcd455ca111c4035b9cf193f257dd8d2eb6dbc860ae9d9e4e6d82a796586",
+      "size": 7423
     },
     {
       "path": "scan_token.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/scan_token.py",
-      "sha256": "413328edbe3ba979d94a813bc26899f33c95d3de22f60977219c0e63f98ee616",
-      "size": 1219
+      "sha256": "b62d26afcf6416a051867ff1ce7fd8e2741d82bede14bb4d9f9aa91ae97cd170",
+      "size": 1128
     },
     {
       "path": "settings_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/settings_ui.py",
-      "sha256": "af92b20eeabc59ba0e9830f9a2ee9f87afac5b86e56ec9c567aec522ed50c1bf",
-      "size": 114184
+      "sha256": "1c87e26641d8c2fa7447972f1ee4365393315f824c5b5182fbe55f7c8aaf4ce6",
+      "size": 116938
     },
     {
       "path": "single_instance.py",
@@ -229,8 +241,8 @@
     {
       "path": "ui_theme.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/ui_theme.py",
-      "sha256": "fe635cb48375531153ac76bc83c26386d2b07556c1593906eea6d32c61c25323",
-      "size": 18755
+      "sha256": "499dd3e50189f0ccaba3f27bad6f58884f341b07995ec839a06a3053c29ab33d",
+      "size": 19707
     },
     {
       "path": "update_watcher.py",
@@ -241,8 +253,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "2f71ef8a96ec3679388d5b202510d6c9751ecfd4a2ee089e503997f0f08c5daf",
-      "size": 480935
+      "sha256": "37113221dc1f2b2dc4916eae564456268da276baf82e4550952687b3118bf776",
+      "size": 494032
     }
   ]
 }
