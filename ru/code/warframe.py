@@ -58,11 +58,11 @@ import ctypes
 import datetime
 import difflib
 import json
-import math
 import os
 import platform
 import re
 import sys
+import tempfile
 import threading
 import time
 _MODULE_TS = time.time()
@@ -70,13 +70,21 @@ import traceback
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# t162: прямые запуски тестов не пишут в пользовательский app.log
+if (os.environ.get("WF_LOG_FILE") is None
+        and os.path.basename(sys.argv[0]).startswith(("tests_", "verify_"))):
+    os.environ["WF_LOG_FILE"] = os.path.join(
+        tempfile.gettempdir(), "wf_test_app.log")
+
 # ─────────────────────────────────────────────────────────────────────────
 #  Базовые константы
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 _APPLYING_SETTINGS = False
+
+from scan_geometry import (_bonus_top, _nick_bottom, _panel_count)
 API_ROOT = "https://api.warframe.market/v2"
 ITEMS_ENDPOINT = API_ROOT + "/items"
 
@@ -154,6 +162,10 @@ def models_dir():
 DEFAULT_CONFIG = {
     # ── управление ──────────────────────────────────────────────────────
     "hotkey_scan": "alt+q",          # скан экрана наград (плашки)
+    "hotkey_region": "alt+d",        # 1.1.0: цена по выделенной области
+    "plate_boxes": {},               # 1.1.0: позиции плашек (экранные)
+    "plates_click_through": False,   # 1.1.0: плашки не мешают мыши
+    "region_card_ttl": 5.0,          # 1.1.0: Alt+D карточка, 0 = не скрывать
     "hotkey_editor": "f8",           # список выбранного (редактор)
     "hotkey_events": "alt+e",        # панель игровых событий (сортис, разломы…)
     "hotkey_market": "alt+m",        # окно «Маркет» (поиск, график, ордера)
@@ -167,6 +179,7 @@ DEFAULT_CONFIG = {
     "pick_enabled": True,            # включить горячие клавиши «взято»
     "pick_hotkeys": ["alt+1", "alt+2", "alt+3", "alt+4"],
     "overlay_duration_ms": 12000,
+    "overlay_ttl": 5.0,              # 1.1.0: автоскрытие плашек, 0 = не скрывать
     "alert_threshold": 100,          # платина: выше — звуковой сигнал
     "play_sound": True,
     "show_debug": True,              # сохранять картинки в ocr_debug/
@@ -179,6 +192,7 @@ DEFAULT_CONFIG = {
     "scan_price_ttl": 600,           # 0.6.4: TTL кэша цен сканера, сек
     "items_cache_ttl": 86400,        # сек, кэш списка предметов
     "ocr_languages": ["ru", "en"],   # русская + английская игра
+    "ocr_idle_unload_min": 10,       # выгружать модели OCR после N мин простоя (0 = никогда)
 
     # ── обновления ──────────────────────────────────────────────────────
     "update_url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/update.json",
@@ -391,6 +405,151 @@ def log_exception(context=""):
     log((context + "\n" if context else "") + text.rstrip())
 
 
+# ── 1.1.1: память, UI-поток и диагностика ──────────────────────────────
+_GUI_TASK = {"obj": None}
+_FAULT_HANDLE = {"fh": None}
+
+
+def process_memory_mb():
+    """(private, working set) текущего процесса в МБ; (0, 0) при ошибке."""
+    class _Counters(ctypes.Structure):
+        _fields_ = [("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                    ("PrivateUsage", ctypes.c_size_t)]
+    try:
+        counters = _Counters()
+        counters.cb = ctypes.sizeof(counters)
+        kernel32 = ctypes.windll.kernel32
+        get_info = getattr(kernel32, "K32GetProcessMemoryInfo", None)
+        if get_info is None:
+            get_info = ctypes.windll.psapi.GetProcessMemoryInfo
+        # без argtypes HANDLE от GetCurrentProcess обрезается до 32 бит
+        get_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Counters),
+                             ctypes.c_ulong]
+        get_info.restype = ctypes.c_int
+        if not get_info(kernel32.GetCurrentProcess(), ctypes.byref(counters),
+                        counters.cb):
+            return 0, 0
+        return (int(counters.PrivateUsage / (1024 * 1024)),
+                int(counters.WorkingSetSize / (1024 * 1024)))
+    except Exception:
+        return 0, 0
+
+
+def enable_faulthandler():
+    """Печатать Python-стек при нативном падении (Qt/SEH) в crash.log."""
+    try:
+        import faulthandler
+        os.makedirs(DATA_DIR, exist_ok=True)
+        handle = open(os.path.join(DATA_DIR, "crash.log"), "a",
+                      buffering=1, encoding="utf-8")
+        _FAULT_HANDLE["fh"] = handle
+        faulthandler.enable(file=handle, all_threads=True)
+        return True
+    except Exception:
+        return False
+
+
+def game_process_running(name):
+    """Запущен ли процесс игры (Windows, без psutil)."""
+    if sys.platform != "win32":
+        return False
+
+    class _Entry(ctypes.Structure):
+        _fields_ = [("dwSize", ctypes.c_ulong),
+                    ("cntUsage", ctypes.c_ulong),
+                    ("th32ProcessID", ctypes.c_ulong),
+                    ("th32DefaultHeapID", ctypes.c_size_t),
+                    ("th32ModuleID", ctypes.c_ulong),
+                    ("cntThreads", ctypes.c_ulong),
+                    ("th32ParentProcessID", ctypes.c_ulong),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", ctypes.c_ulong),
+                    ("szExeFile", ctypes.c_char * 260)]
+    snapshot = None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)
+        if snapshot in (0, -1):
+            return False
+        entry = _Entry()
+        entry.dwSize = ctypes.sizeof(entry)
+        target = str(name).lower()
+        ok = kernel32.Process32First(snapshot, ctypes.byref(entry))
+        while ok:
+            exe = entry.szExeFile.decode("mbcs", "ignore").lower()
+            if exe == target:
+                return True
+            ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+    except Exception:
+        return False
+    finally:
+        if snapshot not in (None, 0, -1):
+            try:
+                ctypes.windll.kernel32.CloseHandle(snapshot)
+            except Exception:
+                pass
+    return False
+
+
+def init_gui_task():
+    """Приёмник UI-задач в GUI-потоке (один раз после QApplication)."""
+    if _GUI_TASK.get("obj") is not None:
+        return _GUI_TASK["obj"]
+    from PyQt5.QtCore import QObject, Qt, pyqtSignal
+
+    class _GuiTask(QObject):
+        requested = pyqtSignal(object)
+
+        def __init__(self):
+            super().__init__()
+            self.requested.connect(self._run, Qt.QueuedConnection)
+
+        def _run(self, fn):
+            try:
+                fn()
+            except Exception:
+                log_exception("GUI: задача")
+
+    _GUI_TASK["obj"] = _GuiTask()
+    return _GUI_TASK["obj"]
+
+
+def gui_call(fn, timeout=5.0):
+    """Выполнить UI-операцию в GUI-потоке и вернуть её результат."""
+    from PyQt5.QtCore import QThread
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance()
+    task = _GUI_TASK.get("obj")
+    if app is None or task is None or QThread.currentThread() is app.thread():
+        return fn()
+    done = threading.Event()
+    result = {}
+
+    def _wrapper():
+        try:
+            result["value"] = fn()
+        finally:
+            done.set()
+
+    try:
+        task.requested.emit(_wrapper)
+    except Exception:
+        return fn()
+    if not done.wait(timeout):
+        log(f"UI: задача не выполнена за {timeout:.0f} с")
+        return None
+    return result.get("value")
+
+
 def startup_line():
     try:
         frozen = bool(getattr(sys, "frozen", False))
@@ -433,7 +592,7 @@ def currency_icons_module():
 
 def currency_icon_html(currency, cfg=None, px=None):
     """HTML-иконка валюты или текстовый суффикс «p»/«дк» (фолбэк)."""
-    suffix = "дк" if str(currency).lower() == "ducats" else "p"
+    suffix = "дукаты" if str(currency).lower() == "ducats" else "платина"
     mod = currency_icons_module()
     if mod is None:
         return suffix
@@ -451,7 +610,7 @@ def currency_sep(icon):
 def money_html(amount, currency="platinum", cfg=None):
     """Сумма + иконка валюты (rich-text) с текстовым фолбэком."""
     mod = currency_icons_module()
-    suffix = "дк" if str(currency).lower() == "ducats" else "p"
+    suffix = "дукаты" if str(currency).lower() == "ducats" else "платина"
     if mod is None:
         try:
             return f"{int(round(float(amount)))} {suffix}"
@@ -767,7 +926,7 @@ def ensure_dirs(cfg):
 def fmt_plat(p):
     if p is None:
         return "—"
-    return f"{int(p)}p"
+    return f"{int(p)} платина"
 
 
 def imread_unicode(path, flags=None):
@@ -1088,7 +1247,7 @@ def pick_toast_record(result, duplicate=False, cfg=None):
     text = name
     if isinstance(price, (int, float)) and price:
         if cfg is None:
-            text += f" — {int(price)}p"
+            text += f" — {int(price)} платина"
         else:
             text += " — " + money_html(price, cfg=cfg)
     if isinstance(ducats, (int, float)) and ducats:
@@ -1116,7 +1275,7 @@ def pick_history_record(result, duplicate=False):
     name = str(result.get("name") or item.get("market_name")
                or item.get("name") or "предмет")
     price = result.get("price", item.get("price"))
-    text = name + (f" — {int(price)}p" if isinstance(price, (int, float))
+    text = name + (f" — {int(price)} платина" if isinstance(price, (int, float))
                    and price else "")
     record.update({
         "id": "pick-" + (str(item.get("slug") or name).strip() or "item"),
@@ -1180,7 +1339,7 @@ def format_set_price_tooltip(data):
         when = datetime.datetime.fromtimestamp(float(stamp)).strftime("%H:%M")
     except Exception:
         when = "—"
-    text = (f"мин. {int(price)}p · продавец {seller} · {status} · "
+    text = (f"минимум {int(price)} платина · продавец {seller} · {status} · "
             f"обновлено {when}")
     if data.get("set_suspicious"):
         text += ("\nподозрительно низкая цена — возможна ошибка продавца, "
@@ -1836,6 +1995,9 @@ class OcrEngine:
         import easyocr
         log("Загрузка EasyOCR (первый запуск может занять до минуты)...")
         t = time.time()
+        self._lock = threading.RLock()
+        self._use_gpu = bool(use_gpu)
+        self._last_used = time.monotonic()
         if not use_gpu:
             try:
                 import torch
@@ -1864,8 +2026,10 @@ class OcrEngine:
         try:
             import numpy as np
             warm = np.zeros((40, 160, 3), dtype=np.uint8)
-            self.reader.readtext(warm, paragraph=False, canvas_size=400,
-                                 mag_ratio=1.0)
+            with self._lock:
+                if self.reader is not None:
+                    self.reader.readtext(warm, paragraph=False, canvas_size=400,
+                                         mag_ratio=1.0)
         except Exception:
             pass
         self._warm_done = True
@@ -1878,24 +2042,60 @@ class OcrEngine:
                          name="wf-ocr-warmup").start()
         return True
 
+    def touch(self):
+        self._last_used = time.monotonic()
+
+    def idle_seconds(self):
+        return time.monotonic() - self._last_used
+
+    def release(self):
+        """Выгрузить модели: EasyOCR/torch отдают вес ядру не сразу."""
+        with self._lock:
+            reader, self.reader = self.reader, None
+            self._warm_done = False
+        if reader is None:
+            return False
+        try:
+            del reader
+            import gc
+            gc.collect()
+            if self._use_gpu:
+                import torch
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return True
+
     def read_proc(self, proc):
         try:
-            return self.reader.readtext(proc, paragraph=False, mag_ratio=1.0,
-                                        canvas_size=1280, width_ths=0.7,
-                                        decoder="greedy")
+            with self._lock:
+                if self.reader is None:
+                    return []
+                self.touch()
+                return self.reader.readtext(proc, paragraph=False, mag_ratio=1.0,
+                                            canvas_size=1280, width_ths=0.7,
+                                            decoder="greedy")
         except Exception as e:
             log(f"  OCR ошибка: {e}")
             return []
 
     def detect(self, img):
         """t137: один детект CRAFT на весь кадр."""
-        return self.reader.detect(img, canvas_size=1280, mag_ratio=1.0)
+        with self._lock:
+            if self.reader is None:
+                return []
+            self.touch()
+            return self.reader.detect(img, canvas_size=1280, mag_ratio=1.0)
 
     def recognize(self, gray, horizontal_list, free_list):
         """t137: одно распознавание всех боксов."""
-        return self.reader.recognize(
-            gray, horizontal_list=horizontal_list, free_list=free_list,
-            decoder="greedy", batch_size=8, detail=1, paragraph=False)
+        with self._lock:
+            if self.reader is None:
+                return []
+            self.touch()
+            return self.reader.recognize(
+                gray, horizontal_list=horizontal_list, free_list=free_list,
+                decoder="greedy", batch_size=8, detail=1, paragraph=False)
 
     def read_proc_batch(self, procs, allowlist=None):
         """t134: один батч EasyOCR на несколько кропов."""
@@ -1906,7 +2106,11 @@ class OcrEngine:
                           width_ths=0.7, decoder="greedy", batch_size=8)
             if allowlist:
                 kwargs["allowlist"] = allowlist
-            return self.reader.readtext_batched(list(procs), **kwargs)
+            with self._lock:
+                if self.reader is None:
+                    return []
+                self.touch()
+                return self.reader.readtext_batched(list(procs), **kwargs)
         except Exception as e:
             log(f"  OCR batch ошибка: {e}")
             return []
@@ -2073,84 +2277,6 @@ def _expand_canonical_grid(groups, lefts, cfg):
     return slots, groups4
 
 
-def _nick_bottom(base_img, left, card_bottom, width=242):
-    """t153: низ строки ников под карточкой (яркий текст в полосе +70)."""
-    try:
-        import cv2
-        import numpy as np
-        x0 = max(0, int(left))
-        x1 = min(base_img.shape[1], int(left) + int(width))
-        y0 = max(0, int(card_bottom) + 2)
-        y1 = min(base_img.shape[0], int(card_bottom) + 82)
-        crop = base_img[y0:y1, x0:x1]
-        if crop.size == 0:
-            return int(card_bottom) + 52
-        b, g, r = cv2.split(crop)
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        mask = ((gray > 105) & (r > 90) & (r >= b - 10)).astype(np.uint8)
-        counts = mask.sum(axis=1)
-        rows = [i for i, count in enumerate(counts) if count >= 4]
-        if not rows:
-            return int(card_bottom) + 52
-        return y0 + max(rows)
-    except Exception:
-        return int(card_bottom) + 52
-
-
-def _bonus_top(base_img, card_bottom, cfg=None):
-    """1.0.9: верх строки «Бесконечный Бонус …» (жёлтый текст под никами).
-
-    Возвращает y первой жёлтой текстовой строки в полосе
-    ``card_bottom + 60 … card_bottom + 300`` или None.
-    """
-    try:
-        import cv2
-        import numpy as np
-        h, w = base_img.shape[:2]
-        y0 = max(0, int(card_bottom) + 120)
-        y1 = min(h, int(card_bottom) + 380)
-        if y1 - y0 < 10:
-            return None
-        crop = base_img[y0:y1, 0:w]
-        b, g, r = cv2.split(crop)
-        # золотой текст игры: ~#F5C451; строка бонуса — широкая (≥120 px)
-        mask = ((r > 150) & (g > 120) & (b < 130)
-                & (r.astype(np.int16) - b.astype(np.int16) > 60))
-        counts = mask.sum(axis=1)
-        rows = [i for i, count in enumerate(counts) if count >= 120]
-        if not rows:
-            return None
-        return y0 + rows[0]
-    except Exception:
-        return None
-
-
-def _panel_count(base_img, cfg):
-    """t149: тема-независимая занятость канонических слотов (Canny)."""
-    try:
-        import cv2
-        gray = cv2.cvtColor(base_img, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 40, 100)
-        top = int(cfg.get("card_top") or 224)
-        width = int(cfg.get("card_width") or 242)
-        height = int(cfg.get("card_height") or 235)
-        for n in (4, 3, 2, 1):
-            lefts = [int(round(x)) for x in card_lefts(n, cfg)]
-            scores = []
-            for x in lefts:
-                if x < 0 or x + width > gray.shape[1]:
-                    scores.append(0.0)
-                    continue
-                roi_w = max(40, int(width * 0.75))
-                roi = edges[top:top + height, x:x + roi_w]
-                scores.append(float(roi.mean()) if roi.size else 0.0)
-            if scores and min(scores) >= 20.0:
-                return n, lefts
-    except Exception:
-        pass
-    return 0, []
-
-
 def _cards_from_words(words, cfg, frames_found=None):
     """Превращает слова в карточки 1..4; пустые позиции сохраняются.
 
@@ -2269,6 +2395,10 @@ def _cards_from_words(words, cfg, frames_found=None):
 
 
 _OCR_PROCS = {"count": 0}
+#: t154: не более 2 дополнительных проходов на скан.
+_OCR_RETRY = {"left": 2, "started": 0.0, "deadline": float("inf"),
+              "disabled": False, "logged": False}
+_SCAN_STARTED = {"t": 0.0}
 _SCAN_QUALITY = {"scans": 0, "names": 0, "cards": 0, "prices": 0,
                 "procs": 0}
 
@@ -2300,15 +2430,19 @@ def _record_scan_quality(cards):
         prices = sum(1 for c in cards
                      if c.get("price") is not None
                      or (c.get("price") == 0))
+        import time
         scans = _SCAN_QUALITY["scans"] + 1
         procs = _OCR_PROCS["count"] - _SCAN_QUALITY.get("procs", 0)
+        elapsed = (time.time() - _SCAN_STARTED["t"]
+                   if _SCAN_STARTED["t"] else 0.0)
         _SCAN_QUALITY.update({"scans": scans,
                               "procs": _OCR_PROCS["count"],
                               "names": _SCAN_QUALITY["names"] + names,
                               "cards": _SCAN_QUALITY["cards"] + len(cards),
                               "prices": _SCAN_QUALITY["prices"] + prices})
-        log(f"Скан #{scans}: карточек {len(cards)}, имён {names}, "
-            f"цен {prices}, проходов {max(0, procs)}")
+        log(f"Скан #{scans}: ocr={elapsed:.2f}с проходов={max(0, procs)} "
+            f"карточек={len(cards)} имён={names} цен={prices}")
+        _SCAN_QUALITY.setdefault("times", []).append(elapsed)
         if scans % 20 == 0:
             total = _SCAN_QUALITY["cards"]
             got = _SCAN_QUALITY["names"]
@@ -2317,6 +2451,10 @@ def _record_scan_quality(cards):
             if pct < 80 and total >= 5:
                 log("Скан: качество ниже 80 % — пришлите дамп из "
                     "Настройки → Оверлей → «Открыть папку диагностики»")
+            times = _SCAN_QUALITY.get("times") or []
+            if times:
+                avg = sum(times) / len(times)
+                log(f"Alt+Q: среднее ocr={avg:.2f}с (сканов {len(times)})")
     except Exception:
         pass
 
@@ -2359,8 +2497,16 @@ def _retry_unrecognized_card(base_img, card, cfg, ocr, matcher=None):
         started = time.time()
         for idx, variant in enumerate(("native", "otsu×2", "invert",
                                        "clahe"), 1):
+            if _OCR_RETRY["left"] <= 0:
+                break
+            if time.time() > _OCR_RETRY["deadline"]:
+                if not _OCR_RETRY["logged"]:
+                    _OCR_RETRY["logged"] = True
+                    log("мульти-проход: отключён по бюджету")
+                break
             if time.time() - started > 1.5:
                 break
+            _OCR_RETRY["left"] -= 1
             proc = _prepare_name_variant(gray, variant)
             try:
                 res = ocr.read_proc(proc)
@@ -2395,17 +2541,25 @@ def _retry_unrecognized_card(base_img, card, cfg, ocr, matcher=None):
 def retry_unrecognized_cards(base_img, cards, cfg, ocr, matcher=None,
                              threshold=0.80):
     """t112: повторный OCR при пустом имени или score < threshold."""
+    if len(cards) >= 3 and sum(1 for c in cards if c.get("name")) >= 3:
+        return 0  # t154: уже 3/4 имён — доп. проходы не нужны
     retried = 0
+    bad = []
     for card in cards:
         old = str(card.get("name") or "")
-        old_score = 0.0
+        score = 0.0
         if matcher and old:
             try:
-                old_score = float(matcher(old) or 0.0)
+                score = float(matcher(old) or 0.0)
             except Exception:
-                old_score = 0.0
-        if old and (matcher is None or old_score >= threshold):
+                score = 0.0
+        if old and (matcher is None or score >= threshold):
             continue
+        bad.append((score, card))
+    for old_score, card in sorted(bad, key=lambda item: item[0]):
+        if _OCR_RETRY["left"] <= 0:
+            break
+        old = str(card.get("name") or "")
         retried += 1
         try:
             text = _retry_unrecognized_card(base_img, card, cfg, ocr,
@@ -2674,6 +2828,12 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
     в ``calib_out`` (``geometry``/``source``/``confirmed``).
     """
     import cv2
+    import time
+    _warm = bool(getattr(ocr, "_warm_done", False))
+    _OCR_RETRY.update({"left": 2, "started": time.time(),
+                       "deadline": time.time() + (3.5 if _warm else 8.0),
+                       "disabled": False, "logged": False})
+    _SCAN_STARTED["t"] = time.time()
 
     ui_scale = warframe_ui_scale(cfg)[0]
     cfg_eff, geometry, source = scan_geometry_effective(
@@ -2694,7 +2854,8 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
         except Exception:
             frames_found = 0
     contour_frames = frames_found
-    panels_found, panel_lefts = _panel_count(base_img, cfg_eff)
+    panels_found, panel_lefts = _panel_count(
+        base_img, cfg_eff, lefts_fn=lambda n: card_lefts(n, cfg_eff))
     if panels_found:
         frames_found = max(frames_found, panels_found)
     band = dict(cfg_eff["scan_band"])
@@ -2899,6 +3060,7 @@ def detect_cards(base_img, cfg, ocr, debug=False, matcher=None, cache=None,
             pass
     if matcher:
         log(f"  OCR: {variant}, совпало {matched_now}/{len(cards)}")
+    _record_scan_quality(cards)
     return cards
 
 
@@ -3050,20 +3212,25 @@ class SummaryOverlay:
 
 def build_overlays():
     """Фабрика классов — Qt импортируется лениво, чтобы --help работал без него."""
-    from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal, QPoint
+    from PyQt5.QtCore import (Qt, QTimer, QObject, pyqtSignal, QPoint,
+                              QEvent)
     from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
                                  QMenu, QMessageBox, QPushButton, QVBoxLayout,
                                  QWidget)
     theme = ui_theme()
+    import region_price
 
-    class _ItemOverlay(QWidget):
+    class _ItemOverlay(region_price.DragResizeMixin, QWidget):
         def __init__(self, cfg):
             super().__init__()
             self.cfg = cfg
             self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint |
-                                Qt.Tool | Qt.WindowTransparentForInput |
-                                Qt.WindowDoesNotAcceptFocus)
+                                Qt.Tool | Qt.WindowDoesNotAcceptFocus)
+            self._init_drag(on_save=self._save_box)
+            self.box_key = ""
+            if cfg.get("plates_click_through"):
+                self.setAttribute(Qt.WA_TransparentForMouseEvents)
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAttribute(Qt.WA_ShowWithoutActivating)
             outer = QVBoxLayout(self)
@@ -3112,7 +3279,8 @@ def build_overlays():
             mid.setSpacing(6)
             self.lbl_price = QLabel("…")
             self.lbl_price.setStyleSheet(
-                f"font-size:18px; font-weight:700; color:#E7F1FF;")
+                f"font-family:'Consolas'; font-size:18px; font-weight:700; "
+                f"color:{theme.currency_platinum()};")
             self.lbl_price.setToolTip(theme.currency_tooltip("platinum"))
             self.lbl_ducats = QLabel("")
             self.lbl_ducats.setStyleSheet(
@@ -3155,6 +3323,8 @@ def build_overlays():
             self.lbl_set_progress.setStyleSheet(
                 "color:#93A1B5; background:transparent; font-size:10px;")
             self.lbl_set_progress.setVisible(False)
+            self._lay = lay
+            self._height_logged = False
 
             bot = QHBoxLayout()
             bot.setContentsMargins(0, 0, 0, 0)
@@ -3194,7 +3364,8 @@ def build_overlays():
             self.lbl_name.setStyleSheet(
                 f"color:#E6E9EE; font-size:{name_px}px; font-weight:600;")
             self.lbl_price.setStyleSheet(
-                f"font-size:{price_px}px; font-weight:700; color:#E7F1FF;")
+                f"font-family:'Consolas'; font-size:{price_px}px; "
+                f"font-weight:700; color:#E7F1FF;")
             set_font = QFont(self.font())
             set_font.setPixelSize(set_px)
             set_font.setWeight(QFont.Normal)
@@ -3203,6 +3374,33 @@ def build_overlays():
             try:
                 theme.on_currency_change(
                     lambda _p, _d: self._on_currency_changed())
+            except Exception:
+                pass
+
+        def _fit_height(self):
+            """t161: высота по видимым рядам, 96…132."""
+            try:
+                self._lay.activate()
+                need = self.frame.sizeHint().height()
+                h = max(int(round(96 * float(self.cfg.get(
+                    "font_scale", 1.0)))), min(132, int(need) + 2))
+                self.setFixedHeight(h)
+                if not self._height_logged:
+                    self._height_logged = True
+                    data = self._last_data or {}
+                    log(f"плашка {self.box_key or '-'}: высота {h} "
+                        f"(set={data.get('set_price')}, "
+                        f"online={data.get('sell_online', 0) or 0})")
+            except Exception:
+                pass
+
+        def _save_box(self, box):
+            key = self.box_key or 'plate'
+            boxes = dict(self.cfg.get('plate_boxes') or {})
+            boxes[key] = box
+            self.cfg['plate_boxes'] = boxes
+            try:
+                _write_config(self.cfg, CONFIG_PATH)
             except Exception:
                 pass
 
@@ -3221,8 +3419,8 @@ def build_overlays():
         def _on_currency_changed(self):
             try:
                 self.lbl_price.setStyleSheet(
-                    f"font-size:18px; font-weight:700; "
-                    f"color:{theme.currency_platinum()};")
+                    f"font-family:'Consolas'; font-size:18px; "
+                    f"font-weight:700; color:{theme.currency_platinum()};")
                 self.lbl_ducats.setStyleSheet(
                     f"color:{theme.currency_ducats()}; font-size:15px; "
                     "font-weight:600;")
@@ -3323,7 +3521,7 @@ def build_overlays():
             data = data or {}
             show = bool(self.cfg.get("overlay_show_set_price", True))
             price = data.get("set_price") if show else None
-            online = data.get("sell_online", 0) or 0
+            online = (data.get("sell_online", 0) or 0) if show else 0
             part_price = data.get("price")
             same = (price is not None and part_price is not None
                     and int(price) == int(part_price))
@@ -3335,17 +3533,20 @@ def build_overlays():
                 sep = currency_sep(icon)
                 amount = (f"<span style='color:{theme.currency_platinum()}'>"
                           f"{int(price)}</span>{sep}{icon}{mark}")
-                pieces.append("компл. " + amount)
+                pieces.append("КОМПЛЕКТ " + amount)
             if online:
-                pieces.append(f"{int(online)} онлайн")
+                pieces.append(f"{int(online)} ONLINE")
             if not pieces:
                 self.lbl_set.clear()
                 self.lbl_set.setVisible(False)
                 self.btn_set_market.setVisible(False)
+                self._fit_height()
                 return
             _fs = float(self.cfg.get("font_scale", 1.0))
             self.lbl_set.setStyleSheet(
                 "background: transparent; color:#93A1B5; "
+                "font-family:'Consolas'; border:1px solid #24344a; "
+                "border-radius:2px; padding:0 3px; "
                 f"font-size:{max(1, int(round(10 * _fs)))}px;")
             self.lbl_set.setTextFormat(Qt.RichText)
             self.lbl_set.setText(" · ".join(pieces))
@@ -3355,6 +3556,7 @@ def build_overlays():
             self.lbl_set.setToolTip(tip or "Комплект и продавцы")
             self.lbl_set.setVisible(True)
             self.btn_set_market.setVisible(False)
+            self._fit_height()
             if price is not None:
                 name = data.get("set_name") or data.get("set_slug") or "комплект"
                 self.lbl_set.setToolTip((tip or "") + "\n" + str(name))
@@ -3375,6 +3577,7 @@ def build_overlays():
 
         def set_data(self, d, show=True):
             self._last_data = dict(d) if d else None
+            self._height_logged = False
             if not d:
                 self.hide()
                 return
@@ -3400,14 +3603,19 @@ def build_overlays():
                     str(d.get("slug") or ""), raw_name)
                 if getattr(self, "part_chip", None) is not None:
                     if chip_style.get("is_part"):
-                        self.part_chip.setText(
-                            item_icons_module().part_word(
-                                str(d.get("slug") or ""), raw_name)
+                        _word = (item_icons_module().part_word(
+                            str(d.get("slug") or ""), raw_name)
                             or chip_style["type"])
+                        _tag = f"[{_word.upper()}]"
+                        if normalize_card_name(raw_name)[1]:
+                            _tag = f"[ЧЁРТЕЖ] {_tag}"
+                        self.part_chip.setText(_tag)
+                        self.part_chip.setStyleSheet(theme.chip_qss(_word))
+                        self.part_chip.setVisible(True)
+                    elif chip_style.get("is_set"):
+                        self.part_chip.setText("[ПОЛНЫЙ КОМПЛЕКТ]")
                         self.part_chip.setStyleSheet(
-                            "background:#262F40; font-size:9px;"
-                            f" font-weight:700; color:{chip_style['color']};"
-                            " border-radius:8px; padding:2px 6px;")
+                            theme.chip_qss("set", is_set=True))
                         self.part_chip.setVisible(True)
                     else:
                         self.part_chip.setVisible(False)
@@ -3500,6 +3708,7 @@ def build_overlays():
                 self.lbl_price.setText("<span style='color:#6c7789; font-size:15px;'>нет на рынке</span>")
                 self.lbl_ducats.setText("")
                 self.lbl_sold.setText("")
+            self._fit_height()
             if show:
                 self.show()
 
@@ -3703,7 +3912,7 @@ def build_overlays():
                 price = item.get("price")
                 if isinstance(price, (int, float)) and price:
                     total += price
-            return f"выбрано: {len(self.items)} · {int(total)}p"
+            return f"выбрано: {len(self.items)} · {int(total)} платина"
 
         # ── данные ──────────────────────────────────────────────────────
         def has_items(self):
@@ -3728,9 +3937,10 @@ def build_overlays():
             if len(name) > 28:
                 name = name[:27] + "…"
             price = it.get("price")
-            p = f"{int(price)}p" if isinstance(price, (int, float)) and price else "—"
+            p = (f"{int(price)} платина"
+                 if isinstance(price, (int, float)) and price else "—")
             du = it.get("ducats")
-            tail = f"  {int(du)} дк" if du else ""
+            tail = f"  {int(du)} дукаты" if du else ""
             return f"{name} — {p}{tail}"
 
         def _clear_rows(self):
@@ -3779,7 +3989,8 @@ def build_overlays():
                 rl.addWidget(b_edit)
                 rl.addWidget(b_del)
                 self.rows_box.addWidget(row)
-            self.lbl_total.setText(f"Итого выбрано: {int(total)}p")
+            self.lbl_total.setText(
+                f"Итого выбрано: {int(total)} платина")
             self._fit(len(rows))
 
     class _Manager(QObject):
@@ -3800,7 +4011,13 @@ def build_overlays():
             self.last_candidates = []
             self.timer = QTimer(self)
             self.timer.setSingleShot(True)
-            self.timer.timeout.connect(self.hide_all)
+            self.timer.timeout.connect(self._hide_by_ttl)
+            self._ttl_deadline = 0.0
+            self._ttl_remaining = 0.0
+            self._ttl_hover = 0
+            self._ttl_pause_logged = False
+            for _card in self.cards:
+                _card.installEventFilter(self)
             self.sel_timer = QTimer(self)
             self.sel_timer.setSingleShot(True)
             self.sel_timer.timeout.connect(self.hide_selected)
@@ -3879,11 +4096,12 @@ def build_overlays():
             for i, c in enumerate(self.last_candidates):
                 name = (c.get("market_name") or c.get("name") or "?")
                 price = c.get("price")
-                p = f"{int(price)}p" if isinstance(price, (int, float)) and price else "—"
+                p = (f"{int(price)} платина"
+                     if isinstance(price, (int, float)) and price else "—")
                 du = c.get("ducats")
                 text = f"{i + 1}. {name} — {p}"
                 if du:
-                    text += f"   {du} дк"
+                    text += f"   {du} дукаты"
                 act = menu.addAction(text)
                 actions[act] = i
             chosen = menu.exec_(anchor.mapToGlobal(QPoint(0, anchor.height())))
@@ -3980,7 +4198,7 @@ def build_overlays():
             name = self._reward_name(card)
             price = card.get("price")
             tradable = card.get("tradable")
-            price_text = (f"{int(price)}p"
+            price_text = (f"{int(price)} платина"
                           if isinstance(price, (int, float)) and price else "—")
             already = index in self._picked_indices
             if already:
@@ -4167,6 +4385,7 @@ def build_overlays():
                     d["card_left"] = self.cfg["cards_center_x"]
                 d["is_best"] = bool(best_price and len(prices) > 1 and
                                     d.get("price") == best_price)
+                self.cards[i].box_key = str(len(data))
                 self.cards[i].set_data(d)
                 left = d["card_left"]
                 # 1.0.9: плашки под никами игроков
@@ -4197,6 +4416,10 @@ def build_overlays():
                         f"bonus_top={bonus_top if bonus_top else '—'}, "
                         f"y={plate_y:.0f})")
                 self.place(self.cards[i], left, plate_y)
+                _saved = (self.cfg.get("plate_boxes") or {}).get(
+                    str(len(data)))
+                if isinstance(_saved, (list, tuple)) and len(_saved) == 4:
+                    self.cards[i].setGeometry(*[int(v) for v in _saved])
                 shown += 1
             if shown:
                 log(f"Плашки: под карточками (N={shown})")
@@ -4219,7 +4442,55 @@ def build_overlays():
                     self.summary.hide()
             else:
                 self.summary.hide()
-            self.timer.start(int(self.cfg.get("overlay_duration_ms", 12000)))
+            self._start_overlay_ttl()
+
+        def _start_overlay_ttl(self):
+            ttl = max(0.0, float(self.cfg.get("overlay_ttl", 5.0) or 0))
+            self.timer.stop()
+            self._ttl_pause_logged = False
+            if ttl <= 0:
+                return
+            self._ttl_deadline = time.time() + ttl
+            self.timer.start(int(ttl * 1000))
+
+        def _hide_by_ttl(self):
+            if not self.is_visible():
+                return
+            ttl = max(0.0, float(self.cfg.get("overlay_ttl", 5.0) or 0))
+            log(f"плашки: скрыты по таймауту ({ttl:.1f} с)")
+            self.last_data = []
+            for card in self.cards:
+                card._last_data = None
+                card.hide()
+            self.summary.hide()
+            # last_candidates сохраняем: Alt+1…4 работают после скрытия
+
+        def _pause_ttl(self):
+            if not self.timer.isActive():
+                return
+            self._ttl_remaining = max(
+                0.0, self._ttl_deadline - time.time())
+            self.timer.stop()
+            if not self._ttl_pause_logged:
+                self._ttl_pause_logged = True
+                log("плашки: таймер приостановлен (курсор над плашкой)")
+
+        def _resume_ttl(self):
+            if self._ttl_remaining <= 0:
+                return
+            self._ttl_deadline = time.time() + self._ttl_remaining
+            self.timer.start(max(1, int(self._ttl_remaining * 1000)))
+
+        def eventFilter(self, obj, event):
+            if obj in self.cards:
+                if event.type() == QEvent.Enter:
+                    self._ttl_hover += 1
+                    self._pause_ttl()
+                elif event.type() == QEvent.Leave:
+                    self._ttl_hover = max(0, self._ttl_hover - 1)
+                    if self._ttl_hover == 0:
+                        self._resume_ttl()
+            return super().eventFilter(obj, event)
 
         def hide_overlays(self):
             """Скрыть только плашки наград и «Итого» (без окон и без фокуса).
@@ -5694,7 +5965,7 @@ def build_market_dialogs():
             self._price_currency_icon = currency_icon_label("platinum", cfg,
                                                             size=16)
             self.spin_price.setSuffix("" if self._price_currency_icon
-                                      is not None else " p")
+                                      is not None else " платина")
             default_price = (self.prefill_price
                              if isinstance(self.prefill_price, (int, float))
                              else (self.order.get("platinum")
@@ -6350,7 +6621,7 @@ def append_relic_block(cfg, results, title="Награды"):
             extra.append(f"{d['sell_online']} онлайн")
         tail = ("  |  " + "  |  ".join(extra)) if extra else ""
         lines.append(f"  {i}. {name} — {fmt_plat(price)}{tail}")
-    lines.append(f"  Итого: {int(total)}p")
+    lines.append(f"  Итого: {int(total)} платина")
     lines.append("  Выбран: ?")
     try:
         with open(path, "a", encoding="utf-8") as f:
@@ -6374,10 +6645,10 @@ def save_selected_list(cfg, items):
             if isinstance(price, (int, float)) and price:
                 total += price
             du = it.get("ducats")
-            tail = f"  {du} дк" if du else ""
+            tail = f"  {du} дукаты" if du else ""
             lines.append(f"{i}. {name} — {fmt_plat(price)}{tail}")
         lines.append("")
-        lines.append(f"Итого: {int(total)}p")
+        lines.append(f"Итого: {int(total)} платина")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
     except Exception as e:
@@ -6839,17 +7110,6 @@ def icon_pack_manager(cfg=None):
             return None
         _ICON_PACK_STATE["pack"] = pack
     return pack
-
-
-def reset_icon_pack():
-    """Сбросить синглтон загрузчика (тесты/смена DATA_DIR)."""
-    _ICON_PACK_STATE["pack"] = None
-    mod = icon_pack_module()
-    if mod is not None:
-        try:
-            mod.reset_pack()
-        except Exception:
-            pass
 
 
 def icons_status(cfg=None):
@@ -7526,38 +7786,6 @@ def start_log_tailer(cfg, on_event):
         return None
 
 
-def detect_selected_slot(full_img, lefts, cfg):
-    """Ищет карточку с золотой рамкой (наведение/выбор). Индекс или None."""
-    import cv2
-    import numpy as np
-    if not lefts:
-        return None
-    img = (cv2.cvtColor(full_img, cv2.COLOR_BGRA2BGR)
-           if full_img.ndim == 3 and full_img.shape[2] == 4 else full_img)
-    sx = img.shape[1] / float(cfg["base_width"])
-    sy = img.shape[0] / float(cfg["base_height"])
-    h_img, w_img = img.shape[:2]
-    best, best_score = None, 0.0
-    for i, left in enumerate(lefts):
-        x0, y0 = int(left * sx), int(cfg["card_top"] * sy)
-        w, h = int(cfg["card_width"] * sx), int(cfg["card_height"] * sy)
-        if x0 < 0 or y0 < 0 or x0 + w > w_img or y0 + h > h_img:
-            continue
-        strips = [img[y0 + 1:y0 + 4, x0 + 4:x0 + w - 4],
-                  img[y0 + h - 4:y0 + h - 1, x0 + 4:x0 + w - 4],
-                  img[y0 + 4:y0 + h - 4, x0 + 1:x0 + 4],
-                  img[y0 + 4:y0 + h - 4, x0 + w - 4:x0 + w - 1]]
-        px = np.concatenate([s.reshape(-1, 3) for s in strips if s.size])
-        if not px.size:
-            continue
-        b, g, r = px[:, 0].astype(int), px[:, 1].astype(int), px[:, 2].astype(int)
-        mask = (r > 140) & (g > 110) & (b < 120) & (r > b + 40)
-        score = float(mask.mean())
-        if score > best_score:
-            best, best_score = i, score
-    return best if best_score >= 0.02 else None
-
-
 class ScreenWatcher(threading.Thread):
     """Следит за экраном наград и сообщает об открытии/закрытии.
 
@@ -7690,6 +7918,7 @@ class Scanner:
         self._recovery_retry = False
         self._scan_number = 0
         self.window_hider = None
+        self.ocr_request = None  # 1.1.1: перезагрузка OCR по требованию
         self._token = None
         self._init_wfinfo_geometry()
         try:
@@ -7755,11 +7984,23 @@ class Scanner:
             log("OCR: готов — выполняю отложенный Alt+Q")
             self.request_scan()
 
+    def detach_ocr(self, idle_seconds=0):
+        """Выгрузить OCR, если он простаивает и скан не идёт."""
+        with self._lock:
+            if self.busy or self.ocr is None:
+                return None
+            if idle_seconds and self.ocr.idle_seconds() < idle_seconds:
+                return None
+            engine, self.ocr = self.ocr, None
+            return engine
+
     def request_scan(self):
         if self.ocr is None:
             with self._lock:
                 self._pending_scan = True
             log("Alt+Q: готовлю распознавание… (модель ещё загружается)")
+            if callable(self.ocr_request):
+                self.ocr_request()
             return
         with self._lock:
             if self.busy:
@@ -7855,7 +8096,8 @@ class Scanner:
                 finally:
                     try:
                         import scan_recovery
-                        scan_recovery.restore_windows(hidden_windows)
+                        gui_call(lambda: scan_recovery.restore_windows(
+                            hidden_windows))
                     except Exception:
                         pass
                 base = to_base(full, self.cfg)
@@ -7961,7 +8203,7 @@ class Scanner:
                     f"(распознано 0/{len(preliminary)}, "
                     f"раскладка: {preset})")
                 try:
-                    self.mgr.hide_all()
+                    gui_call(self.mgr.hide_all)
                 except Exception:
                     pass
                 return
@@ -8264,6 +8506,7 @@ def run_gui(cfg):
         notification = pyqtSignal(str, str, str, bool)  # тост Windows (фон → GUI)
         notification_full = pyqtSignal(dict)  # центр уведомлений: запись целиком
         pick_reward = pyqtSignal(int)     # Alt+1…4: взята награда из скана
+        region_request = pyqtSignal()     # t158: Alt+D — выделение области
         stats_changed = pyqtSignal()      # 1.0.0: «Дроп» — данные изменились
 
     # ── вход через браузер: готовим Qt ДО QApplication (только webview) ──
@@ -8282,6 +8525,8 @@ def run_gui(cfg):
 
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
+    # 1.1.1: приёмник UI-задач — скрытие окон из потока скана без processEvents
+    init_gui_task()
     # 1.0.0: иконка приложения из assets/brand/icon.ico
     try:
         brand_icon = app_icon()
@@ -8437,7 +8682,10 @@ def run_gui(cfg):
                       embedded_ui=use_unified)
     scanner = Scanner(cfg, ocr, api, manager, geom)
 
+    _ocr_state = {"loading": False}
+
     def _warm_ocr_background():
+        _ocr_state["loading"] = True
         started = time.time()
         try:
             engine = OcrEngine(cfg)
@@ -8450,10 +8698,45 @@ def run_gui(cfg):
                 log(f"OCR: готов за {time.time() - started:.1f} с (фон)")
         except Exception as e:
             log(f"OCR: прогрев не удался ({type(e).__name__}: {e})")
+        finally:
+            _ocr_state["loading"] = False
 
+    def ensure_ocr():
+        """Загрузить OCR по требованию (старт, Alt+Q после выгрузки)."""
+        if scanner.ocr is not None or _ocr_state["loading"]:
+            return False
+        if game_process_running("dota2.exe"):
+            log("OCR: Dota 2 запущена — модели не гружу")
+            return False
+        threading.Thread(target=_warm_ocr_background, daemon=True,
+                         name="wf-ocr-bg").start()
+        return True
+
+    scanner.ocr_request = ensure_ocr
     _STARTUP["ocr_started"] = time.time()
-    threading.Thread(target=_warm_ocr_background, daemon=True,
-                     name="wf-ocr-bg").start()
+    ensure_ocr()
+
+    # 1.1.1: выгрузка моделей после простоя — ОЗУ возвращается системе
+    idle_min = int(cfg.get("ocr_idle_unload_min", 10) or 0)
+    if idle_min > 0:
+        from PyQt5.QtCore import QTimer as _QTimer
+        _ocr_idle = _QTimer(app)
+
+        def _unload_idle_ocr():
+            limit = 0 if game_process_running("dota2.exe") else idle_min * 60
+            engine = scanner.detach_ocr(limit)
+            if engine is None:
+                return
+            before = process_memory_mb()
+            engine.release()
+            after = process_memory_mb()
+            log(f"OCR: модели выгружены (RAM {before[0]}→{after[0]} МБ, "
+                f"WS {before[1]}→{after[1]} МБ)")
+
+        _ocr_idle.setInterval(60_000)
+        _ocr_idle.timeout.connect(_unload_idle_ocr)
+        _ocr_idle.start()
+
     reset_relic_log(cfg)
 
     # ── вход на warframe.market: браузер пользователя (CDP) ────────────
@@ -9094,29 +9377,38 @@ def run_gui(cfg):
                 login_check=login_in_progress, logger=log)
 
             def _scan_hide_windows():
-                hidden = []
-                for widget in list(getattr(manager, "cards", []) or []):
+                state = {"cancel": False}
+
+                def _hide():
+                    if state["cancel"]:
+                        return []
+                    hidden = []
+                    for widget in list(getattr(manager, "cards", []) or []):
+                        try:
+                            if widget.isVisible():
+                                widget.hide()
+                                hidden.append(widget)
+                        except Exception:
+                            pass
+                    summary = getattr(manager, "summary", None)
                     try:
-                        if widget.isVisible():
-                            widget.hide()
-                            hidden.append(widget)
+                        if summary is not None and summary.isVisible():
+                            summary.hide()
+                            hidden.append(summary)
                     except Exception:
                         pass
-                summary = getattr(manager, "summary", None)
-                try:
-                    if summary is not None and summary.isVisible():
-                        summary.hide()
-                        hidden.append(summary)
-                except Exception:
-                    pass
-                try:
-                    toast_stack.hide_all()
-                except Exception:
-                    pass
-                try:
-                    app.processEvents()
-                except Exception:
-                    pass
+                    try:
+                        toast_stack.hide_all()
+                    except Exception:
+                        pass
+                    return hidden
+
+                # 1.1.1: виджеты трогаем только в GUI-потоке (скан идёт в фоне)
+                hidden = gui_call(_hide)
+                if hidden is None:
+                    # GUI занят: отменяем отложенное скрытие, чтобы окна
+                    # не пропали уже после снимка
+                    state["cancel"] = True
                 return hidden
 
             if scanner is not None:
@@ -9672,6 +9964,19 @@ def run_gui(cfg):
     ui.hide_all.connect(hide_all)
     ui.screen_closed.connect(manager.hide_all)
     ui.pick_reward.connect(pick_reward)
+    region_ctl = None
+
+    def region_action():
+        nonlocal region_ctl
+        try:
+            import region_price
+            if region_ctl is None:
+                region_ctl = region_price.RegionPrice(cfg, api, ocr, log=log)
+            region_ctl.open()
+        except Exception as exc:
+            log(f"Alt+D: не открыт ({type(exc).__name__}: {exc})")
+
+    ui.region_request.connect(region_action)
 
     # старые хоткеи — ровно как раньше, но в обеих раскладках
     if unified is None:
@@ -9679,6 +9984,8 @@ def run_gui(cfg):
                         ui.toggle_selected.emit)
     register_hotkey(keyboard, cfg.get("hotkey_scan", "alt+q"),
                     ui.scan.emit)
+    register_hotkey(keyboard, cfg.get("hotkey_region", "alt+d"),
+                    ui.region_request.emit)
     register_hotkey(keyboard, cfg.get("hotkey_hide", "f9"),
                     ui.hide_all.emit)
     if unified is not None:
@@ -10421,6 +10728,7 @@ def main(argv=None):
             os.makedirs(DATA_DIR, exist_ok=True)
         except Exception:
             pass
+        enable_faulthandler()
         log(startup_line())
         if "--version" in raw:
             line = f"VoidFrameRU {APP_VERSION}"
