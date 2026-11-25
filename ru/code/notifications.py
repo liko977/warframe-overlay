@@ -483,9 +483,10 @@ class NotificationManager:
             order = info.get("order") or {}
             name = order_item_name(order, name_of)
             if change["gone"]:
-                text = f"{name}: ордер куплен целиком ({change['bought']} шт.)"
+                text = (f"{name}: ордер куплен целиком "
+                        f"({change['bought']} штук)")
             else:
-                text = (f"{name}: куплено {change['bought']} шт., "
+                text = (f"{name}: куплено {change['bought']} штук, "
                         f"осталось {change['left']}")
             embedded = order.get("item") if isinstance(order.get("item"), dict) else {}
             if self.notify(KIND_ORDER_BOUGHT, "Куплен ордер", text,
