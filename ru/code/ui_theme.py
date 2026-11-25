@@ -37,6 +37,11 @@ PALETTE = {
 }
 
 FONT = "Segoe UI"
+# 1.1.0 «E: Строгий терминал»
+RADIUS = 2
+ROW_H = 28
+FONT_UI = "Segoe UI"
+FONT_MONO = "Consolas"
 #: Готовые варианты цветов валют (без свободного пикера).
 PLATINUM_CHOICES = ("#E7F1FF", "#8FD8FF", "#7CC7FF", "#CFE8FF")
 DUCATS_CHOICES = ("#C9A66B", "#F5C451", "#D4AF37", "#E0B45C")
@@ -62,6 +67,27 @@ CHART_GRID = PALETTE["grid"]
 CHART_AREA = PALETTE["area"]
 CHART_LINE = PALETTE["accent"]
 CHART_VOLUME = "rgba(74,168,255,0.35)"
+
+
+def mono_qss(size=10):
+    """QSS для моноширинных чисел/меток E."""
+    return (f"font-family:'{FONT_MONO}', monospace; "
+            f"font-size:{int(size)}px;")
+
+
+def caps_header_qss():
+    """Шапка таблицы/группы: капс, mono, muted."""
+    return (f"font-family:'{FONT_MONO}', monospace; font-size:9px; "
+            f"color:{PALETTE['muted']}; letter-spacing:1px; "
+            "text-transform:uppercase;")
+
+
+def chip_qss(part_type="", is_set=False):
+    """Метка части: рамка 1 px, без заливки/скруглений."""
+    color = currency_platinum() if is_set else PALETTE["muted"]
+    return (f"font-family:'{FONT_MONO}', monospace; font-size:9px; "
+            f"color:{color}; border:1px solid {PALETTE['border']}; "
+            "background:transparent; border-radius:0px; padding:0px 4px;")
 
 
 def _rgb(color):
@@ -180,10 +206,6 @@ def rgba(hex_color, alpha):
     except Exception:
         alpha = 1.0
     return f"rgba({r}, {g}, {b}, {alpha:.2f})"
-
-
-def font_family():
-    return FONT
 
 
 def size(kind, default=12):
