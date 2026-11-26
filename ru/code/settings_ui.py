@@ -95,6 +95,7 @@ DEFAULT_VALUES = {
     "plate_boxes": {},
     "region_card_ttl": 5.0,
     "overlay_ttl": 5.0,
+    "auto_detect": True,
     "font_scale": 1.0,
     "overlay_opacity": 1.0,
     "currency_platinum_color": "#E7F1FF",
@@ -1188,6 +1189,12 @@ def build_settings_dialog():
             self.spin_overlay_ttl.setToolTip("0 — не скрывать")
             form.addRow(QLabel("Плашки наград: скрывать через"),
                         self.spin_overlay_ttl)
+            self.chk_auto_detect = QCheckBox(
+                "Автоматически показывать цены при открытии реликвии")
+            self.chk_auto_detect.setToolTip(
+                "Alt+Q всегда пересканирует вручную")
+            self.chk_auto_detect.setFont(font(11))
+            form.addRow(QLabel(""), self.chk_auto_detect)
             self.spin_font_scale = QDoubleSpinBox()
             self.spin_font_scale.setRange(0.8, 1.6)
             self.spin_font_scale.setSingleStep(0.05)
@@ -1587,6 +1594,8 @@ def build_settings_dialog():
                 float(values.get("region_card_ttl", 5.0) or 0))
             self.spin_overlay_ttl.setValue(
                 float(values.get("overlay_ttl", 5.0) or 0))
+            self.chk_auto_detect.setChecked(
+                bool(values.get("auto_detect", True)))
             layout_value = str(values.get("overlay_layout") or "bottom")
             index = self.cmb_layout.findData(layout_value)
             self.cmb_layout.setCurrentIndex(index if index >= 0 else 0)
@@ -1685,6 +1694,7 @@ def build_settings_dialog():
                     self.spin_region_ttl.value()), 1),
                 "overlay_ttl": round(float(
                     self.spin_overlay_ttl.value()), 1),
+                "auto_detect": bool(self.chk_auto_detect.isChecked()),
                 "font_scale": round(float(self.spin_font_scale.value()), 2),
                 "overlay_opacity": round(float(self.spin_opacity.value()), 2),
                 "currency_platinum_color": str(
