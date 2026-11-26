@@ -19,7 +19,7 @@ import sys
 APP_NAME = "VoidFrameRU"
 
 #: Версия релиза. Должна совпадать с ``warframe.APP_VERSION``.
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 
 
 
