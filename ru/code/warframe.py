@@ -81,7 +81,7 @@ if (os.environ.get("WF_LOG_FILE") is None
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 _APPLYING_SETTINGS = False
 
 from scan_geometry import (_bonus_top, _nick_bottom, _panel_count)
@@ -236,7 +236,7 @@ DEFAULT_CONFIG = {
     "scan_retry_delay_ms": 350,
 
     # ── авто-режим: сам открывает и закрывает плашки ────────────────────
-    "auto_detect": False,            # по умолчанию только ручной скан (Alt+Q)
+    "auto_detect": True,             # t180: авто-скан при открытии реликвии
     "auto_poll_ms": 400,             # как часто проверять экран
     "auto_confirm": 2,               # сколько проверок подряд для смены состояния
     "auto_scan_delay_ms": 450,       # пауза перед сканом (карточки доезжают)
@@ -898,8 +898,6 @@ def load_config(path=CONFIG_PATH):
         if str(raw.get("hotkey_scan", "")).lower() == "f8":
             cfg["hotkey_scan"] = "alt+q"
         cfg["hotkey_editor"] = "f8"
-    if isinstance(raw, dict) and "auto_detect" not in raw:
-        cfg["auto_detect"] = False
     # горячие клавиши: RU→EN уже при чтении конфига
     for key in _OTHER_HOTKEY_KEYS:
         if cfg.get(key):
@@ -6408,6 +6406,17 @@ def game_window_handle():
     return hwnd
 
 
+def game_window_active():
+    """t180: активно ли окно игры (для авто-скана)."""
+    try:
+        hwnd = game_window_handle()
+        if not hwnd:
+            return False
+        return _user32().GetForegroundWindow() == hwnd
+    except Exception:
+        return False
+
+
 def force_foreground(hwnd):
     """Выводит окно вперёд и делает активным (обход ограничения Windows)."""
     import ctypes
@@ -7784,6 +7793,59 @@ def start_log_tailer(cfg, on_event):
     except Exception as e:
         log(f"EE.log: хвост лога не запущен ({type(e).__name__}: {e})")
         return None
+
+
+class AutoScanGate:
+    """t180: общий дебаунс авто-скана для EE.log и пиксельного watcher."""
+    def __init__(self, request_scan, enabled=True, delay=0.4, debounce=2.0,
+                 log_fn=None, clock=None, active_fn=None):
+        self.request_scan = request_scan
+        self.enabled = bool(enabled)
+        self.delay = max(0.0, float(delay))
+        self.debounce = max(0.0, float(debounce))
+        self.log = log_fn or (lambda _m: None)
+        self.clock = clock or time.monotonic
+        self.active_fn = active_fn
+        self._timer = None
+        self._last = -1e9
+
+    def trigger(self, delay=None, source="rewards"):
+        if not self.enabled:
+            self.log("Автоскан: выключен в настройках")
+            return False
+        if self.active_fn is not None and not self.active_fn():
+            self.log("Автоскан: пропуск (окно игры не активно)")
+            return False
+        now = self.clock()
+        if now - self._last < self.debounce:
+            self.log("Автоскан: пропуск (дебаунс)")
+            return False
+        self._cancel_timer()
+        self._last = now
+        self._timer = threading.Timer(
+            self.delay if delay is None else float(delay), self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+        self.log("Автоскан: экран наград → скан через "
+                 f"{int((delay if delay is not None else self.delay) * 1000)} мс")
+        return True
+
+    def close(self):
+        if self._timer is not None:
+            self._cancel_timer()
+            self.log("Автоскан: отменён (экран закрыт)")
+
+    def _cancel_timer(self):
+        timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _fire(self):
+        self._timer = None
+        try:
+            self.request_scan()
+        except Exception as exc:
+            self.log(f"Автоскан: скан не запущен ({type(exc).__name__})")
 
 
 class ScreenWatcher(threading.Thread):
@@ -10382,14 +10444,17 @@ def run_gui(cfg):
             return False
 
     watcher = None
+    _auto_delay = max(0, int(cfg.get("auto_scan_delay_ms", 450))) / 1000.0
+    auto_gate = AutoScanGate(
+        request_scan, enabled=bool(cfg.get("auto_detect", True)),
+        delay=_auto_delay, debounce=2.0, log_fn=log,
+        active_fn=game_window_active)
     if cfg.get("auto_detect", True):
-        delay = max(0, int(cfg.get("auto_scan_delay_ms", 450))) / 1000.0
-
         def _on_open():
-            log("  Экран наград открыт — сканирую…")
-            threading.Timer(delay, request_scan).start()
+            auto_gate.trigger(delay=_auto_delay, source="pixel")
 
         def _on_close():
+            auto_gate.close()
             log("  Экран наград закрыт — убираю плашки.")
             ui.screen_closed.emit()
 
@@ -10424,8 +10489,10 @@ def run_gui(cfg):
             log("  EE.log: экран реликвии открыт")
         elif kind == "rewards":
             log("  EE.log: экран наград заполнен")
+            auto_gate.trigger(delay=0.4, source="log")
         elif kind == "close":
             log("  EE.log: экран реликвии закрыт")
+            auto_gate.close()
         elif kind == "drop":
             # за ценой идём в сеть — не тормозим поток чтения лога
             threading.Thread(target=_handle_log_drop, args=(ev,),
