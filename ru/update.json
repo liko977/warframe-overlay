@@ -1,13 +1,13 @@
 {
-  "version": "1.1.1",
-  "notes": "Alt+D: цена распознаётся сразу после запуска (движок OCR подключается динамически). Alt+D: кнопка «Выставить на маркет» — ордер по актуальной цене, без перехода на сайт. Мои ордера: названия предметов вместо «предмет», работает и без сети — из локального каталога. Мелкие фиксы стабильности.",
-  "updated_at": "2026-11-25T19:37:12Z",
+  "version": "1.1.2",
+  "notes": "Цены наград появляются сами при открытии реликвии — без нажатия Alt+Q. Триггер по игровому логу: скан через 0,4 секунды, повторные события игнорируются. Alt+Q остаётся для ручного пересканирования. Настройка «Автоматически показывать цены при открытии реликвии» в разделе Оверлей.",
+  "updated_at": "2026-11-26T19:08:13Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "ea0bd1013d63a5f88163566172b0dae3b4fce9cb8acb643b4bb1c871d1028ddc",
+      "sha256": "6c727b70d7d5f43f1468de8b7e5fbd752151196e8a796d379bb066d3d6811353",
       "size": 2946
     },
     {
@@ -25,8 +25,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "68dca5439336b5ae0ce85176e22484545bc589f5bc5fefe3c17ca5aced445bf9",
-      "size": 17501
+      "sha256": "84e3c6ab0bb8f9eff15a6695b1bc79f3790a40ab46c6fb118bcb2b37cd7d4e18",
+      "size": 18553
     },
     {
       "path": "chat_client.py",
@@ -217,8 +217,8 @@
     {
       "path": "settings_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/settings_ui.py",
-      "sha256": "1c87e26641d8c2fa7447972f1ee4365393315f824c5b5182fbe55f7c8aaf4ce6",
-      "size": 116938
+      "sha256": "6d36bd503b0224601000876e5b679483edc99dbaaf4f4bba2465baf17899d714",
+      "size": 117531
     },
     {
       "path": "single_instance.py",
@@ -253,8 +253,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "a70a652cec2957b1104e7e683c25c373161613bdff3487e251a7df0849aa2a38",
-      "size": 494720
+      "sha256": "047165b441b88b5c39df686cb499ee9371c17fb263b533b62a2a3518e31f0290",
+      "size": 497269
     }
   ]
 }
