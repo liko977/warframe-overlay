@@ -1130,6 +1130,16 @@ class ItemIconProvider:
     def memory_size(self):
         return len(self._pixmaps)
 
+    def clear_cache(self):
+        """t206: сбросить кэш пикселей и «неудачные» попытки после пака."""
+        with self._lock:
+            self._pixmaps.clear()
+            self._attempted.clear()
+            self._missing.clear()
+            self._misses = 0
+        self._invalidate_disk()
+        return True
+
     def has_index(self):
         return bool(self._index)
 
