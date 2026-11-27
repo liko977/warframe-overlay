@@ -19,7 +19,7 @@ import region_price
 import translate_history as history_mod
 
 TEXT_LIMIT = 500
-MIN_BOX = (80, 60)
+MIN_BOX = (8, 4)   # даже маленькое слово; OCR апскейлит до 6×
 
 
 class RegionTranslateCard(region_price.DragResizeMixin, QWidget):
@@ -146,7 +146,10 @@ class RegionTranslate:
         try:
             import cv2
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            proc = cv2.resize(gray, None, fx=2.0, fy=2.0,
+            # мелкие области (строка чата) апскейлим сильнее — иначе OCR пуст
+            h0 = gray.shape[0]
+            scale = 2.0 if h0 >= 40 else (4.0 if h0 >= 16 else 6.0)
+            proc = cv2.resize(gray, None, fx=scale, fy=scale,
                               interpolation=cv2.INTER_CUBIC)
             result = engine.read_proc(proc) or []
         except Exception as exc:
