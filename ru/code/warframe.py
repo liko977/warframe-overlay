@@ -82,7 +82,7 @@ if (os.environ.get("WF_LOG_FILE") is None
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 _APPLYING_SETTINGS = False
 
 from scan_geometry import (_bonus_top, _nick_bottom, _panel_count)
