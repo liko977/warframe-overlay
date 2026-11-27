@@ -393,6 +393,7 @@ class RegionPrice:
         self.card = None
         self.selector = None
         self.last_box = None
+        self.wait = None          # t204: ожидание загрузки OCR
 
     def open(self):
         if self.card is not None:
@@ -418,17 +419,67 @@ class RegionPrice:
         self.last_box = (x, y, w, h)
         self.log(f"Alt+D: область={w}x{h}")
         frame = self.capture(x, y, w, h)
-        name, score, ready = self.recognize(frame)
-        self.log(f"Alt+D: ocr={'ready' if ready else 'warming'}, "
-                 f"область={w}x{h}, имя={name!r}, score={score:.2f}")
         self.card = PriceCard(self.cfg, on_save=self._save_box,
                               log=self.log, client=self.client,
                               on_open_orders=self.on_open_orders,
                               toast=self.toast)
-        if not ready:
-            self.card.lbl_name.setText("OCR готовится…")
+        engine = self._engine()
+        if engine is None:
+            # t204: кадр сохранён — ждём OCR, выделение заново не нужно
+            self.card.lbl_name.setText("OCR ГОТОВИТСЯ")
             self.card.lbl_price.setText("—")
-            self.card.lbl_info.setText("попробуйте через пару секунд")
+            self._show_waiting(frame, x, y, w, h)
+            return self.card
+        return self._finish(frame, x, y, w, h, engine)
+
+    def _engine(self):
+        """Текущий OCR-движок (может быть None, пока грузится)."""
+        return (self.ocr_getter() if self.ocr_getter is not None
+                else self.ocr)
+
+    def _show_waiting(self, frame, x, y, w, h):
+        """Карточка «OCR ЗАГРУЖАЕТСЯ» + ожидание до 45 с."""
+        import ocr_wait
+        self.log("Alt+D: OCR недоступен (None) — жду загрузки (t204)")
+        self._place_card(x, y, w, h)
+        self.card.show()
+
+        def ready(engine):
+            self.card.lbl_name.setText("OCR ГОТОВ")
+            self._finish(frame, x, y, w, h, engine)
+
+        def timeout():
+            self.card.lbl_name.setText("OCR НЕ ЗАПУСТИЛСЯ")
+            self.card.lbl_price.setText("—")
+            self.card.lbl_info.setText("проверьте app.log")
+
+        def tick(left):
+            if self.card is not None:
+                self.card.lbl_info.setText(
+                    f"подождите, распознаю автоматически ({left} с)")
+
+        tick(int(ocr_wait.TIMEOUT_SEC))
+        self.wait = ocr_wait.OcrWait(
+            self._engine, ready, on_timeout=timeout, log=self.log,
+            on_tick=tick)
+        self.wait.start()
+        self.card.closed.connect(self._cancel_wait)
+        return self.card
+
+    def _cancel_wait(self):
+        if getattr(self, "wait", None) is not None:
+            self.wait.cancel()
+            self.wait = None
+        return True
+
+    def _finish(self, frame, x, y, w, h, engine):
+        name, score, ready = self.recognize(frame, engine)
+        self.log(f"Alt+D: ocr={'ready' if ready else 'warming'}, "
+                 f"область={w}x{h}, имя={name!r}, score={score:.2f}")
+        if not ready:
+            self.card.lbl_name.setText("OCR ГОТОВИТСЯ")
+            self.card.lbl_price.setText("—")
+            self.card.lbl_info.setText("подождите, распознаю автоматически")
             self._place_card(x, y, w, h)
             self.card.show()
             return self.card
@@ -470,11 +521,10 @@ class RegionPrice:
                           interpolation=cv2.INTER_CUBIC)
         return self._ocr.read_proc(proc)
 
-    def recognize(self, frame):
+    def recognize(self, frame, engine=None):
         import cv2
         import card_text
-        self._ocr = (self.ocr_getter() if self.ocr_getter is not None
-                     else self.ocr)
+        self._ocr = engine if engine is not None else self._engine()
         if self._ocr is None:
             self.log("Alt+D: OCR недоступен (None)")
             return "", 0.0, False
