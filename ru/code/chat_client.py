@@ -17,7 +17,6 @@
 
 import datetime
 import json
-import os
 import threading
 import time
 import uuid
@@ -26,6 +25,11 @@ try:
     import ui_theme as theme
 except Exception:                       # pragma: no cover
     theme = None
+
+try:                                    # t184: переводчик чата (Alt+T)
+    import translator
+except Exception:                       # pragma: no cover
+    translator = None
 
 
 def _safe_log(context, exc=None):
@@ -184,8 +188,8 @@ def open_chat_site(opener=None):
         except Exception:
             return False
     try:
-        import webbrowser
-        return bool(webbrowser.open(CHAT_SITE_URL))
+        import ui_url
+        return bool(ui_url.open_url(CHAT_SITE_URL))
     except Exception:
         return False
 
@@ -356,7 +360,7 @@ class ChatSocket:
 
     ``transport_factory(owner)`` возвращает объект с ``open()``, ``send(text)``,
     ``close()`` и (необязательно) ``ping()``. Без фабрики используется
-    ``QWebSocket`` в отдельном ``QThread`` (как в market_browser_login.py).
+    ``QWebSocket`` в отдельном ``QThread``.
     """
 
     def __init__(self, cfg=None, token="", on_message=None, on_sent=None,
@@ -923,7 +927,7 @@ def build_chat_widget():
     from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit,
                                  QListWidget, QListWidgetItem, QPushButton,
-                                 QScrollArea, QTextBrowser, QVBoxLayout,
+                                 QScrollArea, QSizePolicy, QVBoxLayout,
                                  QWidget)
 
     def font(size, bold=False):
@@ -940,10 +944,49 @@ def build_chat_widget():
             return theme.PALETTE.get(name, fallback)
         return fallback
 
-    class ChatWidget(QWidget):
+    class _ElidedLabel(QLabel):
+        """QLabel с многоточием по фактической ширине (автор сообщения)."""
+
+        def __init__(self, text="", parent=None):
+            super().__init__(parent)
+            self._full = str(text or "")
+            self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            self.setMinimumWidth(0)
+            self._apply()
+
+        def set_full_text(self, text):
+            self._full = str(text or "")
+            self._apply()
+
+        def _apply(self):
+            self.setText(self.fontMetrics().elidedText(
+                self._full, Qt.ElideRight, max(10, self.width())))
+
+        def resizeEvent(self, event):       # noqa: N802 (Qt API)
+            super().resizeEvent(event)
+            self._apply()
+
+    class _NickLabel(_ElidedLabel):
+        """t188: ник в колонке АВТОР — клик открывает историю по нику."""
+
+        def __init__(self, text="", parent=None, on_click=None):
+            super().__init__(text, parent)
+            self._on_click = on_click
+            self.setCursor(Qt.PointingHandCursor)
+
+        def mouseReleaseEvent(self, event):    # noqa: N802 (Qt API)
+            if callable(self._on_click):
+                self._on_click()
+            super().mouseReleaseEvent(event)
+
+    class ChatWidget(QFrame):
         chat_selected = pyqtSignal(str)
         send_requested = pyqtSignal(str, str)
         open_site_requested = pyqtSignal()
+        translation_ready = pyqtSignal(str, int, str)   # t184: Alt+T
+
+        #: сетка строки сообщения и её шапки: (ключ, ширина); 0 — stretch
+        CHAT_GRID = (("time", 44), ("author", 90), ("tag", 44), ("text", 0))
 
         def __init__(self, cfg=None, parent=None):
             super().__init__(parent)
@@ -951,6 +994,16 @@ def build_chat_widget():
             self.chats = []
             self.current_chat = ""
             self.messages = {}
+            self._translations = {}     # t184: перевод только в отображении
+            self.history_nick = ""      # t188: режим «ИСТОРИЯ · <ник>»
+            self._chat_history = None
+            self._recorded = set()      # антидубли записей истории
+            self.confirm = None         # callable(str) → bool (тесты/UI)
+            self.toast = None           # callable(str) — тост приложения
+            self.setObjectName("chatPanel")
+            self.setStyleSheet(
+                (theme.panel_qss("chatPanel", radius=0) if theme is not None
+                 else f"QFrame#chatPanel {{ background:{color('panel')}; }}"))
             outer = QVBoxLayout(self)
             outer.setContentsMargins(8, 8, 8, 8)
             outer.setSpacing(6)
@@ -978,28 +1031,68 @@ def build_chat_widget():
             self.list.itemSelectionChanged.connect(self._on_selection)
             body.addWidget(self.list)
             right = QVBoxLayout()
-            right.setSpacing(6)
-            self.history = QTextBrowser()
-            self.history.setFont(font(11))
+            right.setSpacing(4)
+            self.history_header = self._chat_header()
+            right.addWidget(self.history_header)
+            # t188: в режиме истории — «назад» и «очистить»
+            tools = QHBoxLayout()
+            tools.setSpacing(4)
+            self.btn_hist_close = QPushButton("✕")
+            self.btn_hist_close.setToolTip("Назад к диалогу")
+            self.btn_hist_close.clicked.connect(self.close_history)
+            self.btn_hist_clear = QPushButton("Очистить")
+            self.btn_hist_clear.setToolTip("Удалить историю этого ника")
+            self.btn_hist_clear.clicked.connect(self.clear_history)
+            for button in (self.btn_hist_close, self.btn_hist_clear):
+                button.setStyleSheet(button_qss(small=True)
+                                     + " border-radius:2px;")
+                button.setFixedHeight(24)
+                button.setCursor(Qt.PointingHandCursor)
+                button.setVisible(False)
+                tools.addWidget(button)
+            tools.addStretch(1)
+            right.addLayout(tools)
+            self.history = QScrollArea()
+            self.history.setWidgetResizable(True)
+            self.history.setFrameShape(QFrame.NoFrame)
             self.history.setStyleSheet(
-                f"QTextBrowser {{ background:{color('panel')};"
-                f" color:{color('text')}; border:1px solid {color('border')};"
-                " border-radius:6px; padding:6px; }")
+                "QScrollArea { background: transparent; border: none; }"
+                "QScrollArea > QWidget > QWidget { background: transparent; }"
+                + (theme.scroll_qss() if theme is not None else ""))
+            self.history_host = QWidget()
+            self.history_lay = QVBoxLayout(self.history_host)
+            self.history_lay.setContentsMargins(0, 0, 0, 0)
+            self.history_lay.setSpacing(0)
+            self.history_lay.setAlignment(Qt.AlignTop)
+            self.history.setWidget(self.history_host)
             right.addWidget(self.history, 1)
             send_row = QHBoxLayout()
+            send_row.setSpacing(4)
             self.edit = QLineEdit()
             self.edit.setFont(font(11))
             self.edit.setPlaceholderText("Сообщение…")
+            self.edit.setFixedHeight(28)
+            self.edit.setStyleSheet(
+                "QLineEdit { background:%s; color:%s; border:1px solid %s;"
+                " border-radius:0px; padding:0px 8px; font-size:11px; }"
+                % (color("panel"), color("text"), color("border")))
             self.edit.returnPressed.connect(self.send_current)
             self.btn_send = QPushButton("Отправить")
-            self.btn_send.setStyleSheet(button_qss(primary=True))
+            send_font = QFont("Consolas")
+            send_font.setPixelSize(9)
+            send_font.setCapitalization(QFont.AllUppercase)
+            self.btn_send.setFont(send_font)
+            self.btn_send.setStyleSheet(button_qss(primary=True)
+                                        + " border-radius:2px;")
             self.btn_send.setCursor(Qt.PointingHandCursor)
+            self.btn_send.setFixedHeight(24)
             self.btn_send.clicked.connect(self.send_current)
             send_row.addWidget(self.edit, 1)
             send_row.addWidget(self.btn_send)
             right.addLayout(send_row)
             body.addLayout(right, 1)
             outer.addLayout(body, 1)
+            self.translation_ready.connect(self._apply_translation)
             self.set_status(TOKEN_MISSING_TEXT)
 
         def set_status(self, text):
@@ -1023,26 +1116,405 @@ def build_chat_widget():
                 self.list.addItem(item)
             self.list.blockSignals(False)
 
+        # ── t185: строки сообщений в сетке E (время | автор | метка | текст) ─
+        def _chat_line(self, host):
+            line = QHBoxLayout(host)
+            line.setContentsMargins(8, 0, 8, 0)
+            line.setSpacing(6)
+            return line
+
+        def _chat_cell(self, key, align=Qt.AlignLeft):
+            label = QLabel("")
+            label.setAlignment(align | Qt.AlignVCenter)
+            width = dict(self.CHAT_GRID)[key]
+            if width:
+                label.setFixedWidth(width)
+            return label
+
+        def _chat_header(self):
+            """Шапка списка: та же сетка, что у строк сообщений."""
+            head = QWidget()
+            head.setFixedHeight(24)
+            line = self._chat_line(head)
+            for key, title in (("time", "ВРЕМЯ"), ("author", "АВТОР"),
+                               ("tag", ""), ("text", "СООБЩЕНИЕ")):
+                label = self._chat_cell(key)
+                label.setText(title)
+                if theme is not None:
+                    label.setStyleSheet(theme.caps_header_qss())
+                else:
+                    label.setFont(font(9))
+                label.setFixedHeight(24)
+                line.addWidget(label, 1 if key == "text" else 0)
+            return head
+
+        # ── t188: история переписки по нику ─────────────────────────────
+        def _history_store(self):
+            if getattr(self, "_chat_history", None) is None:
+                import chat_history as history_mod
+                limit = int(self.cfg.get("chat_history_limit", 100) or 100)
+                self._chat_history = history_mod.ChatHistory(self.cfg,
+                                                             limit=limit)
+            return self._chat_history
+
+        @staticmethod
+        def _message_utc(message):
+            """Время сообщения → float (число, ISO-строка или «сейчас»)."""
+            raw = (message or {}).get("send_date") or (message or {}).get("ts")
+            if raw is None:
+                return time.time()
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+            try:
+                return datetime.datetime.fromisoformat(
+                    str(raw).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return time.time()
+
+        def record_message(self, message):
+            """Записать сообщение чата в историю по нику (если включено)."""
+            if not bool(self.cfg.get("chat_history_enabled", True)):
+                return False
+            text = self._message_text(message)
+            if not text:
+                return False
+            own = str((message or {}).get("message_from") or "") in ("me",
+                                                                    "self")
+            nick = "Вы" if own else str((message or {}).get("message_from")
+                                        or "собеседник")
+            label, _body = self._trade_tag(text)
+            utc = self._message_utc(message)
+            key = (str((message or {}).get("message_from") or ""), utc, text)
+            if key in self._recorded:
+                return False
+            try:
+                added = bool(self._history_store().add(
+                    nick, text, label=label, outgoing=own, utc=utc))
+            except Exception as exc:
+                _safe_log("chat history", exc)
+                return False
+            if added:
+                self._recorded.add(key)
+                if len(self._recorded) > 2000:
+                    self._recorded.clear()
+            return added
+
+        def record_messages(self, messages):
+            """Записать пачку сообщений (без дублей по нику/времени/тексту)."""
+            for message in messages or []:
+                self.record_message(message)
+
+        def open_history(self, nick):
+            """Клик по нику: показать историю только этого ника."""
+            nick = str(nick or "").strip()
+            if not nick:
+                return False
+            self.history_nick = nick
+            self.hist_buttons_visible(True)
+            self.set_status(f"ИСТОРИЯ · {nick}")
+            self.render_history()
+            return True
+
+        def close_history(self):
+            self.history_nick = ""
+            self.hist_buttons_visible(False)
+            chat_id = str(self.current_chat or "")
+            self.set_status(chat_id or TOKEN_MISSING_TEXT)
+            self.set_messages(chat_id, self.messages.get(chat_id) or [])
+            return True
+
+        def hist_buttons_visible(self, visible):
+            for name in ("btn_hist_close", "btn_hist_clear"):
+                button = getattr(self, name, None)
+                if button is not None:
+                    button.setVisible(bool(visible))
+
+        def render_history(self, nick=None):
+            nick = str(nick or getattr(self, "history_nick", "") or "")
+            if not nick:
+                return False
+            records = [{"message_from": nick, "message": item.get("text"),
+                        "send_date": item.get("utc"),
+                        "trade_tag": item.get("label")}
+                       for item in self._history_store().records(nick)]
+            self._render_rows(records, trans_key=f"hist:{nick}",
+                              empty="История пуста")
+            if not records:
+                self.set_status(f"ИСТОРИЯ · {nick} — пусто")
+            return True
+
+        def clear_history(self, nick=None):
+            """ОЧИСТИТЬ: удалить историю ника (с подтверждением)."""
+            target = str(nick or getattr(self, "history_nick", "") or "")
+            question = (f"Удалить историю переписки с {target}?" if target
+                        else "Удалить всю историю переписки?")
+            confirm = getattr(self, "confirm", None)
+            if callable(confirm) and not confirm(question):
+                return False
+            self._history_store().clear(target or None)
+            if getattr(self, "history_nick", ""):
+                self.render_history()
+            self._toast("история очищена")
+            return True
+
+        def _on_nick_click(self, nick):
+            return self.open_history(nick)
+
+        @staticmethod
+        def _trade_tag(text):
+            """Первое слово WTS/WTB/WTT → (метка, текст без неё)."""
+            raw = str(text or "")
+            parts = raw.split(None, 1)
+            if parts and parts[0].upper() in ("WTS", "WTB", "WTT"):
+                return parts[0].upper(), (parts[1] if len(parts) > 1 else "")
+            return "", raw
+
+        @staticmethod
+        def _sender_of(message):
+            own = str((message or {}).get("message_from") or "") in ("me", "self")
+            return "Вы" if own else str((message or {}).get("message_from")
+                                        or "собеседник")
+
+        def _trans_key(self):
+            """Ключ переводов: история по нику или текущий диалог (t188)."""
+            nick = getattr(self, "history_nick", "")
+            return f"hist:{nick}" if nick else str(self.current_chat or "")
+
+        def _message_row(self, message, index, zebra, trans_key=None):
+            """Строка сообщения 28 px (с переводом — 42 px), без радиусов."""
+            row = QFrame()
+            row.setObjectName("chatRow")
+            row.setProperty("message_index", int(index))
+            key = trans_key if trans_key is not None else str(self.current_chat)
+            translated = (self._translations.get(key) or {}).get(index)
+            row.setFixedHeight(28 + (14 if translated else 0))
+            background = (theme.PALETTE["zebra"] if (zebra and theme is not None)
+                          else "transparent")
+            row.setStyleSheet(
+                f"QFrame#chatRow {{ background-color: {background};"
+                " border: none; border-radius: 0px; }")
+            line = self._chat_line(row)
+            when = self._chat_cell("time", Qt.AlignLeft)
+            when.setText(format_chat_time(message.get("send_date")
+                                          or message.get("ts")))
+            when.setFont(font(10))
+            if theme is not None:
+                when.setStyleSheet(theme.muted_qss(10)
+                                   + " font-family:'Consolas', monospace;")
+            author = _NickLabel(self._sender_of(message),
+                                on_click=lambda nick=self._sender_of(message):
+                                self.open_history(nick))
+            author.setFixedWidth(dict(self.CHAT_GRID)["author"])
+            author.setFont(font(10, True))
+            author.setStyleSheet(f"color:{color('text')}; background:transparent;")
+            author.setToolTip(self._sender_of(message))
+            tag_text, body = self._trade_tag(self._message_text(message))
+            tag_host = QWidget()
+            tag_host.setFixedWidth(dict(self.CHAT_GRID)["tag"])
+            tag_lay = QHBoxLayout(tag_host)
+            tag_lay.setContentsMargins(0, 0, 0, 0)
+            tag_lay.setSpacing(0)
+            if tag_text:
+                chip = QLabel(f"[{tag_text}]")
+                if theme is not None:
+                    chip.setStyleSheet(theme.chip_qss(tag_text))
+                chip.setFont(font(9))
+                chip.setFixedHeight(18)
+                chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                chip.setToolTip(tag_text)
+                tag_lay.addWidget(chip, 0)
+            tag_lay.addStretch(1)
+            text_col = QWidget()
+            text_lay = QVBoxLayout(text_col)
+            text_lay.setContentsMargins(0, 0, 0, 0)
+            text_lay.setSpacing(0)
+            body_label = _ElidedLabel(body or self._message_text(message))
+            body_label.setFont(font(11))
+            body_label.setStyleSheet(
+                f"color:{color('text')}; background:transparent;")
+            body_label.setToolTip(self._message_text(message))
+            text_lay.addWidget(body_label)
+            if translated:
+                tr_label = _ElidedLabel(str(translated))
+                tr_label.setFont(font(10))
+                tr_label.setStyleSheet(
+                    f"color:{color('muted')}; background:transparent;"
+                    " padding-left:14px;")
+                tr_label.setToolTip("перевод (Alt+T)")
+                text_lay.addWidget(tr_label)
+            line.addWidget(when, 0)
+            line.addWidget(author, 0)
+            line.addWidget(tag_host, 0)
+            line.addWidget(text_col, 1)
+            return row
+
         def set_messages(self, chat_id, messages):
             self.messages[str(chat_id)] = [dict(m) for m in (messages or [])]
             if str(chat_id) != str(self.current_chat):
                 return
-            parts = []
-            for message in messages or []:
-                own = str(message.get("message_from") or "") in ("me", "self")
-                sender = "Вы" if own else str(message.get("message_from") or "собеседник")
-                text = (message.get("message") or message.get("raw_message")
-                        or "").replace("<", "&lt;").replace(">", "&gt;")
-                align = "right" if own else "left"
-                bg = color("accent") if own else color("card")
-                fg = "#0d131c" if own else color("text")
-                parts.append(
-                    f"<div align='{align}'><span style='background:{bg};"
-                    f"color:{fg};padding:4px 8px;border-radius:6px;'>"
-                    f"<b>{sender}</b>: {text}</span></div>")
-            self.history.setHtml("<br>".join(parts) if parts else
-                                 f"<div style='color:{color('muted')}'>"
-                                 "История пуста</div>")
+            self.record_messages(messages)
+            if getattr(self, "history_nick", ""):
+                self.render_history()
+                return
+            self._render_rows(messages, str(chat_id), "История пуста")
+
+        def _render_rows(self, messages, trans_key, empty):
+            """Перерисовать строки истории (диалог или история по нику)."""
+            while self.history_lay.count():
+                item = self.history_lay.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            self.history_rows = []
+            if not messages:
+                hint = QLabel(empty)
+                hint.setFont(font(11))
+                hint.setStyleSheet(
+                    f"color:{color('muted')}; background:transparent;")
+                self.history_lay.addWidget(hint)
+                self.history_lay.addStretch(1)
+                return
+            for index, message in enumerate(messages):
+                row = self._message_row(message, index, zebra=index % 2 == 1,
+                                        trans_key=trans_key)
+                self.history_rows.append(row)
+                self.history_lay.addWidget(row)
+            self.history_lay.addStretch(1)
+
+        def history_texts(self):
+            """Полные тексты строк истории (без обрезки многоточием)."""
+            out = []
+            for row in getattr(self, "history_rows", []) or []:
+                for label in row.findChildren(QLabel):
+                    value = getattr(label, "_full", "") or label.text()
+                    if value:
+                        out.append(str(value))
+            return out
+
+        # ── t184: перевод сообщения по Alt+T ───────────────────────────
+        @staticmethod
+        def _message_text(message):
+            message = message or {}
+            return str(message.get("message") or message.get("raw_message")
+                       or "").strip()
+
+        def message_at(self, pos=None):
+            """Индекс сообщения под курсором (по строке-виджету) или None."""
+            point = pos
+            if point is None:
+                from PyQt5.QtGui import QCursor
+                point = self.history.viewport().mapFromGlobal(QCursor.pos())
+            widget = self.history.viewport().childAt(point)
+            while widget is not None and widget is not self.history.viewport():
+                index = widget.property("message_index")
+                if index is not None:
+                    return int(index)
+                widget = widget.parentWidget()
+            return None
+
+        def _toast(self, text):
+            self.set_status(str(text))
+            if callable(self.toast):
+                try:
+                    self.toast(str(text))
+                except Exception:
+                    pass
+
+        def translate_under_cursor(self, pos=None):
+            """Alt+T: перевод сообщения под курсором (в истории — по нику)."""
+            nick = getattr(self, "history_nick", "")
+            if nick:
+                records = self._history_store().records(nick)
+                index = self.message_at(pos)
+                if index is None or index >= len(records):
+                    self._toast("перевод: наведите курсор на сообщение")
+                    return None
+                rows = self._translations.get(f"hist:{nick}") or {}
+                if index in rows:
+                    rows.pop(index, None)
+                    self.render_history(nick)
+                    return ""
+                self._translate_async(f"hist:{nick}", index,
+                                      str(records[index].get("text") or ""))
+                return None
+            chat_id = str(self.current_chat or "")
+            messages = self.messages.get(chat_id) or []
+            if not chat_id or not messages:
+                self._toast("перевод: откройте диалог с сообщениями")
+                return None
+            index = self.message_at(pos)
+            if index is None or index >= len(messages):
+                self._toast("перевод: наведите курсор на сообщение")
+                return None
+            shown = self._translations.setdefault(chat_id, {})
+            if index in shown:
+                shown.pop(index, None)
+                self.set_messages(chat_id, messages)
+                return ""
+            if translator is None:
+                self._toast("перевод недоступен в этой сборке")
+                return None
+            if translator.ready(self.cfg) is False:
+                self._toast("перевод: нужен ключ — вставьте его в Настройках "
+                            "или выберите «Бесплатный»")
+                return None
+            text = self._message_text(messages[index])
+            self._translate_async(chat_id, index, text)
+            return None
+
+        def _translate_async(self, chat_id, index, text):
+            def worker():
+                try:
+                    translated, info = translator.translate(text, cfg=self.cfg)
+                except Exception as exc:      # перевод не должен ронять UI
+                    translated, info = text, {"error": str(exc)}
+                if (info or {}).get("error"):
+                    error = info["error"]
+                    if error == "free_unavailable":
+                        self._toast("бесплатный перевод недоступен, попробуйте "
+                                    "позже или выберите Яндекс")
+                    else:
+                        self._toast(f"перевод: ошибка {error}")
+                    return
+                try:
+                    self.translation_ready.emit(chat_id, int(index), translated)
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True,
+                             name="wf-chat-translate").start()
+
+        def _apply_translation(self, chat_id, index, text):
+            chat_id = str(chat_id)
+            self._translations.setdefault(chat_id, {})[int(index)] = str(text)
+            if chat_id.startswith("hist:"):
+                self.render_history(chat_id[5:])
+                self._schedule_translation_hide(chat_id, int(index))
+            else:
+                self.set_messages(chat_id, self.messages.get(chat_id) or [])
+
+        def _schedule_translation_hide(self, chat_id, index):
+            """t188: перевод в истории исчезает через ``chat_translate_ttl``."""
+            try:
+                ttl = float(self.cfg.get("chat_translate_ttl", 6.0) or 0)
+            except (TypeError, ValueError):
+                ttl = 6.0
+            if ttl <= 0:
+                return False
+            from PyQt5.QtCore import QTimer
+
+            def hide():
+                translations = self._translations.get(chat_id) or {}
+                if index in translations:
+                    translations.pop(index, None)
+                    if chat_id.startswith("hist:"):
+                        self.render_history(chat_id[5:])
+
+            QTimer.singleShot(int(ttl * 1000), hide)
+            return True
 
         def append_message(self, message):
             message = dict(message or {})
@@ -1058,6 +1530,7 @@ def build_chat_widget():
                         break
             if not replaced:
                 items.append(message)
+                self.record_message(message)      # t188: история по нику
             if chat_id == self.current_chat:
                 self.set_messages(chat_id, items)
 
