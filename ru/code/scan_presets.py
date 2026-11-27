@@ -4,7 +4,6 @@
 Единственный источник геометрии скана — ``cfg["scan_preset"]``.
 Сохранённый ``scan_calibration`` игнорируется (совместимость старых конфигов).
 """
-import math
 
 BASE_W = 1920.0
 BASE_H = 1080.0
@@ -115,9 +114,7 @@ def application_line(cfg, geometry):
                      for x in (geometry.get("lefts") or []))
     center = cfg.get("cards_center_x")
     pitch = float(geometry.get("card_pitch") or 242)
-    width = float(geometry.get("card_width") or 242)
     n = len(geometry.get("lefts") or [])
-    total = n * width + (n - 1) * (pitch - width) if n else 0
     first = float((geometry.get("lefts") or [0])[0])
     grid = [int(round(first + i * pitch)) for i in range(n)]
     return (f"Раскладка применена: preset={cfg.get('scan_preset', 'auto')} "
