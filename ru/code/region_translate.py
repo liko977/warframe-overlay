@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Alt+R (t200): выделение области → OCR (RU+EN) → перевод → карточка + история.
+"""Alt+F (t200): выделение области → OCR (RU+EN) → перевод → карточка + история.
 
 Шторка выделения переиспользуется из ``region_price`` (тот же компонент, что
 Alt+D). Перевод идёт в фоновом потоке: UI не блокируется.
@@ -26,6 +26,7 @@ class RegionTranslateCard(region_price.DragResizeMixin, QWidget):
     """Короткая карточка у выделения: оригинал (≤3 строки) + перевод."""
 
     translation_ready = pyqtSignal(str, str)   # (текст, статус) из потока
+    closed = pyqtSignal()                      # t204: карточку закрыли → отмена
 
     def __init__(self, cfg=None, on_save=None, log=print):
         super().__init__()
@@ -80,11 +81,23 @@ class RegionTranslateCard(region_price.DragResizeMixin, QWidget):
             return False
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(int(ttl * 1000), self.close)
-        return True
+
+    def keyPressEvent(self, event):    # noqa: N802 (Qt API)
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):       # noqa: N802 (Qt API)
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
+        event.accept()
 
 
 class RegionTranslate:
-    """Контроллер Alt+R: шторка → захват → OCR → перевод → карточка/история."""
+    """Контроллер Alt+F: шторка → захват → OCR → перевод → карточка/история."""
 
     def __init__(self, cfg, ocr=None, ocr_getter=None, log=print,
                  capture_fn=None, translate_fn=None, history=None,
@@ -103,6 +116,7 @@ class RegionTranslate:
         self.selector = None
         self.last_box = None
         self.last_error = ""
+        self.wait = None          # t204: ожидание загрузки OCR
 
     # ── шторка и захват ───────────────────────────────────────────────
     def open(self):
@@ -118,7 +132,7 @@ class RegionTranslate:
         return self.selector
 
     def _canceled(self):
-        self.log("Alt+R: отменено")
+        self.log("Alt+F: отменено")
 
     def _on_selected(self, rect):
         return self.process(rect.x(), rect.y(), rect.width(), rect.height())
@@ -134,14 +148,13 @@ class RegionTranslate:
                                      "height": h}))
         return cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
 
-    def recognize(self, frame):
+    def recognize(self, frame, engine=None):
         """OCR области → текст построчно (RU+EN), ≤500 символов."""
         if frame is None or getattr(frame, "size", 0) == 0:
             return ""
-        engine = (self.ocr_getter() if self.ocr_getter is not None
-                  else self.ocr)
+        engine = engine if engine is not None else self._engine()
         if engine is None:
-            self.log("Alt+R: OCR недоступен (None)")
+            self.log("Alt+F: OCR недоступен (None)")
             return ""
         try:
             import cv2
@@ -153,7 +166,7 @@ class RegionTranslate:
                               interpolation=cv2.INTER_CUBIC)
             result = engine.read_proc(proc) or []
         except Exception as exc:
-            self.log(f"Alt+R: OCR недоступен ({type(exc).__name__})")
+            self.log(f"Alt+F: OCR недоступен ({type(exc).__name__})")
             return ""
         lines = {}
         for item in result:
@@ -171,7 +184,7 @@ class RegionTranslate:
         """Область → карточка (сразу) → перевод в фоне → история."""
         if w < MIN_BOX[0] or h < MIN_BOX[1]:
             self.last_error = "слишком маленькая область"
-            self.log(f"Alt+R: {self.last_error} ({w}x{h})")
+            self.log(f"Alt+F: {self.last_error} ({w}x{h})")
             if callable(self.toast):
                 try:
                     self.toast(self.last_error)
@@ -180,10 +193,56 @@ class RegionTranslate:
             return None
         self.last_box = (x, y, w, h)
         frame = self.capture(x, y, w, h)
-        text = self.recognize(frame)
         self.card = RegionTranslateCard(self.cfg, log=self.log)
-        self.card.set_original(text or "(текст не распознан)")
         self._place_card(x, y, w, h)
+        engine = self._engine()
+        if engine is None:
+            # t204: кадр сохранён — ждём OCR, выделение заново не нужно
+            self.log("Alt+F: OCR недоступен (None) — жду загрузки (t204)")
+            self.card.set_translation(
+                "…", "OCR ГОТОВИТСЯ · подождите, распознаю автоматически "
+                     f"({int(45)} с)")
+            self.card.show()
+            self._wait_for_ocr(frame)
+            return self.card
+        return self._finish(frame, engine)
+
+    def _engine(self):
+        """Текущий OCR-движок (None, пока грузится)."""
+        return (self.ocr_getter() if self.ocr_getter is not None
+                else self.ocr)
+
+    def _wait_for_ocr(self, frame):
+        """Ожидание загрузки OCR до 45 с (t204)."""
+        import ocr_wait
+        def tick(left):
+            if self.card is not None:
+                self.card.lbl_status.setText(
+                    f"OCR ГОТОВИТСЯ · подождите, распознаю автоматически "
+                    f"({left} с)")
+
+        self.wait = ocr_wait.OcrWait(
+            self._engine, lambda engine: self._finish(frame, engine),
+            on_timeout=self._ocr_timeout, log=self.log, on_tick=tick)
+        self.wait.start()
+        self.card.closed.connect(self._cancel_wait)
+        return self.wait
+
+    def _cancel_wait(self):
+        if getattr(self, "wait", None) is not None:
+            self.wait.cancel()
+            self.wait = None
+        return True
+
+    def _ocr_timeout(self):
+        if self.card is not None:
+            self.card.lbl_status.setText("OCR НЕ ЗАПУСТИЛСЯ · проверьте app.log")
+        return True
+
+    def _finish(self, frame, engine):
+        text = self.recognize(frame, engine)
+        self.card.set_original(text or "(текст не распознан)")
+        self._place_card(*self.last_box) if self.last_box else None
         self.card.set_translation("…", "перевожу…")
         self.card.show()
         if text:
