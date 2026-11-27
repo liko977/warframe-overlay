@@ -55,6 +55,7 @@ HOTKEY_ACTIONS = (
     ("hide", "Скрыть всё", "f9"),
     ("events", "События", "alt+e"),
     ("market", "Маркет", "alt+m"),
+    ("translate_region", "Перевод области", "alt+r"),
     ("pick1", "Отметить награду 1", "alt+1"),
     ("pick2", "Отметить награду 2", "alt+2"),
     ("pick3", "Отметить награду 3", "alt+3"),
@@ -97,6 +98,10 @@ DEFAULT_VALUES = {
     "region_card_ttl": 5.0,
     "overlay_ttl": 5.0,
     "price_cache_ttl_min": 10,
+    # t200: перевод выделенной области и история переводов
+    "region_translate_ttl": 6.0,
+    "translate_history_enabled": True,
+    "translate_history_limit": 200,
     "auto_detect": True,
     "font_scale": 1.0,
     "overlay_opacity": 1.0,
@@ -118,14 +123,10 @@ DEFAULT_VALUES = {
     "update_disabled": False,
     "config_version": 2,
     "update_check_interval_min": 180,
-    # t184: перевод чата (Alt+T) — Yandex Cloud Translate или бесплатный
+    # t184: перевод — Yandex Cloud Translate или бесплатный
     "translate_api_key": "",
     "translate_folder_id": "",
     "translate_provider": "auto",
-    # t188: история переписки по нику
-    "chat_history_enabled": True,
-    "chat_history_limit": 100,
-    "chat_translate_ttl": 6.0,
 }
 
 DEFAULT_UPDATE_URL = ("https://raw.githubusercontent.com/liko977/"
@@ -408,7 +409,9 @@ def hotkeys_from_cfg(cfg):
         mapping[action] = normalize_hotkey(cfg.get(
             {"scan": "hotkey_scan", "window": "hotkey_window",
              "hide": "hotkey_hide", "events": "hotkey_events",
-             "market": "hotkey_market"}[action], default)) or default
+             "market": "hotkey_market",
+             "translate_region": "hotkey_translate_region"}[action],
+            default)) or default
     raw_picks = cfg.get("pick_hotkeys")
     if isinstance(raw_picks, str):
         raw_picks = [part.strip() for part in raw_picks.split(",")
@@ -1136,7 +1139,7 @@ def build_settings_dialog():
             "   И помните: ключу нужна роль ai.translate.user (шаг 4), иначе "
             "будет 403.\n\n"
             "7. Вставьте в приложение\n"
-            "   • Настройки → Прочее → «ПЕРЕВОД ЧАТА (ALT+T)».\n"
+            "   • Настройки → Прочее → «ПЕРЕВОД (ALT+R)».\n"
             "   • «Ключ API перевода» → AQVN…\n"
             "   • «Folder ID» → b1g… (из шага 3)\n"
             "   • Нажмите «Проверить ключ» → ожидается «ключ работает».\n\n"
@@ -1220,29 +1223,6 @@ def build_settings_dialog():
                 return True
             except Exception:
                 return False
-
-        def clear_chat_history(self):
-            """t188: «Очистить историю чата» — удалить записи всех ников."""
-            import chat_history as history_mod
-            question = "Удалить историю переписки всех ников?"
-            answer = False
-            if callable(getattr(self, "confirm_fn", None)):
-                answer = bool(self.confirm_fn(question))
-            else:
-                try:
-                    import warframe as wf_module
-                    answer = bool(wf_module.themed_confirm(
-                        self, question, title="История чата",
-                        confirm_text="Очистить", danger=True))
-                except Exception:
-                    answer = False
-            if not answer:
-                return False
-            cfg = dict(self.cfg or {})
-            cfg.setdefault("data_dir", self.data_dir)
-            history_mod.ChatHistory(cfg).clear(None)
-            self._set_status("история чата очищена")
-            return True
 
         def _provider_value(self):
             """t196: выбранный способ перевода (``auto``/``yandex``/``free``)."""
@@ -1553,6 +1533,15 @@ def build_settings_dialog():
                 "этого времени")
             form.addRow(QLabel("Кэш цен (свежесть)"),
                         num_field(self.spin_price_cache_ttl, "мин"))
+            self.spin_region_translate_ttl = QDoubleSpinBox()
+            self.spin_region_translate_ttl.setRange(0.0, 30.0)
+            self.spin_region_translate_ttl.setSingleStep(1.0)
+            self.spin_region_translate_ttl.setDecimals(1)
+            self.spin_region_translate_ttl.setSpecialValueText("не скрывать")
+            self.spin_region_translate_ttl.setToolTip(
+                "Сколько секунд показывать карточку перевода (0 — не скрывать)")
+            form.addRow(QLabel("Карточка Alt+R: скрывать через"),
+                        num_field(self.spin_region_translate_ttl, "с"))
             self.chk_auto_detect = QCheckBox(
                 "Автоматически показывать цены при открытии реликвии")
             self.chk_auto_detect.setToolTip(
@@ -1866,8 +1855,8 @@ def build_settings_dialog():
                 "сети. Отмена не теряет скачанное: загрузка продолжится при "
                 "следующем запуске. Устаревшие файлы удаляются автоматически."))
             self.refresh_icons_status()
-            # ── t184: перевод чата (Alt+T) ─────────────────────────────
-            self.translate_group = group_header("Перевод чата (Alt+T)")
+            # ── t184: перевод (Яндекс по ключу / бесплатный) ───────────
+            self.translate_group = group_header("Перевод (Alt+R)")
             outer.addWidget(self.translate_group)
             # t196: способ перевода — радиогруппа с пояснениями
             self.lbl_translate_method = muted("Способ перевода")
@@ -1950,33 +1939,28 @@ def build_settings_dialog():
             translate_row.addWidget(self.lbl_translate_status, 1)
             outer.addLayout(translate_row)
             outer.addWidget(muted(
-                "Alt+T в чате переводит сообщение на русский (Yandex Cloud "
-                "Translate): кэш до 500 переводов, не больше 10 запросов в "
-                "минуту, без ключа перевод не выполняется. Авто-перевода нет."))
-            # ── t188: история переписки по нику ────────────────────────
-            self.history_group = group_header("История чата")
-            outer.addWidget(self.history_group)
-            self.chk_chat_history = QCheckBox(
-                "Хранить историю переписки по нику (клик по нику в чате)")
-            self.chk_chat_history.setFont(font(11))
-            outer.addWidget(self.chk_chat_history)
+                "Yandex Cloud Translate: кэш до 500 переводов, не больше "
+                "10 запросов в минуту. Без ключа работает бесплатный "
+                "провайдер (если выбран «Автоматически»)."))
+            self.translate_history_group = group_header("История переводов")
+            outer.addWidget(self.translate_history_group)
+            self.chk_translate_history = QCheckBox(
+                "Хранить историю переводов (вкладка «Перевод»)")
+            self.chk_translate_history.setFont(font(11))
+            outer.addWidget(self.chk_translate_history)
             history_form = QFormLayout()
             history_form.setSpacing(8)
-            self.spin_chat_history_limit = QSpinBox()
-            self.spin_chat_history_limit.setRange(20, 200)
-            self.spin_chat_history_limit.setSingleStep(10)
-            history_form.addRow(QLabel("Сообщений на ник"),
-                                num_field(self.spin_chat_history_limit, "шт"))
-            self.spin_chat_ttl = QDoubleSpinBox()
-            self.spin_chat_ttl.setRange(0.0, 30.0)
-            self.spin_chat_ttl.setSingleStep(1.0)
-            self.spin_chat_ttl.setDecimals(1)
-            history_form.addRow(QLabel("Перевод исчезает через"),
-                                num_field(self.spin_chat_ttl, "с"))
+            self.spin_translate_history_limit = QSpinBox()
+            self.spin_translate_history_limit.setRange(20, 200)
+            self.spin_translate_history_limit.setSingleStep(10)
+            history_form.addRow(
+                QLabel("Записей в истории"),
+                num_field(self.spin_translate_history_limit, "шт"))
             outer.addLayout(history_form)
             outer.addWidget(muted(
-                "0 — перевод не скрывать. Всего хранится до 50 ников; файл "
-                "chat_history.json лежит в папке данных."))
+                "Alt+R выделяет область экрана, распознаёт текст (RU/EN) и "
+                "переводит его; файл translate_history.json лежит в папке "
+                "данных."))
             self.data_group = group_header("Данные")
             outer.addWidget(self.data_group)
             self.btn_open_data = QPushButton("Открыть папку данных")
@@ -1995,11 +1979,6 @@ def build_settings_dialog():
             self.btn_open_diag.setCursor(Qt.PointingHandCursor)
             self.btn_open_diag.clicked.connect(self.open_diagnostics)
             row.addWidget(self.btn_open_diag)
-            self.btn_chat_clear = e_button("Очистить историю чата")
-            self.btn_chat_clear.setToolTip(
-                "Удалить chat_history.json (историю переписки по никам)")
-            self.btn_chat_clear.clicked.connect(self.clear_chat_history)
-            row.addWidget(self.btn_chat_clear)
             row.addStretch(1)
             outer.addLayout(row)
             self.lbl_data_dir = QLabel(str(self.data_dir or "—"))
@@ -2077,6 +2056,12 @@ def build_settings_dialog():
                 float(values.get("overlay_ttl", 5.0) or 0))
             self.spin_price_cache_ttl.setValue(
                 int(values.get("price_cache_ttl_min", 10) or 10))
+            self.spin_region_translate_ttl.setValue(
+                float(values.get("region_translate_ttl", 6.0) or 0))
+            self.chk_translate_history.setChecked(
+                bool(values.get("translate_history_enabled", True)))
+            self.spin_translate_history_limit.setValue(
+                int(values.get("translate_history_limit", 200) or 200))
             self.chk_auto_detect.setChecked(
                 bool(values.get("auto_detect", True)))
             layout_value = str(values.get("overlay_layout") or "bottom")
@@ -2124,16 +2109,6 @@ def build_settings_dialog():
                                                self.radio_provider_auto)
             button.setChecked(True)
             self._update_provider_state()
-            # t188: история переписки
-            self.chk_chat_history.setChecked(
-                bool(values.get("chat_history_enabled", True)))
-            self.spin_chat_history_limit.setValue(
-                int(values.get("chat_history_limit", 100) or 100))
-            try:
-                self.spin_chat_ttl.setValue(
-                    float(values.get("chat_translate_ttl", 6.0) or 0))
-            except (TypeError, ValueError):
-                self.spin_chat_ttl.setValue(6.0)
             for combo, key in (
                     (self.cmb_currency_platinum, "currency_platinum_color"),
                     (self.cmb_currency_ducats, "currency_ducats_color")):
@@ -2198,6 +2173,12 @@ def build_settings_dialog():
                 "overlay_ttl": round(float(
                     self.spin_overlay_ttl.value()), 1),
                 "price_cache_ttl_min": int(self.spin_price_cache_ttl.value()),
+                "region_translate_ttl": round(float(
+                    self.spin_region_translate_ttl.value()), 1),
+                "translate_history_enabled":
+                    self.chk_translate_history.isChecked(),
+                "translate_history_limit":
+                    int(self.spin_translate_history_limit.value()),
                 "auto_detect": bool(self.chk_auto_detect.isChecked()),
                 "font_scale": round(float(self.spin_font_scale.value()), 2),
                 "overlay_opacity": round(float(self.spin_opacity.value()), 2),
@@ -2211,9 +2192,6 @@ def build_settings_dialog():
                 "translate_api_key": self.edit_translate_key.text().strip(),
                 "translate_folder_id": self.edit_translate_folder.text().strip(),
                 "translate_provider": self._provider_value(),
-                "chat_history_enabled": self.chk_chat_history.isChecked(),
-                "chat_history_limit": int(self.spin_chat_history_limit.value()),
-                "chat_translate_ttl": float(self.spin_chat_ttl.value()),
                 "game_theme": str(self.cmb_game_theme.currentData() or "auto"),
                 "overlay_show_set_price": self.chk_show_set_price.isChecked(),
                 "currency_icons": self.chk_currency_icons.isChecked(),
