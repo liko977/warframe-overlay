@@ -4,7 +4,6 @@ import datetime
 import os
 import shutil
 import threading
-import time
 
 
 def fail_dir(root):
@@ -154,7 +153,6 @@ def copy_sample(data_dir, frame=None, meta=None, logger=None, keep=30):
     """t152: сохранить проблемный кадр в DATA_DIR/samples (ротация)."""
     try:
         import os
-        import shutil
         import time
         root = os.path.join(data_dir, "samples")
         os.makedirs(root, exist_ok=True)
