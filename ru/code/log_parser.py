@@ -52,19 +52,26 @@ _RE_TIME = re.compile(r"^\s*(\d+(?:\.\d+)?)")
 #: CamelCase → слова (только для читаемого имени, когда рынок не ответил)
 _RE_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
-#: началось открытие экрана реликвии
-_OPEN_MARKERS = (
-    "OpenVoidProjectionRewardScreenRMI",
-    "ProjectionRewardChoice.swf",
-    "Relic rewards initialized",
-)
+#: началось открытие экрана реликвии (суффикса ``RMI`` у игры больше нет —
+#: подстрока покрывает и ``...RewardScreen``, и старый ``...RewardScreenRMI``).
+#: ``ProjectionRewardChoice.swf`` и ``Relic rewards initialized`` сюда НЕ входят:
+#: в логе они повторяются (55 и 28 раз на 15 реликвий) и после close давали
+#: вторую пару open/close — счётчик реликвий удваивался.
+_OPEN_MARKERS = ("OpenVoidProjectionRewardScreen",)
 #: экран заполнен карточками
 _REWARDS_MARKERS = ("Got rewards",)
 #: экран закрылся
 _CLOSE_MARKERS = (
+    "CloseVoidProjectionRewardScreen",
     "Relic reward screen shut down",
     "Reward choice force closed",
 )
+
+
+def markers_line():
+    """Строка для старт-лога: какие маркеры EE.log ждёт парсер (t189)."""
+    return (f"EE.log: маркеры open={_OPEN_MARKERS[0]} "
+            f"close={_CLOSE_MARKERS[0]} rewards={_REWARDS_MARKERS[0]}")
 
 
 # ─────────────────────────────────────────────────────────────────────────
