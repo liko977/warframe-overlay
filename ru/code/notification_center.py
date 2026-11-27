@@ -18,11 +18,13 @@
 Qt импортируется лениво: модель, цвета и звук тестируются без GUI.
 """
 
+import ui_url
 import datetime
 import json
 import math
 import os
 import struct
+import sys
 import time
 import uuid
 import wave
@@ -547,8 +549,69 @@ SOUND_DEFS = {
     "market": ((880.0, 0.10, 0.55), (1174.7, 0.16, 0.40)),
     "chat": ((659.3, 0.10, 0.50), (880.0, 0.15, 0.35)),
     "system": ((440.0, 0.10, 0.25), (523.3, 0.12, 0.18)),
+    # t191: «OCR готов» — два тона вверх, играется всегда (см. play_ocr_ready)
+    "ocr_ready": ((659.3, 0.14, 0.50), (987.8, 0.22, 0.45)),
 }
 SOUND_NAMES = tuple(SOUND_DEFS.keys())
+
+#: файл звука «OCR готов» в assets/sounds (tools/make_ocr_ready_sound.py)
+OCR_READY_SOUND = "ocr_ready.wav"
+
+
+def ocr_ready_sound_path():
+    """``assets/sounds/ocr_ready.wav`` рядом с приложением или в ``_MEIPASS``."""
+    bases = (os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "assets", "sounds"),
+             os.path.join(getattr(sys, "_MEIPASS", ""), "assets", "sounds"))
+    for base in bases:
+        path = os.path.join(base, OCR_READY_SOUND) if base else ""
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
+def play_ocr_ready(sound_player=None, cfg=None):
+    """t191: звук «OCR готов» — ВСЕГДА, настройки и тихие часы не влияют."""
+    if sound_player is None:
+        return False
+    path = ocr_ready_sound_path()
+    if not path:
+        path = sound_player.sound_path("ocr_ready")
+    try:
+        return bool(sound_player.play_file(path))
+    except Exception as exc:
+        logger = getattr(sound_player, "logger", None)
+        if callable(logger):
+            logger(f"Звук: «OCR готов» не проигран ({type(exc).__name__})")
+        return False
+
+
+def dispatch_forced(record, cfg=None, toast_stack=None, sound_player=None,
+                    store=None):
+    """t191: уведомление, которое нельзя отключить (OCR готов/не запустился).
+
+    Игнорирует ``notify_enabled``, тихие часы и выключенные типы: всегда тост,
+    запись в историю (если есть) и отдельный звук ``ocr_ready``.
+    """
+    record = dict(record or {})
+    record.setdefault("kind", "ocr_ready")
+    record.setdefault("ts", time.time())
+    stored = False
+    if store is not None:
+        try:
+            store.add(_normalize_record(dict(record)))
+            stored = True
+        except Exception:
+            stored = False
+    shown = False
+    if toast_stack is not None:
+        try:
+            shown = toast_stack.show_toast(record) is not None
+        except Exception:
+            shown = False
+    return {"ok": shown or stored, "display": "toast" if shown else "none",
+            "stored": stored, "sound": play_ocr_ready(sound_player, cfg),
+            "record": dict(record)}
 
 
 class SoundPlayer:
@@ -632,6 +695,11 @@ class SoundPlayer:
         if not _cfg_bool(cfg.get("notify_sound", True), True):
             return False
         path = self.resolve_path(kind, cfg)
+        return self.play_file(path)
+
+    def play_file(self, path):
+        """Проиграть конкретный WAV, игнорируя настройки звука (t191)."""
+        path = str(path or "")
         if not path or not os.path.isfile(path):
             return False
         if callable(self.play_fn):
@@ -680,7 +748,7 @@ def open_url(url, opener=None):
             return False
     try:
         import webbrowser
-        return bool(webbrowser.open(url))
+        return bool(ui_url.open_url(url))
     except Exception:
         return False
 
@@ -1106,7 +1174,7 @@ def build_whats_new_card():
             if not callable(opener):
                 try:
                     import webbrowser
-                    opener = webbrowser.open
+                    opener = ui_url.open_url
                 except Exception:
                     opener = None
             if callable(opener) and url:
@@ -1155,7 +1223,7 @@ def build_notification_center():
     from PyQt5.QtCore import Qt, pyqtSignal
     from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
-                                 QScrollArea, QSizePolicy, QVBoxLayout,
+                                 QScrollArea, QVBoxLayout,
                                  QWidget)
 
     def color(name, fallback="#e6edf6"):
@@ -1467,8 +1535,7 @@ def build_toast_stack():
     """Фабрика стека тостов. ``login_check()`` — не показывать при входе."""
     from PyQt5.QtCore import QObject, QPropertyAnimation, QTimer, Qt, pyqtSignal
     from PyQt5.QtGui import QColor, QFont
-    from PyQt5.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
-                                 QHBoxLayout, QLabel, QVBoxLayout)
+    from PyQt5.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QVBoxLayout)
 
     def color(name, fallback="#e6edf6"):
         return palette_color(name, fallback)
@@ -1479,7 +1546,6 @@ def build_toast_stack():
         result.setBold(bool(bold))
         return result
 
-    TOAST_BG = "#0D1117"
     TOAST_BORDER = "#4A7CA6"
     TOAST_TITLE = "#E6E9EE"
     TOAST_TEXT = "#9AA7B8"
@@ -1675,7 +1741,7 @@ def build_toast_stack():
                 " QLabel { background: transparent; }")
 
         def paintEvent(self, event):
-            from PyQt5.QtGui import QColor, QPainter, QPen
+            from PyQt5.QtGui import QPainter, QPen
             painter = QPainter(self)
             try:
                 painter.setRenderHint(QPainter.Antialiasing, True)
