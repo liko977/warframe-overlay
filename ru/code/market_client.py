@@ -29,7 +29,6 @@
     client.create_order(meta["id"], platinum=10, quantity=1, meta=meta)
 """
 
-import json
 import os
 import threading
 import time
