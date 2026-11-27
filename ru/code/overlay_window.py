@@ -285,8 +285,9 @@ def build_overlay_window():
                      token_factory=None, save_values=None,
                      market_client=None, on_open=None, on_close=None,
                      hotkey_aliases=True,
-                     drops_widget=None, on_settings=None,
-                     notifications_widget=None, chat_widget=None,
+                     drops_widget=None, translate_widget=None,
+                     on_settings=None,
+                     notifications_widget=None,
                      on_status_set=None, on_status_auto=None,
                      on_status_profile=None, on_icons_cancel=None):
             super().__init__(None, Qt.Window | Qt.FramelessWindowHint |
@@ -298,18 +299,18 @@ def build_overlay_window():
             self.events_widget = events
             self.drops_widget = drops_widget
             self.notifications_widget = notifications_widget
-            self.chat_widget = chat_widget
             #: названия вкладок: Маркет · Мои ордера · События + опциональные
             self.titles = list(TAB_TITLES)
             if drops_widget is not None:
                 self.titles.append("Дроп")
+            self.translate_widget = translate_widget
+            self._translate_index = None
+            if translate_widget is not None:
+                self._translate_index = len(self.titles)
+                self.titles.append("Перевод")
             # «Уведомления» больше не вкладка: центр открывается колокольчиком
             self._notifications_index = None
             self._notifications_dialog = None
-            self._chat_index = None
-            if chat_widget is not None:
-                self._chat_index = len(self.titles)
-                self.titles.append("Чат")
 
             self.market_client = market_client
             self.token_factory = token_factory
@@ -334,11 +335,6 @@ def build_overlay_window():
                         self.set_unread_badge)
                 except Exception:
                     pass
-            if chat_widget is not None:
-                self.status_providers.append(
-                    lambda: str(getattr(self.chat_widget, "lbl_status").text()
-                                or "чат"))
-                self.refresh_actions.append(None)
             self._active_tab = self._initial_tab()
             # ── режим окна: normal | maximized | fullscreen ─────────────
             self._mode = "normal"
@@ -556,8 +552,8 @@ def build_overlay_window():
             self.stack.addWidget(self.events_widget)
             if self.drops_widget is not None:
                 self.stack.addWidget(self.drops_widget)
-            if self.chat_widget is not None:
-                self.stack.addWidget(self.chat_widget)
+            if self.translate_widget is not None:
+                self.stack.addWidget(self.translate_widget)
 
             self.stack.setStyleSheet("background: transparent;")
 
@@ -807,8 +803,13 @@ def build_overlay_window():
                 self.stack.setCurrentWidget(self.events_widget)
             elif self.drops_widget is not None and index == 3:
                 self.stack.setCurrentWidget(self.drops_widget)
-            elif self.chat_widget is not None and index == self._chat_index:
-                self.stack.setCurrentWidget(self.chat_widget)
+            elif (self.translate_widget is not None
+                  and index == self._translate_index):
+                self.stack.setCurrentWidget(self.translate_widget)
+                try:
+                    self.translate_widget.refresh()
+                except Exception:
+                    pass
             else:
                 self.stack.setCurrentWidget(self.market_widget)
             try:
@@ -978,31 +979,6 @@ def build_overlay_window():
                 "QLabel#bellBadge { background-color:%s; color:#0d131c;"
                 " border-radius:7px; padding:0 3px; }" % color)
             self.btn_bell.setStyleSheet(theme.button_qss(small=True))
-            return count
-
-        def open_chat(self):
-            """Открыть вкладку «Чат»."""
-            if self.chat_widget is None:
-                self.lbl_status.setText("чат недоступен")
-                return False
-            self.show_tab(self._chat_index)
-            return True
-
-        def set_chat_badge(self, count):
-            """Бейдж непрочитанных на вкладке «Чат»."""
-            if self.chat_widget is None:
-                return False
-            try:
-                count = max(0, int(count or 0))
-            except Exception:
-                count = 0
-            try:
-                button = self.tab_buttons[self._chat_index]
-            except Exception:
-                return False
-            button.setText("Чат" if not count else f"Чат · {count}")
-            button.setToolTip(
-                f"Чат: {count} непрочитанных" if count else "Чат")
             return count
 
         def set_market_status(self, status, duration=None):
