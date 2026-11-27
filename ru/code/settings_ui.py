@@ -55,7 +55,7 @@ HOTKEY_ACTIONS = (
     ("hide", "Скрыть всё", "f9"),
     ("events", "События", "alt+e"),
     ("market", "Маркет", "alt+m"),
-    ("translate_region", "Перевод области", "alt+r"),
+    ("translate_region", "Перевод области", "alt+f"),
     ("pick1", "Отметить награду 1", "alt+1"),
     ("pick2", "Отметить награду 2", "alt+2"),
     ("pick3", "Отметить награду 3", "alt+3"),
@@ -98,6 +98,7 @@ DEFAULT_VALUES = {
     "region_card_ttl": 5.0,
     "overlay_ttl": 5.0,
     "price_cache_ttl_min": 10,
+    "ocr_idle_unload_min": 10,
     # t200: перевод выделенной области и история переводов
     "region_translate_ttl": 6.0,
     "translate_history_enabled": True,
@@ -1139,7 +1140,7 @@ def build_settings_dialog():
             "   И помните: ключу нужна роль ai.translate.user (шаг 4), иначе "
             "будет 403.\n\n"
             "7. Вставьте в приложение\n"
-            "   • Настройки → Прочее → «ПЕРЕВОД (ALT+R)».\n"
+            "   • Настройки → Прочее → «ПЕРЕВОД (ALT+F)».\n"
             "   • «Ключ API перевода» → AQVN…\n"
             "   • «Folder ID» → b1g… (из шага 3)\n"
             "   • Нажмите «Проверить ключ» → ожидается «ключ работает».\n\n"
@@ -1533,6 +1534,17 @@ def build_settings_dialog():
                 "этого времени")
             form.addRow(QLabel("Кэш цен (свежесть)"),
                         num_field(self.spin_price_cache_ttl, "мин"))
+            # t205: выгрузка OCR по простою (при требовании загрузится заново)
+            self.spin_ocr_idle_unload = QSpinBox()
+            self.spin_ocr_idle_unload.setRange(0, 120)
+            self.spin_ocr_idle_unload.setToolTip(
+                "0 — никогда не выгружать; после выгрузки OCR загрузится "
+                "заново при первом Alt+Q/Alt+D/Alt+F")
+            form.addRow(QLabel("Выгружать OCR после простоя"),
+                        num_field(self.spin_ocr_idle_unload, "мин"))
+            form.addRow(muted(
+                "Выгрузка экономит ОЗУ; при следующем скане OCR загрузится "
+                "заново автоматически."))
             self.spin_region_translate_ttl = QDoubleSpinBox()
             self.spin_region_translate_ttl.setRange(0.0, 30.0)
             self.spin_region_translate_ttl.setSingleStep(1.0)
@@ -1540,7 +1552,7 @@ def build_settings_dialog():
             self.spin_region_translate_ttl.setSpecialValueText("не скрывать")
             self.spin_region_translate_ttl.setToolTip(
                 "Сколько секунд показывать карточку перевода (0 — не скрывать)")
-            form.addRow(QLabel("Карточка Alt+R: скрывать через"),
+            form.addRow(QLabel("Карточка Alt+F: скрывать через"),
                         num_field(self.spin_region_translate_ttl, "с"))
             self.chk_auto_detect = QCheckBox(
                 "Автоматически показывать цены при открытии реликвии")
@@ -1856,7 +1868,7 @@ def build_settings_dialog():
                 "следующем запуске. Устаревшие файлы удаляются автоматически."))
             self.refresh_icons_status()
             # ── t184: перевод (Яндекс по ключу / бесплатный) ───────────
-            self.translate_group = group_header("Перевод (Alt+R)")
+            self.translate_group = group_header("Перевод (Alt+F)")
             outer.addWidget(self.translate_group)
             # t196: способ перевода — радиогруппа с пояснениями
             self.lbl_translate_method = muted("Способ перевода")
@@ -1958,7 +1970,7 @@ def build_settings_dialog():
                 num_field(self.spin_translate_history_limit, "шт"))
             outer.addLayout(history_form)
             outer.addWidget(muted(
-                "Alt+R выделяет область экрана, распознаёт текст (RU/EN) и "
+                "Alt+F выделяет область экрана, распознаёт текст (RU/EN) и "
                 "переводит его; файл translate_history.json лежит в папке "
                 "данных."))
             self.data_group = group_header("Данные")
@@ -2056,6 +2068,8 @@ def build_settings_dialog():
                 float(values.get("overlay_ttl", 5.0) or 0))
             self.spin_price_cache_ttl.setValue(
                 int(values.get("price_cache_ttl_min", 10) or 10))
+            self.spin_ocr_idle_unload.setValue(
+                int(values.get("ocr_idle_unload_min", 10) or 0))
             self.spin_region_translate_ttl.setValue(
                 float(values.get("region_translate_ttl", 6.0) or 0))
             self.chk_translate_history.setChecked(
@@ -2173,6 +2187,7 @@ def build_settings_dialog():
                 "overlay_ttl": round(float(
                     self.spin_overlay_ttl.value()), 1),
                 "price_cache_ttl_min": int(self.spin_price_cache_ttl.value()),
+                "ocr_idle_unload_min": int(self.spin_ocr_idle_unload.value()),
                 "region_translate_ttl": round(float(
                     self.spin_region_translate_ttl.value()), 1),
                 "translate_history_enabled":
