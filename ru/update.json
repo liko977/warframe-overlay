@@ -1,13 +1,13 @@
 {
-  "version": "1.2.1",
-  "notes": "Чат warframe.market удалён — он больше не нужен. Alt+R: выделите область с текстом — получите перевод рядом с выделением. Новая вкладка «Перевод»: время, оригинал и перевод каждой записи, копирование и очистка. История переводов хранится в файле и переживает перезапуск. Провайдер перевода выбирается в настройках: Яндекс по ключу или бесплатный без ключа.",
-  "updated_at": "2026-11-27T19:51:19Z",
+  "version": "1.2.2",
+  "notes": "Alt+R принимает совсем маленькие области: одно слово или одна строка чата. Мелкие выделения автоматически увеличиваются перед распознаванием — текст читается точнее.",
+  "updated_at": "2026-11-27T20:03:43Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "569913b76e1c0c57ccdc9e01e4b3cd4d0c88fe93a3b8daa271864dca746c84b6",
+      "sha256": "e375efbcd2272bbc1f9a2afc7a46902e9575e4e6ef36b548cfe7ee9613c8bd57",
       "size": 2946
     },
     {
@@ -19,8 +19,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "daaca83d51c77b77ac49276503860223f0f710cb2e3a11be8746e0eb0da76ae8",
-      "size": 20568
+      "sha256": "8edfd4b9f18978a845437358e5134a22203a3b206f906f04015c5b7fead5ac06",
+      "size": 20973
     },
     {
       "path": "currency_icons.py",
@@ -157,8 +157,8 @@
     {
       "path": "region_translate.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/region_translate.py",
-      "sha256": "f41e38578f22369b7556df4c37aa05d020e500f17a1ed44a6316311ba66ca9f0",
-      "size": 10546
+      "sha256": "c1a9bdcebe0f2ba8a574b6324bf38e3d910eebd43d1745b574e06e0414be8aa4",
+      "size": 10851
     },
     {
       "path": "relic_pool.py",
@@ -271,7 +271,7 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "7e5ec75b4edb9d99cf33a4bfdbb33c6fa2ddeb1b3dea269db7f7926df29ba52b",
+      "sha256": "281f1d87b7b69e39c1509fa9db7b7819cc9b75e750049ee70b38eb8ce4aa0966",
       "size": 497610
     }
   ]
