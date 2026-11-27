@@ -13,7 +13,6 @@ JSON ``{route,payload}``. Авторизация — ``@wfm|cmd/auth/signIn`` с
 
 import json
 import threading
-import time
 
 try:
     import ui_theme as theme
@@ -28,7 +27,6 @@ USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 AUTH_ROUTE = "@wfm|cmd/auth/signIn"
 STATUS_SET_ROUTE = "@wfm|cmd/status/set"
-STATUS_EVENT_ROUTE = "@wfm|event/status/set"
 STATUSES = ("online", "ingame", "invisible")
 STATUS_LABELS = {
     "online": "Онлайн",
@@ -44,9 +42,7 @@ STATUS_COLORS = {
     "offline": "muted",
     "": "muted",
 }
-#: (секунды, подпись) — как пресеты сайта; None = бессрочно.
-DURATION_PRESETS = ((None, "Бессрочно"), (1800, "30 мин"),
-                    (3600, "1 ч"), (7200, "2 ч"), (14400, "4 ч"))
+#: минимальная и максимальная длительность, сек.
 MIN_DURATION = 60
 RECONNECT_MIN = 5
 RECONNECT_MAX = 60
