@@ -3,7 +3,7 @@
 
 Содержит две подвкладки:
   1. «Статистика» — карточки агрегатов ``farm_stats.FarmStatsCollector``
-     (открыто реликвий, суммарная стоимость, лучший дроп, средний доход в час,
+     (последний дроп, стоимость выбранного, средний доход в час,
      список взятого лута) и кнопка «Сбросить статистику».
   2. «Пулы реликвий» — выбор тира (Lith/Meso/Neo/Axi/Requiem) и состояния
      (Intact/Exceptional/Flawless/Radiant), список реликвий по EV с шансами,
@@ -15,9 +15,9 @@
 Модуль не импортирует warframe/market_client: ``collector`` и ``pool``
 передаются извне (см. ``build_drops_panel``).
 """
+import ui_url
 import datetime
 import os
-import time
 import webbrowser
 
 import ui_theme as theme
@@ -263,12 +263,10 @@ def _item_icon_label(cfg, item, size=24):
             return label
         name = item.get("en_name") or item.get("name") or ""
         slug = str(item.get("slug") or "")
-        game_ref = str(item.get("gameRef") or "")
         if not slug and not item.get("en_name"):
             # в пулах бывает только подпись без slug — не создаём пустой слот
             label.deleteLater()
             return None
-        blueprint = item_icons.is_blueprint(name, slug)
         pix = provider.placeholder(size)
         if pix is not None:
             label.setPixmap(pix)
@@ -309,7 +307,7 @@ def _item_icon_label(cfg, item, size=24):
 def build_drops_panel():
     """Фабрика панели вкладки «Дроп» (PyQt5 импортируется лениво)."""
     from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-    from PyQt5.QtGui import QColor, QFont
+    from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QButtonGroup, QComboBox, QFrame, QGridLayout,
                                  QHBoxLayout, QLabel, QPushButton, QScrollArea,
                                  QSizePolicy, QStackedWidget, QVBoxLayout,
@@ -349,6 +347,24 @@ def build_drops_panel():
             return theme.PALETTE["muted"]
         return theme.PALETTE["platinum"]
 
+    class _ElidedLabel(QLabel):
+        """QLabel с многоточием: текст режется по фактической ширине ячейки."""
+
+        def __init__(self, text="", parent=None):
+            super().__init__(parent)
+            self._full = str(text or "")
+            self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self.setMinimumWidth(0)
+            self._apply()
+
+        def _apply(self):
+            self.setText(self.fontMetrics().elidedText(
+                self._full, Qt.ElideRight, max(20, self.width())))
+
+        def resizeEvent(self, event):       # noqa: N802 (Qt API)
+            super().resizeEvent(event)
+            self._apply()
+
     class _LootEmptyHint(QWidget):
         """Пустое состояние «Лута»: блок по центру, подпись в 2 строки."""
 
@@ -361,7 +377,9 @@ def build_drops_panel():
             self.title.setAlignment(Qt.AlignHCenter)
             self.title.setWordWrap(True)
             self.title.setMaximumWidth(520)
-            self.title.setFont(make_font(12, True))
+            title_font = make_font(12, True)
+            title_font.setCapitalization(QFont.AllUppercase)
+            self.title.setFont(title_font)
             self.title.setStyleSheet(
                 f"color:{theme.PALETTE['muted']}; background:transparent;")
             self.subtitle = QLabel(subtitle_text, self)
@@ -416,6 +434,11 @@ def build_drops_panel():
 
         def __init__(self, cfg, collector, pool, sell_handler=None):
             super().__init__()
+            # t183: панель тёмная и вне окна (скриншоты/встраивание)
+            self.setObjectName("dropsPanel")
+            self.setStyleSheet(
+                f"QWidget#dropsPanel {{ background-color: "
+                f"{theme.PALETTE['window']}; }}")
             # 1.0.0 (t46): cfg по ссылке — переключатели применяются на лету
             self.cfg = cfg if isinstance(cfg, dict) else {}
             self.collector = collector
@@ -540,8 +563,10 @@ def build_drops_panel():
             self.stats_block = self._build_stats_block()
             lay.addWidget(self.stats_block)
 
-            loot_head = self._make_section("Лут")
-            loot_head.setContentsMargins(0, 2, 0, 0)
+            loot_head = QLabel("ЛУТ")
+            loot_head.setFont(make_font(9))
+            loot_head.setStyleSheet(theme.caps_header_qss())
+            loot_head.setContentsMargins(0, 8, 0, 0)
             lay.addWidget(loot_head)
             self.loot_host = QWidget()
             self.loot_host.setSizePolicy(QSizePolicy.Preferred,
@@ -557,17 +582,13 @@ def build_drops_panel():
             self.loot_scroll.setMinimumHeight(140)
             self.loot_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
             self.loot_scroll.setStyleSheet(
-                "QScrollArea { background: transparent; }")
+                "QScrollArea { background: transparent; }"
+                "QScrollArea > QWidget > QWidget { background: transparent; }"
+                + theme.scroll_qss())
             self.loot_scroll.setWidget(self.loot_host)
             lay.addWidget(self.loot_scroll, 1)
 
             return page
-
-        def _make_section(self, text):
-            lbl = QLabel(text.upper())
-            lbl.setFont(self._f_detail)
-            lbl.setStyleSheet(theme.section_qss())
-            return lbl
 
         # ── 1.0.0: карточки показателей «Дропа» (≤72 px) ────────────────
         #: уже этой ширины панель переключает 4 карточки в 2×2 (окно ≥900)
@@ -582,22 +603,20 @@ def build_drops_panel():
             self._stats_grid.setSpacing(4)
             self.stats_cards = {}
             self._stats_rows = 0
-            specs = (("relics", "Открыто реликвий"),
-                     ("last_drop", "Последний дроп"),
+            specs = (("last_drop", "Последний дроп"),
                      ("selected", "Стоимость выбранного"),
                      ("avg", "Средний доход"))
             for key, title in specs:
                 card = QFrame()
                 card.setObjectName(f"statCard_{key}")
-                card.setStyleSheet(theme.row_qss(name=f"statCard_{key}",
-                                                 radius=0))
+                card.setStyleSheet(theme.card_qss(f"statCard_{key}", radius=2))
                 card.setMaximumHeight(32)
                 line = QHBoxLayout(card)
-                line.setContentsMargins(8, 1, 8, 1)
+                line.setContentsMargins(10, 1, 10, 1)
                 line.setSpacing(6)
                 caption = QLabel(title.upper())
                 caption.setFont(make_font(9))
-                caption.setStyleSheet(theme.muted_qss(9))
+                caption.setStyleSheet(theme.caps_header_qss())
                 caption.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 icon_host = QWidget()
                 icon_host.setFixedSize(22, 22)
@@ -605,14 +624,19 @@ def build_drops_panel():
                 icon_lay.setContentsMargins(0, 0, 0, 0)
                 icon_lay.setSpacing(0)
                 value = QLabel("—")
-                value.setFont(QFont("Consolas", 18, QFont.Bold))
+                value_font = QFont("Consolas")
+                value_font.setPixelSize(18 if key != "last_drop" else 12)
+                value_font.setBold(True)
+                value.setFont(value_font)
                 value.setStyleSheet(
                     f"color:{theme.PALETTE['text']}; background: transparent;"
                     " font-family:'Consolas';")
+                value.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                value.setMinimumWidth(0)
+                value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 line.addWidget(caption)
                 line.addWidget(icon_host)
-                line.addStretch(1)
-                line.addWidget(value)
+                line.addWidget(value, 1)
                 self.stats_cards[key] = {"card": card, "caption": caption,
                                          "value": value, "icon_host": icon_host,
                                          "icon_lay": icon_lay}
@@ -620,7 +644,7 @@ def build_drops_panel():
             return block
 
         def _layout_stats_cards(self, width=None):
-            """1×4 на широком окне, 2×2 на узком (высота блока ≤72 px).
+            """1×3 на широком окне, 2×2 на узком (высота блока ≤72 px).
 
             ``width`` можно передать явно (тесты/предпросмотр): обычный путь —
             текущая ширина панели.
@@ -632,22 +656,25 @@ def build_drops_panel():
             if width is None:
                 width = self.width()
             narrow = bool(width) and width < self.NARROW_WIDTH
-            columns = 2 if narrow else 4
+            columns = 2 if narrow else 3
             if getattr(self, "_stats_columns", None) == columns:
                 return
             for card in (self.stats_cards or {}).values():
                 grid.removeWidget(card["card"])
-            for index in range(4):
+            for index in range(3):
                 grid.setColumnStretch(index, 0)
                 grid.setRowStretch(index, 0)
-            keys = ("relics", "last_drop", "selected", "avg")
+            keys = ("last_drop", "selected", "avg")
             for index, key in enumerate(keys):
                 row, column = divmod(index, columns)
                 grid.addWidget(self.stats_cards[key]["card"], row, column)
-            for column in range(columns):
-                grid.setColumnStretch(column, 1)
+            # «Последний дроп» — текст, а не число: колонка шире (t183);
+            # на узком две равные колонки: третья карточка занимает половину
+            weights = (2, 1, 1) if columns == 3 else (1, 1)
+            for column, weight in enumerate(weights[:columns]):
+                grid.setColumnStretch(column, weight)
             self._stats_columns = columns
-            self._stats_rows = 1 if columns == 4 else 2
+            self._stats_rows = 1 if columns == 3 else 2
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
@@ -731,34 +758,9 @@ def build_drops_panel():
             return text[:max(1, limit - 1)].rstrip() + "…"
 
         def _render_stats_cards(self):
+            """t190: карточки «Дропа» — последний дроп, выбранное, средний доход."""
             cards = self.stats_cards
             info = self._drop_stats()
-            log_ok = bool(info.get("log_available")) and bool(self.collector)
-            # 1) открыто реликвий: сессия / всего, время последней
-            relics = cards.get("relics")
-            if relics is not None:
-                if info and log_ok:
-                    session = int(info.get("relics") or 0)
-                    relics["value"].setText(str(session))
-                    when = info.get("last_relic_at")
-                    try:
-                        when_text = datetime.datetime.fromtimestamp(
-                            float(when)).strftime("%H:%M") if when else "—"
-                    except Exception:
-                        when_text = "—"
-                    relics["value"].setStyleSheet(
-                        f"color:{theme.PALETTE['text']};"
-                        " background: transparent;")
-                    relics["card"].setToolTip(
-                        f"Открыто реликвий за сеанс: {session}; "
-                        f"последняя — {when_text}\n(из лога игры EE.log)")
-                else:
-                    relics["value"].setText("—")
-                    relics["value"].setStyleSheet(
-                        f"color:{theme.PALETTE['muted']};"
-                        " background: transparent;")
-                    relics["card"].setToolTip("лог игры не найден")
-            # 2) последний дроп: из ПОСЛЕДНЕЙ отметки Alt+1…4 (не из EE.log)
             last = cards.get("last_drop")
             if last is not None:
                 icon_lay = last["icon_lay"]
@@ -786,11 +788,8 @@ def build_drops_panel():
                                   and price else "—")
                     when = format_pick_time(
                         pick, (info or {}).get("session"))
-                    import item_icons
-                    chip = item_icons.part_chip_html(
-                        str(pick.get("slug") or ""), name)
                     last["value"].setText(
-                        f"{self._short(name, 20)} {chip} · {price_text} · {when}")
+                        f"{self._short(name, 12)} · {price_text} · {when}")
                     last["value"].setStyleSheet(
                         f"color:{theme.PALETTE['text']};"
                         " background: transparent;")
@@ -943,6 +942,7 @@ def build_drops_panel():
                                 "picked_price": mark.get("price"),
                                 "picked_utc": mark.get("at"),
                                 "slug": mark.get("slug"),
+                                "set_price": mark.get("set_price"),
                                 "history": True,
                             })
                     else:
@@ -954,6 +954,7 @@ def build_drops_panel():
                                 "picked_price": mark.get("price"),
                                 "picked_utc": mark.get("at"),
                                 "slug": mark.get("slug"),
+                                "set_price": mark.get("set_price"),
                             })
                 except Exception:
                     loot = []
@@ -1017,6 +1018,9 @@ def build_drops_panel():
                 self.empty_hint_sub = wrap.subtitle
                 return
             current_day = None
+            self.loot_header = self._loot_header()
+            self.loot_lay.addWidget(self.loot_header)
+            zebra = False
             for drop in loot:
                 day = group_label(_entry_utc(drop, session))
                 if history and day != current_day:
@@ -1025,100 +1029,9 @@ def build_drops_panel():
                     head.setFont(self._f_detail)
                     head.setStyleSheet(theme.caps_header_qss())
                     self.loot_lay.addWidget(head)
-                row = QFrame()
-                row.setObjectName("lootRow")
-                row.setFixedHeight(theme.ROW_H)
-                row.setStyleSheet(theme.row_qss(name="lootRow", radius=0))
-                line = QHBoxLayout(row)
-                line.setContentsMargins(8, 0, 8, 0)
-                line.setSpacing(7)
-                when = format_pick_time(drop, session)
-                t = QLabel(when)
-                t.setFont(self._f_detail)
-                t.setFixedWidth(42)
-                t.setStyleSheet(theme.muted_qss(10))
-                t.setToolTip(pick_time_tooltip(drop, session) or when)
-                icon = _item_icon_label(self.cfg, drop, 24)
-                full_name = str(drop.get("picked_name") or "")
-                if not full_name:
-                    try:
-                        import display_name as _dn
-                        full_name = _dn.UNKNOWN
-                    except Exception:
-                        full_name = "Неизвестный предмет"
-                name = QLabel(full_name)
-                name.setFont(self._f_text)
-                name.setStyleSheet(
-                    f"color:{theme.PALETTE['text']}; background: transparent;")
-                try:
-                    from PyQt5.QtGui import QFontMetrics
-                    metrics = QFontMetrics(name.font())
-                    elided = metrics.elidedText(full_name, Qt.ElideRight, 360)
-                    name.setText(elided)
-                    name.setMaximumWidth(370)
-                    price_tip = drop.get("picked_price")
-                    name.setToolTip(
-                        f"{full_name}\nslug: {drop.get('slug') or '—'}"
-                        f" · {price_tip if price_tip is not None else '—'} p")
-                except Exception:
-                    name.setToolTip(full_name)
-                drop["_full_name"] = full_name
-                price_value = drop.get("picked_price")
-                price_text = (_money_text(price_value, cfg=self.cfg)
-                              if isinstance(price_value, (int, float))
-                              and price_value else "—")
-                price = QLabel(price_text)
-                price.setFont(make_font(11, True))
-                price.setStyleSheet(
-                    f"color:{theme.PALETTE['platinum'] if price_text != '—' else theme.PALETTE['muted']};"
-                    " background: transparent;")
-                if drop.get("picked_tradable") is False or \
-                        drop.get("tradable") is False:
-                    price.setToolTip("не торгуется на warframe.market")
-                else:
-                    price.setToolTip(theme.currency_tooltip("platinum"))
-                qty = QLabel("×%d" % int(counts.get(
-                    str(drop.get("_full_name") or drop.get("picked_name")),
-                    1)))
-                qty.setFont(self._f_detail)
-                qty.setStyleSheet(theme.muted_qss(10))
-                line.addWidget(t)
-                if icon is not None:
-                    line.addWidget(icon, 0, Qt.AlignVCenter)
-                line.addWidget(name, 1)
-                import item_icons
-                drop_chip = item_icons.part_chip_label(
-                    str(drop.get("slug") or ""), full_name, row)
-                if drop_chip is not None and drop_chip.text():
-                    _w = drop_chip.text().strip("[]")
-                    drop_chip.setText(f"[{_w.upper()}]")
-                    drop_chip.setStyleSheet(theme.chip_qss(_w))
-                    line.insertWidget(line.indexOf(name), drop_chip, 0,
-                                      Qt.AlignVCenter)
-                elif drop_chip is not None:
-                    drop_chip.deleteLater()
-                line.addWidget(price)
-                line.addWidget(qty)
-                if history:
-                    # t109: история только для просмотра — без кнопок
-                    view_note = QLabel("только просмотр")
-                    view_note.setFont(make_font(9))
-                    view_note.setStyleSheet(theme.muted_qss(9))
-                    line.addWidget(view_note)
-                else:
-                    market = QPushButton("↗")
-                    market.setFont(make_font(9, True))
-                    market.setStyleSheet(theme.button_qss(small=True))
-                    market.setCursor(Qt.PointingHandCursor)
-                    market.setFixedSize(22, 22)
-                    slug = str((drop or {}).get("slug") or "")
-                    market.setEnabled(bool(slug))
-                    market.setToolTip("Открыть на маркете")
-                    market.clicked.connect(
-                        lambda _=False, s=slug: self._open_market(s))
-                    line.addWidget(market)
-                    line.addWidget(self._sell_button(drop))
-                self.loot_lay.addWidget(row)
+                self.loot_lay.addWidget(self._loot_row(drop, session, counts,
+                                                       history, zebra))
+                zebra = not zebra
             self.loot_lay.setAlignment(Qt.AlignTop)
             self.loot_lay.addStretch(1)
             self._fit_loot_height()
@@ -1138,6 +1051,182 @@ def build_drops_panel():
                 self._icon_preloader.start(keys, 0, min(9, len(keys) - 1))
             except Exception:
                 pass
+
+        #: сетка строки лута: (ключ, ширина); ширина 0 — растягиваемая колонка
+        LOOT_GRID = (("time", 44), ("tag", 140), ("name", 0), ("qty", 68),
+                     ("price", 70), ("set", 70), ("action", 104))
+
+        def _loot_line(self, host):
+            line = QHBoxLayout(host)
+            line.setContentsMargins(8, 0, 8, 0)
+            line.setSpacing(6)
+            return line
+
+        def _loot_cell(self, key, align=Qt.AlignLeft, qss=""):
+            label = QLabel("")
+            label.setAlignment(align | Qt.AlignVCenter)
+            label.setFont(self._f_detail)
+            if qss:
+                label.setStyleSheet(qss)
+            width = dict(self.LOOT_GRID)[key]
+            if width:
+                label.setFixedWidth(width)
+            return label
+
+        @staticmethod
+        def _price_qss(size=12):
+            return theme.mono_qss(size) + \
+                f"color:{theme.PALETTE['platinum']};"
+
+        def _loot_header(self):
+            """Шапка списка: та же сетка, что и у строк (t183)."""
+            head = QWidget()
+            head.setFixedHeight(24)
+            line = self._loot_line(head)
+            for key, title, align in (
+                    ("time", "ВРЕМЯ", Qt.AlignLeft),
+                    ("tag", "МЕТКА", Qt.AlignLeft),
+                    ("name", "ПРЕДМЕТ", Qt.AlignLeft),
+                    ("qty", "КОЛИЧЕСТВО", Qt.AlignRight),
+                    ("price", "ЦЕНА", Qt.AlignRight),
+                    ("set", "КОМПЛЕКТ", Qt.AlignRight),
+                    ("action", "ДЕЙСТВИЕ", Qt.AlignRight)):
+                label = self._loot_cell(key, align)
+                label.setText(title)
+                label.setStyleSheet(theme.caps_header_qss())
+                label.setFixedHeight(24)
+                line.addWidget(label, 1 if key == "name" else 0)
+            return head
+
+        @staticmethod
+        def _loot_tag(drop):
+            """Метка части: слово и признак «полный комплект»."""
+            try:
+                import item_icons
+                slug = str((drop or {}).get("slug") or "")
+                name = str((drop or {}).get("picked_name") or "")
+                style = item_icons.part_style(slug, name)
+                if style.get("is_set"):
+                    return "ПОЛНЫЙ КОМПЛЕКТ", True
+                if style.get("is_part"):
+                    return item_icons.part_word(slug, name), False
+            except Exception:
+                pass
+            return "", False
+
+        def _loot_name_cell(self, drop):
+            """Иконка + имя; многоточие считается по фактической ширине."""
+            full_name = str(drop.get("picked_name") or "")
+            if not full_name:
+                try:
+                    import display_name as _dn
+                    full_name = _dn.UNKNOWN
+                except Exception:
+                    full_name = "Неизвестный предмет"
+            drop["_full_name"] = full_name
+            box = QWidget()
+            lay = QHBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(6)
+            icon = _item_icon_label(self.cfg, drop, 24)
+            if icon is not None:
+                lay.addWidget(icon, 0)
+            name = _ElidedLabel(full_name)
+            name.setFont(self._f_text)
+            name.setStyleSheet(
+                f"color:{theme.PALETTE['text']}; background: transparent;")
+            name.setToolTip(f"{full_name}\nslug: {drop.get('slug') or '—'}")
+            lay.addWidget(name, 1)
+            return box
+
+        def _loot_tag_cell(self, drop):
+            """Колонка метки 140 px; внутри — чип 18 px (как в плашках)."""
+            host = QWidget()
+            host.setFixedWidth(dict(self.LOOT_GRID)["tag"])
+            lay = QHBoxLayout(host)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+            word, is_set = self._loot_tag(drop)
+            if word:
+                chip = QLabel(f"[{word.upper()}]")
+                chip.setStyleSheet(theme.chip_qss(word, is_set=is_set))
+                chip.setFixedHeight(18)
+                chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                chip.setToolTip(word)
+                lay.addWidget(chip, 0)
+            lay.addStretch(1)
+            return host
+
+        def _loot_action_cell(self, drop, history):
+            host = QWidget()
+            host.setFixedWidth(dict(self.LOOT_GRID)["action"])
+            lay = QHBoxLayout(host)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(2)
+            lay.addStretch(1)
+            if history:
+                # t109: история только для просмотра — без кнопок
+                note = QLabel("только просмотр")
+                note.setFont(make_font(9))
+                note.setStyleSheet(theme.muted_qss(9))
+                lay.addWidget(note)
+                return host
+            market = QPushButton("↗")
+            arrow_font = QFont("Segoe UI Symbol")
+            arrow_font.setPixelSize(11)
+            market.setFont(arrow_font)
+            market.setStyleSheet(theme.button_qss(small=True)
+                                 + "border-radius:2px;")
+            market.setCursor(Qt.PointingHandCursor)
+            market.setFixedSize(24, 24)
+            slug = str((drop or {}).get("slug") or "")
+            market.setEnabled(bool(slug))
+            market.setToolTip("Открыть на маркете")
+            market.clicked.connect(
+                lambda _=False, s=slug: self._open_market(s))
+            lay.addWidget(market)
+            lay.addWidget(self._sell_button(drop))
+            return host
+
+        def _loot_row(self, drop, session, counts, history, zebra):
+            """Строка лута 28 px: все колонки в одном QHBoxLayout (t183)."""
+            row = QFrame()
+            row.setObjectName("lootRow")
+            row.setFixedHeight(theme.ROW_H)
+            background = theme.PALETTE["zebra"] if zebra else "transparent"
+            row.setStyleSheet(
+                f"QFrame#lootRow {{ background-color: {background};"
+                " border: none; border-radius: 0px; }")
+            line = self._loot_line(row)
+            when = format_pick_time(drop, session)
+            time_cell = self._loot_cell("time", qss=theme.muted_qss(10))
+            time_cell.setText(when)
+            time_cell.setToolTip(pick_time_tooltip(drop, session) or when)
+            tag_cell = self._loot_tag_cell(drop)
+            name_cell = self._loot_name_cell(drop)
+            qty_cell = self._loot_cell("qty", Qt.AlignRight,
+                                       theme.muted_qss(10))
+            qty_cell.setText("×%d" % int(counts.get(
+                str(drop.get("_full_name") or drop.get("picked_name")), 1)))
+            price_cell = self._loot_cell("price", Qt.AlignRight,
+                                         self._price_qss(12))
+            price = drop.get("picked_price")
+            if isinstance(price, (int, float)) and price:
+                price_cell.setText(_money_text(price, cfg=self.cfg))
+            else:
+                price_cell.setText("—")
+            set_cell = self._loot_cell("set", Qt.AlignRight,
+                                       self._price_qss(10))
+            set_price = drop.get("set_price")
+            if isinstance(set_price, (int, float)) and set_price:
+                set_cell.setText(_money_text(set_price, cfg=self.cfg))
+                set_cell.setToolTip("цена комплекта на warframe.market")
+            for cell, stretch in ((time_cell, 0), (tag_cell, 0),
+                                  (name_cell, 1), (qty_cell, 0),
+                                  (price_cell, 0), (set_cell, 0),
+                                  (self._loot_action_cell(drop, history), 0)):
+                line.addWidget(cell, stretch)
+            return row
 
         def _fit_loot_height(self):
             """Минимальная высота содержимого = суммарный sizeHint строк."""
@@ -1192,12 +1281,16 @@ def build_drops_panel():
         def _sell_button(self, drop):
             info = self._sell_status(drop)
             button = QPushButton(str(info.get("label") or "Продать"))
-            button.setFont(make_font(9, True))
-            button.setStyleSheet(theme.button_qss(small=True))
+            button_font = QFont("Consolas")
+            button_font.setPixelSize(9)
+            button_font.setCapitalization(QFont.AllUppercase)
+            button.setFont(button_font)
+            button.setStyleSheet(theme.button_qss(small=True)
+                                 + "border-radius:2px;")
             button.setCursor(Qt.PointingHandCursor)
             button.setToolTip(str(info.get("tooltip") or "Продать"))
             button.setEnabled(bool(info.get("enabled", True)))
-            button.setFixedHeight(22)
+            button.setFixedSize(68, 24)
             button.clicked.connect(lambda _=False, d=drop:
                                    self._on_loot_sell(d))
             return button
@@ -1206,7 +1299,7 @@ def build_drops_panel():
             url = f"https://warframe.market/items/{slug}" if slug else ""
             if url:
                 try:
-                    webbrowser.open(url)
+                    ui_url.open_url(url)
                 except Exception:
                     pass
 
@@ -1544,19 +1637,13 @@ def build_drops_panel():
                 stats = self._stats()
             except Exception as exc:
                 _ui_error("дроп (статус)", exc)
-                return "дроп: — рел · 0 p"
+                return "дроп: 0 p"
             if not stats:
-                return "дроп: — рел · 0 p"
-            # 1.0.0: N — ОТКРЫТЫЕ реликвии из EE.log (не число отметок)
-            info = self._drop_stats() or {}
+                return "дроп: 0 p"
+            # t190: счётчик открытых реликвий из «Дропа» убран по решению
+            # пользователя; данные остаются в farm_stats для других мест
             total = int(stats.get("total_value") or 0)
-            has_log = bool(getattr(self.collector, "path", None))
-            if info.get("log_available") and has_log:
-                relics = int(info.get("relics",
-                                      info.get("relics_session")) or 0)
-                text = f"дроп: {relics} рел · {total} p"
-            else:
-                text = f"дроп: — рел · {total} p"
+            text = f"дроп: {total} p"
             return ui_safe.clean(text, fallback="дроп: нет данных", limit=120)
 
         def apply_cfg(self, cfg):
