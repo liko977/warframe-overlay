@@ -161,7 +161,7 @@ def build_translate_widget():
             lay.setSpacing(6)
             title = _caps("Нет переводов")
             title.setAlignment(Qt.AlignCenter)
-            hint = QLabel("Alt+R — выделить область с текстом")
+            hint = QLabel("Alt+F — выделить область с текстом")
             hint.setFont(_font(10))
             hint.setAlignment(Qt.AlignCenter)
             hint.setStyleSheet(_qss("muted_qss", 10))
