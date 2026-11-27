@@ -53,6 +53,7 @@ Warframe Reward Price Overlay — аналог wfinfo
 Настройки — config.json рядом со скриптом (создаётся автоматически).
 """
 
+import ui_url
 import argparse
 import ctypes
 import datetime
@@ -81,7 +82,7 @@ if (os.environ.get("WF_LOG_FILE") is None
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 _APPLYING_SETTINGS = False
 
 from scan_geometry import (_bonus_top, _nick_bottom, _panel_count)
@@ -169,6 +170,13 @@ DEFAULT_CONFIG = {
     "hotkey_editor": "f8",           # список выбранного (редактор)
     "hotkey_events": "alt+e",        # панель игровых событий (сортис, разломы…)
     "hotkey_market": "alt+m",        # окно «Маркет» (поиск, график, ордера)
+    "hotkey_translate": "alt+t",     # t184: перевод сообщения чата (Yandex)
+    "translate_api_key": "",         # t184: ключ Yandex Cloud Translate
+    "translate_folder_id": "",       # t184: folderId каталога Yandex Cloud
+    "translate_provider": "auto",    # t196: auto | yandex | free (MyMemory)
+    "chat_history_enabled": True,    # t188: история переписки по нику
+    "chat_history_limit": 100,       # t188: сообщений на ник (20–200)
+    "chat_translate_ttl": 6.0,       # t188: перевод в истории исчезает, с
     "hotkey_window": "f8",           # единое окно с вкладками
     "hotkey_aliases": True,          # Alt+E/Alt+M — быстрые алиасы вкладок
     "last_tab": 0,                   # последняя активная вкладка окна
@@ -189,6 +197,7 @@ DEFAULT_CONFIG = {
     "request_timeout": 8,
     "workers": 6,
     "price_ttl": 180,                # сек, кэш цен
+    "price_cache_ttl_min": 10,       # t199: дисковый кэш цен, минут (1–60)
     "scan_price_ttl": 600,           # 0.6.4: TTL кэша цен сканера, сек
     "items_cache_ttl": 86400,        # сек, кэш списка предметов
     "ocr_languages": ["ru", "en"],   # русская + английская игра
@@ -324,15 +333,6 @@ DEFAULT_CONFIG = {
     "market_token": "",              # JWT из браузера; пусто — продажа выключена
     "market_token_visible": False,   # показывать токен целиком (по умолч. маскируем)
     "market_store_token": True,      # сохранять JWT в config.json (false — только в памяти)
-    "market_login_session_only": False,  # вход живёт до закрытия (cookie не на диск)
-    # Вход через браузер пользователя (CDP) — основной способ: встроенный
-    # Chromium 87 не проходит Cloudflare. market_browser_path — свой путь к
-    # chrome.exe/msedge.exe, если автопоиск не нашёл.
-    "market_browser_path": "",
-    "market_login_timeout_sec": 600,   # сколько ждать входа в браузере, сек
-    # Встроенный QtWebEngine — только запасной вариант (Cloudflare его блокирует),
-    # по умолчанию выключен; требует установленного PyQtWebEngine.
-    "market_web_login": False,
     "market_default_quantity": 1,    # количество по умолчанию в форме «продать»
     "market_dry_run": False,         # True — не отправлять ордер (только показать)
 }
@@ -910,6 +910,10 @@ def load_config(path=CONFIG_PATH):
                                for part in raw_picks.split(",")
                                if part.strip()]
     cfg["debug_dir"] = os.path.join(DATA_DIR, cfg.get("debug_dir") or "ocr_debug")
+    # t194: браузерный вход убран — чистим его ключи из старых конфигов
+    for legacy in ("market_web_login", "market_login_session_only",
+                   "market_login_timeout_sec", "market_browser_path"):
+        cfg.pop(legacy, None)
     return cfg
 
 
@@ -1357,7 +1361,7 @@ def open_market_page(slug):
         return False
     try:
         import webbrowser
-        return bool(webbrowser.open(url))
+        return bool(ui_url.open_url(url))
     except Exception:
         return False
 
@@ -1398,6 +1402,8 @@ class MarketAPI:
         self._lock = threading.Lock()
         self._price_cache = {}      # slug -> (ts, data)
         self._detail_cache = {}     # slug -> (ts, data)
+        self._session_cache = {"session": None}
+        self._price_disk = None     # t199: дисковый кэш цен (лениво)
         self.items = {}             # norm_name -> {"slug", "name", "lang", "gameRef"}
         self.ref_to_slug = {}       # gameRef -> slug (для лог-пайплайна EE.log)
         self._loaded = False
@@ -1405,12 +1411,55 @@ class MarketAPI:
         self._nontradable_logged = set()
 
     # ── HTTP ───────────────────────────────────────────────────────────
+    def _session(self):
+        """Одно ``requests.Session`` на клиент: keep-alive + gzip (t199)."""
+        session = self._session_cache.get("session")
+        if session is None:
+            import requests
+            session = requests.Session()
+            session.headers.update(self.headers)
+            session.headers.setdefault("Accept-Encoding", "gzip, deflate")
+            self._session_cache["session"] = session
+        return session
+
+    def _price_disk_cache(self):
+        if self._price_disk is None:
+            try:
+                import price_cache as price_cache_mod
+                self._price_disk = price_cache_mod.PriceCache(self.cfg,
+                                                              logger=log)
+            except Exception as exc:
+                log(f"Кэш цен: недоступен ({type(exc).__name__}: {exc})")
+                self._price_disk = False
+        return self._price_disk or None
+
+    def cached_price(self, name):
+        """Цена из дискового кэша (без сети) или ``None`` (t199)."""
+        match = self.match(name)
+        slug = (match or {}).get("slug")
+        disk = self._price_disk_cache()
+        if not slug or disk is None:
+            return None
+        info = disk.get(slug)
+        if not info:
+            return None
+        return {"name": str(name), "slug": slug,
+                "market_name": (match or {}).get("market_name"),
+                "price": info.get("price"), "ducats": info.get("ducats"),
+                "sell_online": info.get("sell_online"), "matched": True,
+                "cached": True, "error": None, "ts": info.get("ts")}
+
     def _get(self, url, retries=2):
         import requests
         last = None
         for attempt in range(retries + 1):
             try:
-                r = requests.get(url, headers=self.headers, timeout=self.timeout)
+                r = self._session().get(url, headers=self.headers,
+                                        timeout=self.timeout)
+                if r.status_code == 429:          # t199: пауза и один повтор
+                    last = "HTTP 429"
+                    time.sleep(1.0)
+                    continue
                 if r.status_code == 200:
                     return r.json()
                 if r.status_code == 404:
@@ -1696,6 +1745,14 @@ class MarketAPI:
             c = self._price_cache.get(slug)
         if c and now - c[0] < self.cfg.get("price_ttl", 180):
             return c[1]
+        disk = self._price_disk_cache()
+        if disk is not None:
+            cached = disk.get(slug)
+            if cached:
+                info = dict(cached, cached=True)
+                with self._lock:
+                    self._price_cache[slug] = (now, info)
+                return info
         try:
             data = self._get(f"{API_ROOT}/orders/item/{slug}")
             orders = (data or {}).get("data") or []
@@ -1704,6 +1761,8 @@ class MarketAPI:
         info = summarize_orders(orders)
         with self._lock:
             self._price_cache[slug] = (now, info)
+        if disk is not None:
+            disk.put(slug, info)
         return info
 
     def _empty_lookup(self, name):
@@ -2476,7 +2535,6 @@ def _name_score(text, matcher, cfg=None):
 def _retry_unrecognized_card(base_img, card, cfg, ocr, matcher=None):
     """t152: до 4 проходов OCR полосы имени, лучший по score."""
     try:
-        import cv2
         import time
         left = int(round(float(card.get("left") or 0)))
         top = float(card.get("top") or cfg["card_top"])
@@ -2697,10 +2755,9 @@ def scan_calibration_line(geometry, source="конфиг", geom=None):
     geometry = dict(geometry or {})
     try:
         sx = float((geom or {}).get("sx") or geometry.get("ui_scale") or 1.0)
-        sy = float((geom or {}).get("sy") or geometry.get("ui_scale") or 1.0)
         geometry.setdefault("ui_scale", round(sx, 3))
     except Exception:
-        sx = sy = 1.0
+        sx = 1.0
     try:
         return mod.log_line(geometry, source=source, ui_scale=sx)
     except Exception as e:
@@ -3213,8 +3270,8 @@ def build_overlays():
     from PyQt5.QtCore import (Qt, QTimer, QObject, pyqtSignal, QPoint,
                               QEvent)
     from PyQt5.QtGui import QFont
-    from PyQt5.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
-                                 QMenu, QMessageBox, QPushButton, QVBoxLayout,
+    from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel,
+                                 QMenu, QPushButton, QVBoxLayout,
                                  QWidget)
     theme = ui_theme()
     import region_price
@@ -3533,7 +3590,7 @@ def build_overlays():
                           f"{int(price)}</span>{sep}{icon}{mark}")
                 pieces.append("КОМПЛЕКТ " + amount)
             if online:
-                pieces.append(f"{int(online)} ONLINE")
+                pieces.append(f"{int(online)} онлайн")
             if not pieces:
                 self.lbl_set.clear()
                 self.lbl_set.setVisible(False)
@@ -3646,7 +3703,6 @@ def build_overlays():
 
             price = d.get("price")
             platinum = theme.currency_platinum()
-            ducats = theme.currency_ducats()
             # 1.0.0: подсказки сбрасываем для каждого состояния
             price_tip = theme.currency_tooltip("platinum")
             try:
@@ -3678,12 +3734,16 @@ def build_overlays():
                 self.lbl_ducats.setText("")
                 self.lbl_sold.setText("<span style='color:#6f7b8c;'>запрашиваю</span>")
             elif isinstance(price, (int, float)) and price:
-                tilde = "~" if d.get("sell_offline") else ""
+                # t199: цена из кэша — серая и с «~», после сети «~» исчезает
+                cached = bool(d.get("cached"))
+                tilde = "~" if (d.get("sell_offline") or cached) else ""
                 icon = currency_icon_html("platinum", self.cfg, px=14)
                 sep = currency_sep(icon)
                 platinum_text = theme.currency_platinum()
+                number_color = (theme.rgba(platinum, 0.55) if cached
+                                else platinum_text)
                 self.lbl_price.setText(
-                    f"<span style='color:{platinum_text};'>{tilde}{int(price)}</span>"
+                    f"<span style='color:{number_color};'>{tilde}{int(price)}</span>"
                     f"{sep}<span style='color:{platinum_text};'>{icon}</span>")
                 du = d.get("ducats")
                 if du:
@@ -4535,31 +4595,41 @@ def build_events_panel():
                                  QVBoxLayout, QWidget)
     theme = ui_theme()
 
-    #: Цвета бейджей эры разлома (как в AlecaFrame); текст — белый.
-    tier_colors = {
-        "Lith": "#b08d57", "Meso": "#8fb8d6", "Neo": "#d9a441",
-        "Axi": "#a468c9", "Requiem": "#c0392b",
-    }
-    #: «СП» (стальной путь) и «Шторм» (шторм Бездны) — свои цвета.
-    flag_colors = {"steel": "#d97a45", "storm": "#6f7fe8"}
-    #: Цвет фракции: бейдж вторжения/сортиса и полоса прогресса.
-    faction_colors = {
-        "Grineer": "#b85450", "Corpus": "#4f87b8", "Infested": "#6f9b4a",
-        "Orokin": "#b08d57", "Corrupted": "#8a6f3b", "Narmer": "#a05a8c",
-        "The Murmur": "#8a6fb0", "Sentient": "#7a8fa8",
-    }
-    glyph_colors = {"☀": theme.PALETTE["warning"], "☾": theme.PALETTE["accent"],
-                    "❄": theme.PALETTE["accent"], "◐": "#a468c9",
-                    "◑": theme.PALETTE["warning"]}
-    timer_colors = {"ok": theme.PALETTE["success"],
-                    "warn": theme.PALETTE["warning"],
-                    "hot": theme.PALETTE["danger"]}
-    neutral_badge = theme.PALETTE["border"]
     # фон окна #0d131c (alpha 0.96), рамка #24344a, радиус 8
     panel_style = theme.window_qss("events", 8)
 
+    class _EvElided(QLabel):
+        """QLabel с многоточием по фактической ширине ячейки (t186).
+
+        ``ignored=True`` — ширина не влияет на sizeHint (ячейка-растяжка),
+        иначе layout делает лишний проход при каждой перестройке списка.
+        """
+
+        def __init__(self, text="", parent=None, ignored=False):
+            super().__init__(parent)
+            self._full = str(text or "")
+            self.setSizePolicy(QSizePolicy.Ignored if ignored
+                               else QSizePolicy.Preferred,
+                               QSizePolicy.Preferred)
+            self.setMinimumWidth(0)
+            self._apply()
+
+        def _apply(self):
+            text = self.fontMetrics().elidedText(self._full, Qt.ElideRight,
+                                                 max(10, self.width()))
+            if text != self.text():
+                self.setText(text)
+
+        def resizeEvent(self, event):       # noqa: N802 (Qt API)
+            super().resizeEvent(event)
+            self._apply()
+
     class _EventsOverlay(QWidget):
         """Панель игровых событий (Alt+E) в стиле AlecaFrame."""
+
+        #: сетка строки события и её шапки: (ключ, ширина); 0 — stretch
+        EV_GRID = (("time", 44), ("type", 120), ("mission", 0),
+                   ("reward", 120), ("left", 80))
 
         def __init__(self, cfg, fmt=None, status_fn=None, on_refresh=None,
                      embedded=False):
@@ -4574,24 +4644,25 @@ def build_events_panel():
             self._sections_data = []
             self._tier_filter = ""
             self._saved_scroll = 0
+            self._rebuilding = False
             self._content_width = 492
+            # t186: тёмная панель и вне окна (скриншоты/встраивание)
+            self.setObjectName("evPanel")
+            self.setStyleSheet(
+                f"QWidget#evPanel {{ background-color: "
+                f"{theme.PALETTE['panel']}; }}")
 
             base_font = QFont("Segoe UI")
             base_font.setPixelSize(11)
             self._f_header = QFont(base_font)
             self._f_header.setPixelSize(13)
             self._f_header.setBold(True)
-            self._f_section = QFont(base_font)
-            self._f_section.setBold(True)
             self._f_text = QFont(base_font)
             self._f_detail = QFont(base_font)
             self._f_detail.setPixelSize(10)
             self._f_badge = QFont(base_font)
             self._f_badge.setPixelSize(9)
             self._f_badge.setBold(True)
-            self._f_timer = QFont(base_font)
-            self._f_glyph = QFont(base_font)
-            self._f_glyph.setPixelSize(13)
 
             if not self.embedded:
                 self.setWindowFlags(Qt.WindowStaysOnTopHint |
@@ -4629,19 +4700,25 @@ def build_events_panel():
             self.lbl_status.setStyleSheet(theme.status_qss())
             self.btn_refresh = QPushButton("⟳")
             self.btn_refresh.setObjectName("evRefresh")
-            self.btn_refresh.setFont(QFont("Segoe UI Symbol", 13))
-            self.btn_refresh.setStyleSheet(theme.button_qss(small=True))
+            self.btn_refresh.setFont(QFont("Segoe UI Symbol", 12))
+            self.btn_refresh.setStyleSheet(theme.button_qss(small=True)
+                                           + " border-radius:2px;")
             self.btn_refresh.setCursor(Qt.PointingHandCursor)
-            self.btn_refresh.setFixedSize(22, 20)
+            self.btn_refresh.setFixedSize(24, 24)
             self.btn_refresh.setToolTip("Обновить события сейчас")
             self.btn_refresh.clicked.connect(self._request_refresh)
             # t11: заметная кнопка «Повторить» при ошибке/устаревшем кэше
             self.btn_retry = QPushButton("Повторить")
             self.btn_retry.setObjectName("evRetry")
-            self.btn_retry.setFont(self._f_detail)
-            self.btn_retry.setStyleSheet(theme.button_qss(small=True))
+            retry_font = QFont("Consolas")
+            retry_font.setPixelSize(9)
+            retry_font.setCapitalization(QFont.AllUppercase)
+            self.btn_retry.setFont(retry_font)
+            self.btn_retry.setStyleSheet(theme.button_qss(small=True)
+                                         + " border-radius:2px;")
             self.btn_retry.setCursor(Qt.PointingHandCursor)
             self.btn_retry.setToolTip("Повторить загрузку событий")
+            self.btn_retry.setFixedHeight(24)
             self.btn_retry.clicked.connect(self._request_refresh)
             self.btn_retry.setVisible(False)
             head.addWidget(self.lbl_title)
@@ -4654,20 +4731,34 @@ def build_events_panel():
             self.scroll.setWidgetResizable(True)
             self.scroll.setFrameShape(QFrame.NoFrame)
             self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.scroll.setStyleSheet(
+                "QScrollArea { background: transparent; border: none; }"
+                "QScrollArea > QWidget > QWidget { background: transparent; }"
+                + theme.scroll_qss())
             self.body = QWidget()
             self.body.setStyleSheet("background: transparent;")
             self.rows_box = QVBoxLayout(self.body)
             self.rows_box.setContentsMargins(0, 0, 2, 0)
-            self.rows_box.setSpacing(2)
+            self.rows_box.setSpacing(0)
             self.scroll.setWidget(self.body)
             self.scroll.verticalScrollBar().valueChanged.connect(
                 self._remember_scroll)
+            self.scroll.verticalScrollBar().actionTriggered.connect(
+                lambda _action: self._remember_scroll(
+                    self.scroll.verticalScrollBar().value(), force=True))
+            # t186: тело списка меняет высоту после перестройки — вернуть
+            # сохранённую позицию, когда диапазон скролла станет готов
+            self.scroll.verticalScrollBar().rangeChanged.connect(
+                self._apply_saved_scroll)
+            # t186: шапка списка той же сеткой, что строки
+            self.list_header = self._make_list_header()
 
             if self.embedded:
                 for widget in (self.lbl_title, self.lbl_status, self.btn_refresh):
                     widget.setVisible(False)
             else:
                 lay.addLayout(head)
+            lay.addWidget(self.list_header)
             lay.addWidget(self.scroll, 1)
             outer.addWidget(self.frame)
             if not self.embedded:
@@ -4744,15 +4835,30 @@ def build_events_panel():
                 self._rebuild()
 
         # ── скролл между открытиями ────────────────────────────────────
-        def _remember_scroll(self, value):
-            self._saved_scroll = int(value)
+        def _remember_scroll(self, value, force=False):
+            """Позиция пользователя; 0 при перестройке не затирает сохранённую."""
+            value = int(value)
+            if force or value > 0:
+                self._saved_scroll = value
 
         def _restore_scroll(self):
             bar = self.scroll.verticalScrollBar()
+            bar.blockSignals(True)        # не затирать сохранённую позицию
             try:
                 bar.setValue(min(self._saved_scroll, bar.maximum()))
-            except Exception:
-                pass
+            finally:
+                bar.blockSignals(False)
+
+        def _apply_saved_scroll(self, _minimum=0, _maximum=0):
+            """Вернуть сохранённую позицию, когда диапазон скролла готов."""
+            bar = self.scroll.verticalScrollBar()
+            target = min(self._saved_scroll, bar.maximum())
+            if target and bar.value() != target:
+                bar.blockSignals(True)
+                try:
+                    bar.setValue(target)
+                finally:
+                    bar.blockSignals(False)
 
         def showEvent(self, event):
             super().showEvent(event)
@@ -4839,204 +4945,188 @@ def build_events_panel():
             self._saved_scroll = saved
             QTimer.singleShot(0, self._restore_scroll)
 
+        # ── t186: сетка строки события (шапка и строки — один хелпер) ────
+        def _ev_line(self, host):
+            line = QHBoxLayout(host)
+            line.setContentsMargins(8, 0, 8, 0)
+            line.setSpacing(6)
+            return line
+
+        def _ev_cell(self, key, align=Qt.AlignLeft):
+            label = QLabel("")
+            label.setAlignment(align | Qt.AlignVCenter)
+            width = dict(self.EV_GRID)[key]
+            if width:
+                label.setFixedWidth(width)
+            return label
+
+        def _make_list_header(self):
+            head = QWidget()
+            head.setObjectName("evListHeader")
+            head.setFixedHeight(24)
+            line = self._ev_line(head)
+            for key, title, align in (("time", "ВРЕМЯ", Qt.AlignLeft),
+                                      ("type", "ТИП", Qt.AlignLeft),
+                                      ("mission", "МИССИЯ", Qt.AlignLeft),
+                                      ("reward", "НАГРАДА", Qt.AlignLeft),
+                                      ("left", "ОСТАЛОСЬ", Qt.AlignRight)):
+                label = self._ev_cell(key, align)
+                label.setText(title)
+                label.setStyleSheet(theme.caps_header_qss())
+                label.setFixedHeight(24)
+                line.addWidget(label, 1 if key == "mission" else 0)
+            return head
+
         def _make_section_header(self, name):
-            box = QWidget()
-            lay = QVBoxLayout(box)
-            lay.setContentsMargins(0, 8, 0, 2)
-            lay.setSpacing(3)
             label = QLabel(str(name).upper())
             label.setObjectName("evSection")
-            section_font = QFont(self._f_section)
-            section_font.setLetterSpacing(QFont.AbsoluteSpacing, 1.0)
-            label.setFont(section_font)
-            label.setStyleSheet(theme.section_qss())
-            line = QFrame()
-            line.setObjectName("evSectionLine")
-            line.setFixedHeight(1)
-            line.setStyleSheet(theme.divider_qss())
+            label.setFont(self._f_badge)
+            label.setStyleSheet(theme.caps_header_qss())
+            label.setContentsMargins(8, 0, 0, 0)
+            box = QWidget()
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(0, 8, 0, 0)
+            lay.setSpacing(0)
             lay.addWidget(label)
-            lay.addWidget(line)
             return box
-
-        # ── бейджи ─────────────────────────────────────────────────────
-        def _badges_for(self, row):
-            """[(текст, фон, цвет текста)] по данным строки."""
-            result = []
-            for badge in row.get("badges") or []:
-                if not isinstance(badge, dict):
-                    continue
-                text = str(badge.get("text") or "").strip()
-                if not text:
-                    continue
-                kind = str(badge.get("kind") or "mission")
-                if kind == "tier":
-                    bg = tier_colors.get(str(row.get("tier") or ""), "#5a6b7d")
-                    fg = "#ffffff"
-                elif kind == "steel":
-                    bg, fg = flag_colors["steel"], "#ffffff"
-                elif kind == "storm":
-                    bg, fg = flag_colors["storm"], "#ffffff"
-                elif kind == "faction":
-                    bg = faction_colors.get(str(row.get("faction") or ""),
-                                            "#455a70")
-                    fg = "#ffffff"
-                else:
-                    bg, fg = neutral_badge, theme.PALETTE["text"]
-                result.append((text, bg, fg))
-            return result
-
-        @staticmethod
-        def _elide(text, font, width):
-            if not text or width <= 0:
-                return ""
-            return QFontMetrics(font).elidedText(str(text), Qt.ElideRight,
-                                                 int(width))
 
         # ── таймеры ────────────────────────────────────────────────────
         def _timer_parts(self, row, now):
-            """Текст и цвет пилюли: формат «14ч 22м», «59м 12с», «<1м»."""
+            """Текст и цвет таймера: «2ч 15м», «14м 59с», «<1м», «истекло»."""
             ends_at = row.get("ends_at")
             if not isinstance(ends_at, (int, float)):
-                return "", "#93a1b5"
+                return "", theme.PALETTE["muted"]
             left = float(ends_at) - float(now)
             if left <= 0:
-                return "истекло", "#5f6b7d"
+                return "истекло", theme.PALETTE["muted"]
             text = self._fmt(left) or ""
             if (row.get("ends_prefix") or "до") == "через":
                 text = f"через {text}"
-            glyph = str(row.get("glyph") or "")
-            state = str(row.get("state") or "")
-            if glyph and state:
-                text = f"{glyph} {state} {text}".strip()
-                return text, glyph_colors.get(glyph, "#93a1b5")
-            state_key = "ok" if left > 3600 else ("warn" if left >= 600 else "hot")
-            return text, timer_colors[state_key]
+            # t186: меньше 15 минут — предупреждение #f5c451, без жирного
+            color = (theme.PALETTE["warning"] if left < 900
+                     else theme.PALETTE["muted"])
+            return text, color
 
-        def _pill_style(self, color):
-            return theme.pill_qss(color)
+        # ── строка события: ВРЕМЯ | ТИП | МИССИЯ | НАГРАДА | ОСТАЛОСЬ ──
+        @staticmethod
+        def _start_text(row):
+            started = row.get("started_at")
+            if not isinstance(started, (int, float)):
+                return ""
+            try:
+                return time.strftime("%H:%M", time.localtime(float(started)))
+            except (OSError, ValueError, OverflowError):
+                return ""
 
-        # ── карточка строки ────────────────────────────────────────────
+        @staticmethod
+        def _type_text(row):
+            for badge in row.get("badges") or []:
+                text = (str((badge or {}).get("text") or "").strip()
+                        if isinstance(badge, dict) else "")
+                if text:
+                    return text.upper()
+            state = str(row.get("state") or "").strip()
+            return state.upper() if state else str(row.get("tier") or "").upper()
+
+        @staticmethod
+        def _reward_text(row):
+            rewards = [str(item) for item in (row.get("rewards") or []) if item]
+            return rewards[0] if rewards else ""
+
         def _make_row(self, row, zebra=False):
             row = dict(row or {})
             card = QFrame()
             card.setObjectName("evRow")
-            card.setFixedHeight(24)
+            card.setFixedHeight(28)
             card.setProperty("kind", str(row.get("kind") or ""))
             card.setProperty("zebra", bool(zebra))
-            card.setStyleSheet(theme.row_qss(zebra=zebra, name="evRow"))
-            lay = QHBoxLayout(card)
-            lay.setContentsMargins(8, 0, 8, 0)
-            lay.setSpacing(6)
+            background = theme.PALETTE["zebra"] if zebra else "transparent"
+            card.setStyleSheet(
+                f"QFrame#evRow {{ background-color: {background};"
+                " border: none; border-radius: 0px; }")
+            line = self._ev_line(card)
 
-            now = time.time()
-            glyph = str(row.get("glyph") or "")
-            badges = self._badges_for(row)
-            progress = row.get("progress")
-            has_progress = isinstance(progress, (int, float))
-            timer_text, timer_color = self._timer_parts(row, now)
+            time_cell = self._ev_cell("time")
+            time_cell.setFont(self._f_detail)
+            time_cell.setStyleSheet(theme.muted_qss(10)
+                                    + " font-family:'Consolas', monospace;")
+            time_cell.setText(self._start_text(row))
 
-            badge_widths = [QFontMetrics(self._f_badge).horizontalAdvance(text) + 14
-                            for text, _bg, _fg in badges]
-            glyph_width = (QFontMetrics(self._f_glyph).horizontalAdvance(glyph) + 2
-                           if glyph else 0)
-            progress_width = 0
-            if has_progress:
-                percent_text = f"{int(round(float(progress)))}%"
-                progress_width = 64 + 6 + QFontMetrics(
-                    self._f_detail).horizontalAdvance(percent_text)
-            timer_width = (QFontMetrics(self._f_timer).horizontalAdvance(timer_text)
-                           + 16)
-            widget_count = ((1 if glyph else 0) + len(badges) +
-                            (1 if has_progress else 0) + 1)
-            fixed = (16 + 6 * max(0, widget_count - 1) + glyph_width +
-                     sum(badge_widths) + progress_width + timer_width)
-            avail = max(60, self._content_width - fixed)
+            type_host = QWidget()
+            type_host.setFixedWidth(dict(self.EV_GRID)["type"])
+            type_lay = QHBoxLayout(type_host)
+            type_lay.setContentsMargins(0, 0, 0, 0)
+            type_lay.setSpacing(0)
+            type_text = self._type_text(row)
+            if type_text:
+                chip = QLabel(f"[{type_text}]")
+                chip.setStyleSheet(theme.chip_qss(type_text))
+                chip.setFont(self._f_badge)
+                chip.setFixedHeight(18)
+                chip.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+                chip.setToolTip(type_text)
+                type_lay.addWidget(chip, 0)
+            type_lay.addStretch(1)
 
-            subtext = str(row.get("subtext") or "")
-            if row.get("kind") == "invasion" and row.get("rewards"):
-                # (5) награды списком: «◈ 3 × Fieldron · ◈ 10 000 кр»
-                subtext = " · ".join(f"◈ {item}" for item in row["rewards"][:2])
-            title_budget = int(avail * 0.58) if subtext else avail
-            detail_budget = max(0, avail - title_budget - 6)
-            headline = self._elide(str(row.get("headline") or
-                                       row.get("title") or ""),
-                                   self._f_text, title_budget)
+            mission = _EvElided(str(row.get("headline") or row.get("title") or ""),
+                                ignored=True)
+            mission.setFont(self._f_text)
+            mission.setStyleSheet(f"color:{theme.PALETTE['text']};"
+                                  " background: transparent;")
 
-            if glyph:
-                glyph_label = QLabel(glyph)
-                glyph_label.setObjectName("evGlyph")
-                glyph_label.setFont(self._f_glyph)
-                glyph_label.setStyleSheet(
-                    f"color:{glyph_colors.get(glyph, theme.PALETTE['muted'])};")
-                lay.addWidget(glyph_label)
+            reward_host = QWidget()
+            reward_host.setFixedWidth(dict(self.EV_GRID)["reward"])
+            reward_lay = QHBoxLayout(reward_host)
+            reward_lay.setContentsMargins(0, 0, 0, 0)
+            reward_lay.setSpacing(4)
+            reward_text = self._reward_text(row)
+            if reward_text:
+                icon = QLabel("◈")
+                icon.setFixedSize(16, 16)
+                icon.setFont(self._f_detail)
+                icon.setStyleSheet(f"color:{theme.PALETTE['muted']};"
+                                   " background: transparent;")
+                reward = _EvElided(reward_text, ignored=True)
+                reward.setFont(self._f_detail)
+                reward.setStyleSheet(theme.muted_qss(10))
+                reward_lay.addWidget(icon, 0)
+                reward_lay.addWidget(reward, 1)
 
-            for text, bg, fg in badges:
-                badge_label = QLabel(text)
-                badge_label.setObjectName("evBadge")
-                badge_label.setFont(self._f_badge)
-                badge_label.setFixedHeight(16)
-                badge_label.setStyleSheet(theme.badge_qss(bg, fg))
-                lay.addWidget(badge_label)
-
-            if headline:
-                title_label = QLabel(headline)
-                title_label.setObjectName("evHeadline")
-                title_label.setFont(self._f_text)
-                title_label.setStyleSheet(f"color:{theme.PALETTE['text']};")
-                lay.addWidget(title_label)
-
-            if subtext and detail_budget >= 30:
-                detail_label = QLabel(self._elide(subtext, self._f_detail,
-                                                  detail_budget))
-                detail_label.setObjectName("evSubtext")
-                detail_label.setFont(self._f_detail)
-                detail_label.setStyleSheet(theme.muted_qss(10))
-                lay.addWidget(detail_label)
-
-            if has_progress:
-                bar = QProgressBar()
-                bar.setObjectName("evProgress")
-                bar.setRange(0, 100)
-                bar.setValue(int(round(float(progress))))
-                bar.setTextVisible(False)
-                bar.setFixedSize(64, 6)
-                color = faction_colors.get(str(row.get("faction") or ""),
-                                           theme.PALETTE["accent"])
-                bar.setStyleSheet(theme.progress_qss(color))
-                percent_label = QLabel(f"{int(round(float(progress)))}%")
-                percent_label.setObjectName("evPercent")
-                percent_label.setFont(self._f_detail)
-                percent_label.setStyleSheet(theme.muted_qss(10))
-                lay.addWidget(bar)
-                lay.addWidget(percent_label)
-
-            lay.addStretch(1)
-
+            timer_text, timer_color = self._timer_parts(row, time.time())
+            left_cell = self._ev_cell("left", Qt.AlignRight)
+            left_cell.setFont(self._f_detail)
+            left_cell.setStyleSheet(theme.mono_qss(10) + f"color:{timer_color};"
+                                    " background: transparent;")
+            left_cell.setText(timer_text)
             if timer_text:
-                timer = QLabel(timer_text)
-                timer.setObjectName("evTimer")
-                timer.setFont(self._f_timer)
-                timer.setFixedHeight(18)
-                timer.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                timer.setStyleSheet(self._pill_style(timer_color))
-                lay.addWidget(timer)
-                self._timers.append((timer, row))
+                self._timers.append((left_cell, row))
 
-            full = str(row.get("title") or headline or "")
-            if row.get("detail"):
-                full += "\n" + str(row.get("detail"))
+            line.addWidget(time_cell, 0)
+            line.addWidget(type_host, 0)
+            line.addWidget(mission, 1)
+            line.addWidget(reward_host, 0)
+            line.addWidget(left_cell, 0)
+
+            full = str(row.get("title") or mission._full or "")
+            for extra in (row.get("subtext"), row.get("detail")):
+                if extra and str(extra) not in full:
+                    full += "\n" + str(extra)
+            progress = row.get("progress")
+            if isinstance(progress, (int, float)):
+                full += f"\nпрогресс: {int(round(float(progress)))}%"
             if full.strip():
                 card.setToolTip(full)
             return card
 
         # ── тик раз в секунду ──────────────────────────────────────────
         def refresh_timers(self, now=None):
-            """Обновляет только пилюли и подпись свежести (виджеты не трогаем)."""
+            """Обновляет только таймеры и подпись свежести (виджеты не трогаем)."""
             now = time.time() if now is None else now
             for label, row in self._timers:
                 text, color = self._timer_parts(row, now)
                 label.setText(text)
-                label.setStyleSheet(self._pill_style(color))
+                label.setStyleSheet(theme.mono_qss(10) + f"color:{color};"
+                                    " background: transparent;")
             if self._status_fn is not None:
                 try:
                     text = str(self._status_fn())
@@ -5464,7 +5554,8 @@ PICK_HOTKEYS_DEFAULT = ["alt+1", "alt+2", "alt+3", "alt+4"]
 
 #: Ключи конфига с «занятыми» хоткеями: их Alt+1..4 не перетирают.
 _OTHER_HOTKEY_KEYS = ("hotkey_scan", "hotkey_editor", "hotkey_events",
-                      "hotkey_market", "hotkey_window", "hotkey_hide")
+                      "hotkey_market", "hotkey_window", "hotkey_hide",
+                      "hotkey_translate")
 
 
 def pick_hotkeys(cfg):
@@ -5521,9 +5612,10 @@ def add_hotkeys_pick(cfg, keyboard_module, emit):
 def build_market_dialogs():
     """Фабрика диалогов: ``(форма продажи, окно токена)``."""
     from PyQt5.QtCore import Qt, pyqtSignal
+    from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog,
-                                 QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                                 QMessageBox, QPushButton, QScrollArea,
+                                 QFormLayout, QFrame, QHBoxLayout, QLabel,
+                                 QLineEdit, QPushButton, QScrollArea,
                                  QSpinBox, QToolButton, QVBoxLayout)
     theme = ui_theme()
     dialog_style = theme.dialog_qss()
@@ -5585,35 +5677,57 @@ def build_market_dialogs():
                 "message": f"HTTP {code}"}
 
     class _TokenDialog(QDialog):
-        """Ручной ввод JWT + общая инструкция для Chromium/Firefox."""
+        """Ручной ввод JWT + встроенная инструкция (t194, вход только вручную)."""
 
         INSTRUCTION = (
-            "Как получить токен warframe.market\n\n"
-            "Chromium (Chrome, Edge, Яндекс, Opera, Opera GX):\n"
-            "1. Войдите на https://warframe.market/ в этом браузере.\n"
-            "2. F12 или Ctrl+Shift+I → вкладка Application (в Opera GX: "
-            "Storage → Cookies).\n"
-            "3. Cookies → https://warframe.market → строка JWT → скопируйте "
-            "Value.\n\n"
-            "Firefox:\n"
-            "1. Войдите на https://warframe.market/ в Firefox.\n"
-            "2. F12 → Хранилище/Storage → Cookies → "
-            "https://warframe.market → JWT → скопируйте значение.\n\n"
-            "Важно: cookie JWT помечена HttpOnly, поэтому document.cookie "
-            "в консоли её НЕ покажет — только Application → Cookies.\n\n"
-            "«Гостевой» токен (до входа на сайт) выглядит так же, но "
-            "/v2/me отвечает 401 — сначала войдите в аккаунт.\n\n"
-            "Старый способ: DevTools (F12) → Network → Headers → "
-            "Authorization: Bearer eyJ…; вставьте значение после Bearer.\n"
-            "Быстрее: нажмите «🔑» в шапке F8 — вход через браузер, токен "
-            "заберётся автоматически. Пароль оверлей не спрашивает.\n"
-            "Токен хранится только в config.json на этом компьютере."
+            "Токен warframe.market — пошагово\n"
+            "0. Что понадобится\n"
+            "   • браузер на компьютере, где вы играете;\n"
+            "   • аккаунт warframe.market (логин и пароль от сайта).\n\n"
+            "1. Войдите на сайт\n"
+            "   Откройте https://warframe.market → «Войти» → введите логин и "
+            "пароль.\n"
+            "   Если сайт просит подтвердить почту — подтвердите и войдите "
+            "снова.\n\n"
+            "2. Откройте панель разработчика\n"
+            "   Нажмите F12 (или Ctrl+Shift+I). Панель появится справа или "
+            "снизу —\n"
+            "   её можно растянуть мышью за край.\n\n"
+            "3. Перейдите на вкладку хранилища (там лежат cookies)\n"
+            "   • Chrome / Edge / Opera / Яндекс.Браузер:  Application\n"
+            "     (иногда спрятана под иконкой «≫» в верхней строке панели)\n"
+            "   • Firefox:  Storage / Хранилище\n"
+            "   • В остальных браузерах ищите вкладку с названием "
+            "«Хранилище»,\n"
+            "     «Application» или «Storage».\n\n"
+            "4. Раскройте Cookies\n"
+            "   В левой колонке найдите «Cookies» → раскройте → выберите\n"
+            "   https://warframe.market\n"
+            "   (если список пуст — вы не авторизованы, вернитесь к шагу 1).\n\n"
+            "5. Найдите строку JWT\n"
+            "   В таблице справа ищите Name = JWT.\n"
+            "   • Нет такой строки — обновите страницу (F5) и повторите шаг "
+            "4:\n"
+            "     cookie появляется только после полной загрузки сайта.\n"
+            "   • Строка есть, но пустая — выйдите из аккаунта и войдите "
+            "заново.\n\n"
+            "6. Скопируйте значение\n"
+            "   В строке JWT двойной клик по ячейке колонки Value → Ctrl+C.\n"
+            "   Значение — длинная строка, начинается на eyJ.\n\n"
+            "7. Вставьте в приложение\n"
+            "   «Токен warframe.market» → вставьте скопированное → «Проверить "
+            "токен».\n"
+            "   Успех: «токен работает · <ник>».\n"
+            "   Ошибка 401 — токен скопирован не полностью или устарел.\n"
+            "   Ошибка 403 — вход ограничен сайтом: проверьте статус аккаунта "
+            "на сайте.\n\n"
+            "Полезно знать\n"
+            "• Токен = пароль от аккаунта. Никому его не пересылайте.\n"
+            "• Живёт около 7 дней — потом повторите шаги 1–7.\n"
+            "• После выхода из аккаунта на сайте токен перестаёт работать.\n"
+            "• Вход только ручной: встроенный браузер из приложения удалён."
         )
-        CHECK_COMMAND = (
-            "Invoke-RestMethod -Uri "
-            "https://api.warframe.market/v2/me -Headers "
-            "@{Authorization='Bearer <JWT>'}"
-        )
+        SITE_URL = "https://warframe.market"
         check_done = pyqtSignal(dict)
 
         def __init__(self, cfg, client, parent=None, save_fn=None,
@@ -5631,42 +5745,22 @@ def build_market_dialogs():
             self.logger = logger
             self._checked_token = ""
             self._checking = False
+            self.help_dialog = None
+            self.setObjectName("tokenDialog")
             self.setWindowTitle("Токен warframe.market")
             self.setModal(True)
             self.setMinimumWidth(600)
             self.setMaximumHeight(560)
-            self.setStyleSheet(dialog_style)
+            self.setStyleSheet(dialog_style + self._panel_qss())
             layout = QVBoxLayout(self)
             layout.setContentsMargins(16, 14, 16, 12)
             layout.setSpacing(8)
-            title = QLabel("<b>Как получить токен warframe.market</b>")
+            title = QLabel("ТОКЕН WARFRAME.MARKET")
             title.setStyleSheet(
-                f"font-size:{theme.size('window')}px; font-weight:700;"
-                f" color:{theme.PALETTE['text']};")
-            self.btn_instruction = QToolButton()
-            self.btn_instruction.setText("Как получить токен ▸")
-            self.btn_instruction.setCheckable(True)
-            self.btn_instruction.setChecked(False)
-            self.btn_instruction.setToolButtonStyle(Qt.ToolButtonTextOnly)
-            self.btn_instruction.setStyleSheet(theme.button_qss(small=True))
-            self.btn_instruction.setCursor(Qt.PointingHandCursor)
-            self.lbl_info = QLabel(self.INSTRUCTION)
-            self.lbl_info.setWordWrap(True)
-            self.lbl_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            self.lbl_info.setStyleSheet(theme.muted_qss(11))
-            self.instruction_scroll = QScrollArea()
-            self.instruction_scroll.setWidgetResizable(True)
-            self.instruction_scroll.setMaximumHeight(250)
-            self.instruction_scroll.setWidget(self.lbl_info)
-            self.instruction_scroll.setVisible(False)
-
-            def toggle_instruction(checked):
-                self.instruction_scroll.setVisible(bool(checked))
-                self.btn_instruction.setText(
-                    "Как получить токен ▾" if checked
-                    else "Как получить токен ▸")
-            self.btn_instruction.toggled.connect(toggle_instruction)
+                f"font-family:'Consolas', monospace; font-size:9px;"
+                f" letter-spacing:1px; color:{theme.PALETTE['muted']};")
             self.lbl_status = QLabel("сейчас: " + _token_status(client))
+            self.lbl_status.setObjectName("tokenStatus")
             self.lbl_status.setStyleSheet(theme.status_qss())
             self.lbl_status.setWordWrap(True)
             self.edit_token = QLineEdit()
@@ -5675,23 +5769,34 @@ def build_market_dialogs():
                 else QLineEdit.Password)
             self.edit_token.setPlaceholderText(
                 "eyJhbGciOi… (без слова Bearer)")
-            self.chk_show = QCheckBox("показать токен")
-            self.chk_show.toggled.connect(
-                lambda on: self.edit_token.setEchoMode(
-                    QLineEdit.Normal if on else QLineEdit.Password))
+            self.btn_show = QPushButton("Показать")
+            self.btn_show.setCheckable(True)
+            self.btn_show.setStyleSheet(theme.button_qss(small=True)
+                                        + " border-radius:2px;")
+            self.btn_show.setFixedHeight(24)
+            self.btn_show.setCursor(Qt.PointingHandCursor)
+            self.btn_show.toggled.connect(
+                lambda on: (self.edit_token.setEchoMode(
+                    QLineEdit.Normal if on else QLineEdit.Password),
+                    self.btn_show.setText("Скрыть" if on else "Показать")))
+            token_row = QHBoxLayout()
+            token_row.setSpacing(6)
+            token_row.addWidget(self.edit_token, 1)
+            token_row.addWidget(self.btn_show)
 
             action_row = QHBoxLayout()
-            self.btn_open_site = QPushButton("Открыть warframe.market")
-            self.btn_open_site.clicked.connect(self._open_site)
+            action_row.setSpacing(6)
+            self.btn_instruction = QPushButton("Как получить токен?")
+            self.btn_instruction.clicked.connect(self.show_instruction)
             self.btn_check = QPushButton("Проверить токен")
             self.btn_check.clicked.connect(self._check)
-            self.btn_copy = QPushButton("Скопировать инструкцию")
-            self.btn_copy.clicked.connect(self._copy_instruction)
-            self.btn_copy_command = QPushButton("Скопировать команду проверки")
-            self.btn_copy_command.clicked.connect(self._copy_command)
-            for button in (self.btn_open_site, self.btn_check, self.btn_copy,
-                           self.btn_copy_command):
-                button.setStyleSheet(theme.button_qss(small=True))
+            self.btn_open_site = QPushButton("Скопировать адрес сайта")
+            self.btn_open_site.clicked.connect(self._copy_site)
+            for button in (self.btn_instruction, self.btn_check,
+                           self.btn_open_site):
+                button.setStyleSheet(theme.button_qss(small=True)
+                                     + " border-radius:2px;")
+                button.setFixedHeight(24)
                 button.setCursor(Qt.PointingHandCursor)
                 action_row.addWidget(button)
             action_row.addStretch(1)
@@ -5702,19 +5807,96 @@ def build_market_dialogs():
             self.btn_cancel = QPushButton("Отмена")
             self.btn_save.clicked.connect(self._save_clicked)
             self.btn_cancel.clicked.connect(self.reject)
+            for button in (self.btn_save, self.btn_cancel):
+                button.setStyleSheet(theme.button_qss(small=True)
+                                     + " border-radius:2px;")
+                button.setFixedHeight(24)
+                button.setCursor(Qt.PointingHandCursor)
             buttons.addStretch(1)
             buttons.addWidget(self.btn_cancel)
             buttons.addWidget(self.btn_save)
             layout.addWidget(title)
-            layout.addWidget(self.btn_instruction)
-            layout.addWidget(self.instruction_scroll)
             layout.addWidget(self.lbl_status)
-            layout.addWidget(self.edit_token)
-            layout.addWidget(self.chk_show)
+            layout.addLayout(token_row)
             layout.addLayout(action_row)
             layout.addLayout(buttons)
             self.check_done.connect(self._on_check_done)
-            self.resize(680, 540)
+            self.resize(680, 320)
+
+        def _panel_qss(self):
+            """t194: тёмный диалог токена (panel_qss) без белых полей/прокрутки."""
+            panel = theme.PALETTE["panel"]
+            border = theme.PALETTE["border"]
+            text = theme.PALETTE["text"]
+            return (f" QDialog#tokenDialog, QDialog#tokenHelp {{"
+                    f" background-color:{panel}; }}"
+                    f" QLineEdit {{ background:{theme.PALETTE['card']};"
+                    f" color:{text}; border:1px solid {border};"
+                    " border-radius:0px; padding:0px 6px;"
+                    " font-family:'Consolas', monospace; font-size:11px; }"
+                    " QScrollArea { background:transparent; border:none; }"
+                    " QScrollArea > QWidget > QWidget { background:transparent; }"
+                    " QLabel#tokenHelpText { background:transparent;"
+                    f" color:{text}; }}"
+                    " " + theme.scroll_qss())
+
+        def show_instruction(self):
+            """t195: подробная инструкция «Токен warframe.market — пошагово»."""
+            dialog = QDialog(self)
+            dialog.setObjectName("tokenHelp")
+            dialog.setWindowTitle("Токен warframe.market — пошагово")
+            dialog.setMinimumSize(680, 560)
+            dialog.setStyleSheet(dialog_style + self._panel_qss()
+                                 + f" QDialog#tokenHelp {{"
+                                   f" background-color:{theme.PALETTE['panel']}; }}")
+            lay = QVBoxLayout(dialog)
+            lay.setContentsMargins(16, 14, 16, 12)
+            lay.setSpacing(10)
+            title = QLabel("ТОКЕН WARFRAME.MARKET")
+            title.setFont(QFont("Consolas"))
+            title.setStyleSheet(theme.caps_header_qss())
+            lay.addWidget(title)
+            text = QLabel(self.INSTRUCTION)
+            text.setObjectName("tokenHelpText")
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            text.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            text.setStyleSheet(
+                f"color:{theme.PALETTE['text']}; background:transparent;"
+                " font-family:'Consolas', monospace; font-size:11px;")
+            scroll = QScrollArea()
+            scroll.setObjectName("tokenHelpScroll")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(text)
+            lay.addWidget(scroll, 1)
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            self.btn_help_copy = QPushButton("Скопировать адрес")
+            self.btn_help_copy.clicked.connect(self._copy_site)
+            self.btn_help_close = QPushButton("Закрыть")
+            self.btn_help_close.clicked.connect(dialog.accept)
+            for button in (self.btn_help_copy, self.btn_help_close):
+                button_font = QFont("Consolas")
+                button_font.setPixelSize(9)
+                button_font.setCapitalization(QFont.AllUppercase)
+                button.setFont(button_font)
+                button.setStyleSheet(theme.button_qss(small=True)
+                                     + " border-radius:2px;"
+                                     " font-family:'Consolas', monospace;"
+                                     " font-size:9px;")
+                button.setFixedHeight(24)
+                button.setCursor(Qt.PointingHandCursor)
+            row.addWidget(self.btn_help_copy)
+            row.addStretch(1)
+            row.addWidget(self.btn_help_close)
+            lay.addLayout(row)
+            self.help_dialog = dialog
+            self.help_scroll = scroll
+            self.help_text = text
+            dialog.show()
+            return dialog
 
         def _log(self, text):
             if callable(self.logger):
@@ -5729,8 +5911,8 @@ def build_market_dialogs():
                 if callable(self.open_url):
                     self.open_url(url)
                 else:
-                    import webbrowser
-                    webbrowser.open(url)
+                    import webbrowser  # noqa: F401 - совместимость тестов
+                    ui_url.open_url(url)
                 return True
             except Exception as exc:
                 self._log(f"токен: браузер не открылся "
@@ -5797,25 +5979,18 @@ def build_market_dialogs():
             if ok:
                 self._checked_token = self.edit_token.text().strip()
                 who = nickname or "аккаунт"
-                self.lbl_status.setText(f"✅ токен принят (ник: {who})")
-            elif code == 401 or "401" in message or state in (
-                    "unauthorized", "expired", "guest"):
-                self.lbl_status.setText(
-                    "⚠ 401 — гостевой или просрочен; сначала войдите на сайте")
+                self.lbl_status.setText(f"токен работает · {who}")
+            elif code:
+                self.lbl_status.setText(f"ошибка: {code}")
             elif state in ("no_network", "network") or "нет сети" in message:
-                self.lbl_status.setText("🌐 нет сети — проверьте интернет")
+                self.lbl_status.setText("ошибка: нет сети")
             else:
                 self.lbl_status.setText(
-                    f"⚠ токен не принят: {message or state or 'ошибка'}")
+                    f"ошибка: {message or state or 'неизвестно'}")
 
-        def _copy_instruction(self):
-            text = self.INSTRUCTION + "\n\nПроверка: " + self.CHECK_COMMAND
-            return self._set_clipboard(text)
-
-        def _copy_command(self):
-            token = self.edit_token.text().strip() or "<JWT>"
-            return self._set_clipboard(
-                self.CHECK_COMMAND.replace("<JWT>", token))
+        def _copy_site(self):
+            """t194: «Скопировать адрес сайта» — https://warframe.market."""
+            return self._set_clipboard(self.SITE_URL)
 
         def _set_clipboard(self, text):
             try:
@@ -6339,7 +6514,7 @@ def build_market_dialogs():
             import webbrowser
             url = self.meta.get("url") or f"https://warframe.market/items/{self.slug}"
             try:
-                webbrowser.open(url)
+                ui_url.open_url(url)
                 self.lbl_status.setText("страница предмета открыта в браузере")
             except Exception as exc:
                 self.lbl_status.setText(f"не удалось открыть браузер ({type(exc).__name__})")
@@ -6419,7 +6594,6 @@ def game_window_active():
 
 def force_foreground(hwnd):
     """Выводит окно вперёд и делает активным (обход ограничения Windows)."""
-    import ctypes
     u = _user32()
     try:
         u.ShowWindow(hwnd, 5)          # SW_SHOW
@@ -6835,7 +7009,6 @@ _UI_THEME_MODULE = {"mod": None, "tried": False}
 _MARKET_BROWSER_MODULE = {"mod": None, "tried": False}
 _OVERLAY_WINDOW_MODULE = {"mod": None, "tried": False}
 _MARKET_AUTH_MODULE = {"mod": None, "tried": False}
-_MARKET_BROWSER_LOGIN_MODULE = {"mod": None, "tried": False}
 _LOGIN_MODE_MODULE = {"mod": None, "tried": False}
 _FARM_STATS_MODULE = {"mod": None, "tried": False}
 _RELIC_POOL_MODULE = {"mod": None, "tried": False}
@@ -6846,7 +7019,6 @@ _SETTINGS_UI_MODULE = {"mod": None, "tried": False}
 _NOTIFICATION_CENTER_MODULE = {"mod": None, "tried": False}
 _CHAT_CLIENT_MODULE = {"mod": None, "tried": False}
 _MARKET_STATUS_MODULE = {"mod": None, "tried": False}
-_BROWSER_TOKEN_MODULE = {"mod": None, "tried": False}
 _UPDATE_WATCHER_MODULE = {"mod": None, "tried": False}
 _ITEM_ICONS_MODULE = {"mod": None, "tried": False}
 _ICON_PACK_MODULE = {"mod": None, "tried": False}
@@ -6918,19 +7090,6 @@ def market_auth_module():
     """
     return _load_local_module("market_auth.py", "market_auth",
                               _MARKET_AUTH_MODULE)
-
-
-def market_browser_login_module():
-    """Вход через браузер пользователя по CDP (market_browser_login.py).
-
-    Основной способ: встроенный Chromium 87 не проходит Cloudflare, поэтому
-    запускаем Chrome/Edge/Yandex/Brave с отдельным профилем и забираем
-    HttpOnly-cookie JWT через отладочный протокол. Модуль опционален: без него
-    остаётся ручная вставка токена.
-    """
-    return _load_local_module("market_browser_login.py",
-                              "market_browser_login",
-                              _MARKET_BROWSER_LOGIN_MODULE)
 
 
 def login_mode_module():
@@ -7013,12 +7172,6 @@ def market_status_module():
     """Статус warframe.market (market_status.py): WS A/чип/авто."""
     return _load_local_module("market_status.py", "market_status",
                               _MARKET_STATUS_MODULE)
-
-
-def browser_token_module():
-    """JWT из профилей Chrome/Edge/Yandex/Opera/Firefox (browser_token.py)."""
-    return _load_local_module("browser_token.py", "browser_token",
-                              _BROWSER_TOKEN_MODULE)
 
 
 def update_watcher_module():
@@ -7288,72 +7441,14 @@ def icon_pack_progress_bridge(callback):
 
 
 def icons_autostart(cfg=None, on_progress=None, on_done=None):
-    """Первый запуск: пака нет → качаем в фоне (не блокирует окно)."""
-    cfg = cfg or {}
-    if not cfg.get("icons_pack_enabled", True):
-        return False
+    """Автозагрузка пака при старте отключена (t61): всегда False."""
     return False
-    pack = icon_pack_manager(cfg)
-    if pack is None or pack.running:
-        return False
-    try:
-        if not pack.needs_download():
-            return False
-    except Exception:
-        return False
-    log("Иконки: пака нет — начинаю скачивание в фоне (не более 3 запросов/с)")
-    result = icons_download(cfg, on_progress=on_progress, on_done=on_done)
-    return bool(result.get("started"))
 
 
 def icons_update_watcher(cfg=None, on_progress=None, on_done=None,
                          stop_event=None, interval=3600, first_delay=20):
-    """Фоновая сверка пака: раз в ``icons_update_days`` дней (0 — выкл)."""
-    cfg = cfg or {}
+    """Автообновление пака отключено (t61): наблюдатель не запускается."""
     return False
-    try:
-        first_delay = float(first_delay)
-    except Exception:
-        first_delay = 20.0
-    try:
-        interval = max(60.0, float(interval))
-    except Exception:
-        interval = 3600.0
-
-    def worker():
-        delay = max(1.0, first_delay)
-        while True:
-            # ждём порцию, но просыпаемся, чтобы уважать stop_event
-            waited = 0.0
-            while waited < delay:
-                if stop_event is not None and stop_event.is_set():
-                    return
-                time.sleep(min(5.0, delay - waited))
-                waited += 5.0
-            if stop_event is not None and stop_event.is_set():
-                return
-            try:
-                days = int(cfg.get("icons_update_days", 7) or 0)
-                pack = icon_pack_manager(cfg)
-                if days > 0 and pack is not None and not pack.running \
-                        and pack.needs_update(days):
-                    log(f"Иконки: автообновление (раз в {days} дн.)")
-                    result = pack.update(progress=on_progress)
-                    _icons_after(result, cfg)
-                    if callable(on_done):
-                        try:
-                            on_done(result)
-                        except Exception:
-                            pass
-            except Exception as e:
-                log(f"Иконки: автообновление не удалось "
-                    f"({type(e).__name__}: {e})")
-            delay = interval
-
-    thread = threading.Thread(target=worker, daemon=True,
-                              name="wf-icon-pack-watch")
-    thread.start()
-    return thread
 
 
 def login_in_progress():
@@ -7785,6 +7880,10 @@ def start_log_tailer(cfg, on_event):
     else:
         log(f"EE.log: {path} (только чтение)")
     try:
+        log(logp.markers_line())          # t189: видно, какие маркеры ждём
+    except Exception:
+        pass
+    try:
         tailer = logp.EeLogTailer(path, on_event=on_event,
                                   poll_ms=settings["poll_ms"],
                                   start_at_end=True)
@@ -7793,6 +7892,28 @@ def start_log_tailer(cfg, on_event):
     except Exception as e:
         log(f"EE.log: хвост лога не запущен ({type(e).__name__}: {e})")
         return None
+
+
+class OcrReadyNotifier:
+    """t191: «OCR готов» — уведомление один раз за запуск приложения."""
+
+    def __init__(self, dispatch, log_fn=None):
+        self.dispatch = dispatch
+        self.log = log_fn or (lambda _message: None)
+        self._shown = False
+
+    def notify(self, title, text):
+        """Показать уведомление (один раз за запуск). ``True`` — показано."""
+        if self._shown:
+            return False
+        self._shown = True
+        try:
+            self.dispatch(str(title), str(text))
+        except Exception as exc:
+            self.log(f"OCR: уведомление не показано ({type(exc).__name__}: {exc})")
+            return False
+        self.log(f'OCR: уведомление «{title}» показано')
+        return True
 
 
 class AutoScanGate:
@@ -8315,7 +8436,7 @@ class Scanner:
             t_api = time.time()
             resolved = resolve_prices_parallel(
                 self.api, list(unique.keys()), cache=self.cache,
-                workers=int(self.cfg.get("workers", 4) or 4),
+                workers=int(self.cfg.get("workers", 6) or 6),
                 timeout=2.5, logger=log)
             if _cancelled("prices"):
                 return
@@ -8542,8 +8663,8 @@ def run_gui(cfg):
     except Exception:
         pass
     # Режим входа (login_mode.py) грузим первым: его общий флаг читают guard-ы
-    # окон/хоткеев/плашек, а overlay_window.py и market_browser_login.py
-    # импортируют его по имени (в сборке — через hiddenimports).
+    # окон/хоткеев/плашек, а overlay_window.py импортирует его по имени (в
+    # сборке — через hiddenimports).
     login_mode_module()
     # 1.0.0 (t60): Reader создаётся лениво/в фоне — окно раньше OCR.
     ocr = None
@@ -8569,21 +8690,9 @@ def run_gui(cfg):
         notification_full = pyqtSignal(dict)  # центр уведомлений: запись целиком
         pick_reward = pyqtSignal(int)     # Alt+1…4: взята награда из скана
         region_request = pyqtSignal()     # t158: Alt+D — выделение области
+        translate_request = pyqtSignal()  # t184: Alt+T — перевод чата
+        ocr_ready = pyqtSignal(str, str)  # t191: «OCR готов»/«не запустился»
         stats_changed = pyqtSignal()      # 1.0.0: «Дроп» — данные изменились
-
-    # ── вход через браузер: готовим Qt ДО QApplication (только webview) ──
-    # Основной способ входа — браузер пользователя по CDP (Chromium 87 не
-    # проходит Cloudflare). Встроенный QtWebEngine оставлен отключаемым
-    # запасным вариантом (market_web_login=true) и требует
-    # Qt.AA_ShareOpenGLContexts до создания QApplication; без него атрибут
-    # не нужен, поэтому трогаем Qt только когда webview включён.
-    if cfg.get("market_web_login", False):
-        auth_mod_prep = market_auth_module()
-        if auth_mod_prep is not None:
-            try:
-                auth_mod_prep.prepare_qt_for_webengine()
-            except Exception:
-                pass
 
     app = QApplication([])
     app.setQuitOnLastWindowClosed(False)
@@ -8635,7 +8744,6 @@ def run_gui(cfg):
     except Exception as e:
         log(f"Калибровка: старт не применил сохранённую запись "
             f"({type(e).__name__}: {e})")
-    # чат создаётся позже; _on_login_state должен видеть это имя
     chat_service = None
     chat_widget = None
     status_service = None
@@ -8645,6 +8753,17 @@ def run_gui(cfg):
     _STARTUP["catalog_ms"] = (time.time() - _t_catalog) * 1000
     api.refresh_items_async()
     ui = _UiBridge()
+    # t191: уведомление «OCR готов» приходит из фонового прогрева — только сигналом
+    _ocr_ui = {"notify": None}
+
+    def _on_ocr_ready(title, text):
+        handler = _ocr_ui.get("notify")
+        if callable(handler):
+            handler(title, text)
+        else:
+            log(f"OCR: {title} — {text}")
+
+    ui.ocr_ready.connect(_on_ocr_ready)
     if cfg.get("debug_ui"):
         try:
             from PyQt5.QtCore import QTimer as _QTimer
@@ -8755,11 +8874,19 @@ def run_gui(cfg):
             scanner.attach_ocr(engine)
             _STARTUP["ocr_ms"] = (time.time() - started) * 1000
             _STARTUP["ocr_ready"] = True
+            elapsed = time.time() - started
             if not _STARTUP.get("ocr_logged"):
                 _STARTUP["ocr_logged"] = True
-                log(f"OCR: готов за {time.time() - started:.1f} с (фон)")
+                log(f"OCR: готов за {elapsed:.1f} с (фон)")
+            # t191: «OCR готов» — один раз за запуск, со своим звуком
+            ui.ocr_ready.emit(
+                "OCR готов", f"распознавание наград запущено ({elapsed:.1f} с)")
         except Exception as e:
             log(f"OCR: прогрев не удался ({type(e).__name__}: {e})")
+            ui.ocr_ready.emit(
+                "OCR не запустился",
+                ui_safe.clean(f"{type(e).__name__}: {e}",
+                              fallback="причина неизвестна", limit=160))
         finally:
             _ocr_state["loading"] = False
 
@@ -8801,130 +8928,9 @@ def run_gui(cfg):
 
     reset_relic_log(cfg)
 
-    # ── вход на warframe.market: браузер пользователя (CDP) ────────────
-    # Ничего не делаем до клика по чипу «🔑»: браузер и сеть не трогаем.
-    # Контроллер (проверка /v2/me, сохранение, выход) общий для обоих
-    # способов; без модулей входа остаётся ручная вставка токена.
-    auth_mod = market_auth_module()
-    login_mod = market_browser_login_module()
-    auth_ctl = None
-    if auth_mod is not None and market is not None:
-        try:
-            auth_ctl = auth_mod.MarketAuthController(
-                cfg, market,
-                save_fn=save_market_token,
-                data_dir=DATA_DIR,
-                store_token=cfg.get("market_store_token", True),
-                session_only=cfg.get("market_login_session_only", False),
-                logger=log)
-        except Exception as e:
-            log(f"Вход: контроллер не создан ({type(e).__name__}: {e})")
-            auth_ctl = None
-
-    def _on_login_state(entering, keep=None, restore_dialog=False):
-        """Вход в браузере пошёл/закончился: спрятать и вернуть окна.
-
-        Вызывается окном входа (``market_browser_login.py``). ``keep`` —
-        диалог входа и пилюля «Отменить»: их прятать нельзя, пилюля —
-        единственная кнопка отмены, пока главное окно скрыто.
-        ``restore_dialog`` — диалог снова показан (ошибка/таймаут/закрытие
-        браузера): тогда фокус не переводим никуда, пользователь работает с
-        диалогом.
-
-        Код устойчив к старой сборке панелей (обновляется только warframe.py):
-        если у единого окна нет enter/exit_login_mode, окно всё равно
-        прячется/показывается, просто без снятия topmost у остальных окон.
-        """
-        entering = bool(entering)
-        set_login_in_progress(entering)
-        if entering:
-            # во время входа чат не держит соединение и не показывает тосты
-            if chat_service is not None:
-                try:
-                    chat_service.stop()
-                except Exception:
-                    pass
-            if status_service is not None:
-                try:
-                    status_service.stop(restore=False)
-                except Exception:
-                    pass
-        elif not entering and chat_service is not None:
-            try:
-                chat_service.start()
-            except Exception:
-                pass
-        if not entering and status_service is not None:
-            try:
-                status_service.start()
-            except Exception:
-                pass
-        if unified is None:
-            if entering:
-                manager.hide_overlays()
-            return
-        if entering:
-            # плашки/«Итого» topmost — во время входа их не показываем вовсе
-            manager.hide_overlays()
-            # диагностика: какие окна приложения вообще есть (для лога/жалоб
-            # «окно перекрывает браузер»)
-            log_login_windows(keep=tuple(keep or ()))
-            enter = getattr(unified, "enter_login_mode", None)
-            if callable(enter):
-                enter(keep=tuple(keep or ()))
-            else:                       # старая сборка overlay_window.py
-                try:
-                    unified.hide()
-                except Exception:
-                    pass
-            return
-        exit_mode = getattr(unified, "exit_login_mode", None)
-        if callable(exit_mode):
-            exit_mode(restore=True)
-        else:                           # старая сборка overlay_window.py
-            try:
-                unified.show_window()
-            except Exception:
-                pass
-        # (в) фокус игры. Окно возвращается видимым, но БЕЗ активации
-        # (focus=False: нет activateWindow/focus_editor/force_foreground),
-        # поэтому мышь у игры не отбирается. Для штатного завершения входа
-        # (успех/отмена) возвращаем фокус игре, как это делает закрытие окна
-        # (``restore_game_focus`` в конфиге) — под браузером/окном её и не было.
-        # При ошибке диалог показан заново: переводить фокус в игру нельзя.
-        if not restore_dialog and cfg.get("restore_game_focus", True):
-            try:
-                restore_game_focus()
-            except Exception:
-                pass
-
-    def make_auth_dialog(parent=None):
-        """Окно входа: браузер пользователя (CDP) или ручная вставка.
-
-        Если в config.json включён ``market_web_login``, показываем прежнее
-        окно со встроенным QtWebEngine (запасной вариант — Cloudflare его
-        обычно блокирует), иначе — выбор «Войти в браузере / Вставить
-        токен вручную».
-        """
-        manual = lambda p: build_market_dialogs()[1](
-            cfg, market, p, save_fn=save_market_token)
-        if (cfg.get("market_web_login", False) and auth_mod is not None
-                and auth_ctl is not None):
-            AuthDialog = auth_mod.build_auth_dialog()
-            return AuthDialog(auth_ctl, parent, manual_factory=manual)
-        if login_mod is None or auth_ctl is None:
-            raise RuntimeError("модули входа (market_browser_login.py / "
-                               "market_auth.py) не найдены")
-        LoginDialog = login_mod.build_login_dialog()
-        return LoginDialog(auth_ctl, parent=parent, cfg=cfg,
-                           data_dir=DATA_DIR, manual_factory=manual,
-                           logger=log,
-                           manual_open=lambda url: webbrowser.open(str(url)),
-                           browser_token_finder=lambda:
-                           browser_token_module().BrowserTokenFinder(
-                               logger=log) if browser_token_module() else None,
-                           save_values=lambda mapping: save_config_keys(cfg, mapping),
-                           on_login_state=_on_login_state)
+    # ── вход на warframe.market: только ручной токен (t194) ────────────
+    # Контроллера входа больше нет: диалог открывается по чипу «🔑» и
+    # проверяет токен сам через GET /v2/me.
 
     # ── игровые события: панель вкладки «События», сеть — в фоне ────────
     events_ctl = None
@@ -9253,7 +9259,6 @@ def run_gui(cfg):
                 chat_widget=chat_widget,
                 token_factory=lambda: (*build_market_dialogs(),
                                        save_market_token),
-                auth_factory=make_auth_dialog,
                 save_values=lambda mapping: save_config_keys(cfg, mapping),
                 market_client=market,
                 on_open=_on_window_open,
@@ -9576,6 +9581,23 @@ def run_gui(cfg):
                 f"({result.get('error') or 'ошибка'})")
         return bool(result.get("ok"))
 
+    def _show_ocr_notification(title, text):
+        """t191: тост «OCR готов» + отдельный звук, настройками не отключается."""
+        record = {"kind": "ocr_ready", "title": str(title), "text": str(text),
+                  "ts": time.time(), "action": "settings"}
+        shown = played = False
+        if center_mod is not None:
+            result = center_mod.dispatch_forced(
+                record, cfg=cfg, toast_stack=toast_stack,
+                sound_player=sound_player, store=notification_store)
+            shown = bool(result.get("ok"))
+            played = bool(result.get("sound"))
+        if not played:
+            log("OCR: звук «готов» не проигран (нет устройства?)")
+        return shown
+
+    _ocr_ui["notify"] = OcrReadyNotifier(_show_ocr_notification, log).notify
+
     def _toast_activated(record):
         """Клик по тосту: лут → «Дроп», остальные → центр на записи."""
         record = dict(record or {})
@@ -9892,6 +9914,42 @@ def run_gui(cfg):
             return
         browser.toggle()
 
+    def _chat_toast(text):
+        """t184: тост перевода (центр уведомлений), иначе — статус чата."""
+        if center_mod is None:
+            return False
+        try:
+            center_mod.dispatch_toast_only(
+                {"kind": "chat", "title": "Перевод", "text": str(text)},
+                cfg=cfg, toast_stack=toast_stack,
+                login_check=login_in_progress, force=True)
+            return True
+        except Exception as exc:
+            log(f"Перевод: тост не показан ({type(exc).__name__}: {exc})")
+            return False
+
+    if chat_widget is not None:
+        chat_widget.toast = _chat_toast
+
+    def translate_chat():
+        """Alt+T: перевод сообщения под курсором (только отображение)."""
+        if login_in_progress():
+            return
+        if chat_widget is None:
+            log("Перевод: вкладка «Чат» недоступна")
+            return
+        try:
+            visible = bool(chat_widget.isVisible())
+        except Exception:
+            visible = False
+        if not visible:
+            _chat_toast("перевод: откройте вкладку «Чат»")
+            return
+        try:
+            chat_widget.translate_under_cursor()
+        except Exception as exc:
+            log(f"Перевод: ошибка UI ({type(exc).__name__}: {exc})")
+
     def _show_pick_toast(result, duplicate=False):
         """Эфемерный тост «Добавлено/Уже в дропах» — без центра/бейджа."""
         if not bool(cfg.get("notify_pick_toast", True)):
@@ -10054,6 +10112,7 @@ def run_gui(cfg):
             log(f"Alt+D: не открыт ({type(exc).__name__}: {exc})")
 
     ui.region_request.connect(region_action)
+    ui.translate_request.connect(translate_chat)
 
     # старые хоткеи — ровно как раньше, но в обеих раскладках
     if unified is None:
@@ -10063,6 +10122,8 @@ def run_gui(cfg):
                     ui.scan.emit)
     register_hotkey(keyboard, cfg.get("hotkey_region", "alt+d"),
                     ui.region_request.emit)
+    register_hotkey(keyboard, cfg.get("hotkey_translate", "alt+t"),
+                    ui.translate_request.emit)
     register_hotkey(keyboard, cfg.get("hotkey_hide", "f9"),
                     ui.hide_all.emit)
     if unified is not None:
@@ -10738,16 +10799,14 @@ def apply_display_settings(settings_cfg, summary=None, drops_panel=None,
     return True
 
 
-def resolve_prices_parallel(api, names, cache=None, workers=4,
-                            timeout=1.5, logger=None):
-    """Параллельно получить цены (до 4 воркеров, общий таймаут пачки).
+def resolve_prices_parallel(api, names, cache=None, workers=6,
+                            timeout=2.5, logger=None):
+    """Цены параллельно: сначала дисковый кэш, остальное — пулом воркеров.
 
-    Кэш переиспользуется; недостающие/зависшие предметы получают
-    ``price=None`` (плашки к этому моменту уже нарисованы с именами).
-    Одна строка в лог: ``Цены: 4 предмета за 0.9 с (кэш 2)``.
+    Одна строка в лог (t199):
+    ``Цены: кэш N, сеть M, первый ответ X мс, всего Y мс``.
     """
-    from concurrent.futures import (ThreadPoolExecutor, as_completed,
-                                    TimeoutError as FuturesTimeout)
+    from concurrent.futures import (TimeoutError as FuturesTimeout)
     started = time.time()
     names = list(dict.fromkeys(str(n) for n in (names or []) if str(n)))
     out = {}
@@ -10755,19 +10814,27 @@ def resolve_prices_parallel(api, names, cache=None, workers=4,
     cached = 0
     for name in names:
         value = cache.price_get(name) if cache is not None else None
+        if value is None and api is not None:
+            try:
+                value = api.cached_price(name)
+            except Exception:
+                value = None
         if value is not None:
-            out[name] = dict(value)
+            out[name] = dict(value, cached=True)
             cached += 1
         else:
             pending.append(name)
+    first_ms = 0
     if pending:
-        workers = max(1, min(4, int(workers or 4)))
+        workers = max(1, min(6, int(workers or 6)))
         pool = ThreadPoolExecutor(max_workers=workers)
         try:
             futures = {pool.submit(api.lookup, name): name
                        for name in pending}
             try:
                 for future in as_completed(futures, timeout=float(timeout)):
+                    if not first_ms:
+                        first_ms = int((time.time() - started) * 1000)
                     name = futures[future]
                     try:
                         value = future.result()
@@ -10786,10 +10853,9 @@ def resolve_prices_parallel(api, names, cache=None, workers=4,
             if name not in out:
                 out[name] = {"name": name, "price": None,
                              "matched": False, "error": "таймаут цен"}
-    elapsed = time.time() - started
-    message = (f"Цены: {len(names)} предмета за {elapsed:.1f} с "
-               f"(кэш {cached}, сеть "
-               f"{max(0, len(names) - cached)})")
+    elapsed_ms = int((time.time() - started) * 1000)
+    message = (f"Цены: кэш {cached}, сеть {max(0, len(names) - cached)}, "
+               f"первый ответ {first_ms} мс, всего {elapsed_ms} мс")
     try:
         (logger or log)(message)
     except Exception:
