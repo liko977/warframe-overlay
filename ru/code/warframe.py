@@ -82,7 +82,7 @@ if (os.environ.get("WF_LOG_FILE") is None
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 _APPLYING_SETTINGS = False
 
 from scan_geometry import (_bonus_top, _nick_bottom, _panel_count)
@@ -164,19 +164,19 @@ DEFAULT_CONFIG = {
     # ── управление ──────────────────────────────────────────────────────
     "hotkey_scan": "alt+q",          # скан экрана наград (плашки)
     "hotkey_region": "alt+d",        # 1.1.0: цена по выделенной области
+    "hotkey_translate_region": "alt+r",  # t200: перевод выделенной области
     "plate_boxes": {},               # 1.1.0: позиции плашек (экранные)
     "plates_click_through": False,   # 1.1.0: плашки не мешают мыши
     "region_card_ttl": 5.0,          # 1.1.0: Alt+D карточка, 0 = не скрывать
+    "region_translate_ttl": 6.0,     # t200: Alt+R карточка, 0 = не скрывать
+    "translate_history_enabled": True,   # t200: история переводов
+    "translate_history_limit": 200,      # t200: записей (20–200)
     "hotkey_editor": "f8",           # список выбранного (редактор)
     "hotkey_events": "alt+e",        # панель игровых событий (сортис, разломы…)
     "hotkey_market": "alt+m",        # окно «Маркет» (поиск, график, ордера)
-    "hotkey_translate": "alt+t",     # t184: перевод сообщения чата (Yandex)
     "translate_api_key": "",         # t184: ключ Yandex Cloud Translate
     "translate_folder_id": "",       # t184: folderId каталога Yandex Cloud
     "translate_provider": "auto",    # t196: auto | yandex | free (MyMemory)
-    "chat_history_enabled": True,    # t188: история переписки по нику
-    "chat_history_limit": 100,       # t188: сообщений на ник (20–200)
-    "chat_translate_ttl": 6.0,       # t188: перевод в истории исчезает, с
     "hotkey_window": "f8",           # единое окно с вкладками
     "hotkey_aliases": True,          # Alt+E/Alt+M — быстрые алиасы вкладок
     "last_tab": 0,                   # последняя активная вкладка окна
@@ -322,8 +322,6 @@ DEFAULT_CONFIG = {
     "notify_price_color": "#f5c451",   # акцент «цена ниже моей»
     "notify_sound_choice": "auto",   # auto | market | chat | system
     "notify_sound_file": "",         # свой .wav (файл не копируем)
-    "chat_url": "https://warframe.market/",  # пока чата в приложении нет
-    "chat_enabled": True,             # вкладка «Чат» warframe.market
     "status_auto": False,             # авто ingame/online по фокусу игры
     "status_mode": "online",          # 1.0.0: явный статус (авто-режим убран)
     "status_restore_online": True,    # при выходе вернуть «Онлайн»
@@ -5554,8 +5552,7 @@ PICK_HOTKEYS_DEFAULT = ["alt+1", "alt+2", "alt+3", "alt+4"]
 
 #: Ключи конфига с «занятыми» хоткеями: их Alt+1..4 не перетирают.
 _OTHER_HOTKEY_KEYS = ("hotkey_scan", "hotkey_editor", "hotkey_events",
-                      "hotkey_market", "hotkey_window", "hotkey_hide",
-                      "hotkey_translate")
+                      "hotkey_market", "hotkey_window", "hotkey_hide")
 
 
 def pick_hotkeys(cfg):
@@ -7017,7 +7014,6 @@ _NOTIFICATIONS_MODULE = {"mod": None, "tried": False}
 _LAUNCHER_MODULE = {"mod": None, "tried": False}
 _SETTINGS_UI_MODULE = {"mod": None, "tried": False}
 _NOTIFICATION_CENTER_MODULE = {"mod": None, "tried": False}
-_CHAT_CLIENT_MODULE = {"mod": None, "tried": False}
 _MARKET_STATUS_MODULE = {"mod": None, "tried": False}
 _UPDATE_WATCHER_MODULE = {"mod": None, "tried": False}
 _ITEM_ICONS_MODULE = {"mod": None, "tried": False}
@@ -7160,12 +7156,6 @@ def notification_center_module():
     """Центр уведомлений (notification_center.py): история, тосты, звук."""
     return _load_local_module("notification_center.py", "notification_center",
                               _NOTIFICATION_CENTER_MODULE)
-
-
-def chat_client_module():
-    """Чат warframe.market (chat_client.py): HTTP/WS/вкладка."""
-    return _load_local_module("chat_client.py", "chat_client",
-                              _CHAT_CLIENT_MODULE)
 
 
 def market_status_module():
@@ -8690,7 +8680,7 @@ def run_gui(cfg):
         notification_full = pyqtSignal(dict)  # центр уведомлений: запись целиком
         pick_reward = pyqtSignal(int)     # Alt+1…4: взята награда из скана
         region_request = pyqtSignal()     # t158: Alt+D — выделение области
-        translate_request = pyqtSignal()  # t184: Alt+T — перевод чата
+        translate_region_request = pyqtSignal()  # t200: Alt+R — перевод области
         ocr_ready = pyqtSignal(str, str)  # t191: «OCR готов»/«не запустился»
         stats_changed = pyqtSignal()      # 1.0.0: «Дроп» — данные изменились
 
@@ -8744,8 +8734,6 @@ def run_gui(cfg):
     except Exception as e:
         log(f"Калибровка: старт не применил сохранённую запись "
             f"({type(e).__name__}: {e})")
-    chat_service = None
-    chat_widget = None
     status_service = None
     api = MarketAPI(cfg)
     _t_catalog = time.time()
@@ -9035,32 +9023,6 @@ def run_gui(cfg):
         log("Центр уведомлений: модуль notification_center.py не найден.")
 
     # ── чат warframe.market (t19): вкладка, HTTP/WS, фолбэк опроса ──────
-    chat_mod = chat_client_module()
-    if chat_mod is not None and cfg.get("chat_enabled", True):
-        try:
-            def _chat_token():
-                if market is not None:
-                    try:
-                        token = market.token()
-                        if token:
-                            return token
-                    except Exception:
-                        pass
-                return cfg.get("market_token") or ""
-
-            ChatWidget = chat_mod.build_chat_widget()
-            chat_widget = ChatWidget(cfg)
-            ChatService = chat_mod.build_chat_service()
-            chat_service = ChatService(
-                cfg, token_fn=_chat_token,
-                login_check=login_in_progress)
-        except Exception as e:
-            log(f"Чат: вкладка не создана ({type(e).__name__}: {e})")
-            chat_service = None
-            chat_widget = None
-    elif chat_mod is None:
-        log("Чат: модуль chat_client.py не найден — вкладка недоступна.")
-
     # ── статус warframe.market (t20): WS A, чип, авто-режим ────────────
     status_mod = market_status_module()
 
@@ -9227,6 +9189,18 @@ def run_gui(cfg):
                                 events_client.status_text]
             refresh_actions = [browser.refresh, browser.refresh,
                                events_ctl.refresh_now]
+            try:
+                import translate_ui as translate_ui_mod
+                TranslateWidget = translate_ui_mod.build_translate_widget()
+                translate_widget = TranslateWidget(cfg)
+            except Exception as exc:
+                log(f"Перевод: вкладка не создана ({type(exc).__name__}: {exc})")
+                translate_widget = None
+            if translate_widget is not None:
+                status_providers.append(
+                    lambda: f"переводов: {len(translate_widget.rows)}")
+                refresh_actions.append(translate_widget.refresh)
+
             drops_widget = None
             if drops_panel is not None:
                 drops_widget = drops_panel
@@ -9255,8 +9229,8 @@ def run_gui(cfg):
                 status_providers=status_providers,
                 refresh_actions=refresh_actions,
                 drops_widget=drops_widget,
+                translate_widget=translate_widget,
                 notifications_widget=notification_center,
-                chat_widget=chat_widget,
                 token_factory=lambda: (*build_market_dialogs(),
                                        save_market_token),
                 save_values=lambda mapping: save_config_keys(cfg, mapping),
@@ -9522,8 +9496,7 @@ def run_gui(cfg):
             log(f"Трей: не удалось открыть окно ({type(e).__name__}: {e})")
 
     def _tray_stop():
-        for service, kwargs in ((chat_service, {}),
-                                (status_service, {"restore": False}),
+        for service, kwargs in ((status_service, {"restore": False}),
                                 (events_ctl, {}),
                                 (auto_update_watcher, {})):
             if service is None:
@@ -9814,33 +9787,6 @@ def run_gui(cfg):
         log("Уведомления: модуль notifications.py не найден — без трея и тостов.")
 
     # ── чат: сигналы сервиса → вкладка/бейдж; NEW_MESSAGE → центр ───────
-    if chat_service is not None and chat_widget is not None:
-        chat_service.chats_ready.connect(chat_widget.set_chats)
-        chat_service.messages_ready.connect(chat_widget.set_messages)
-        chat_service.message_received.connect(chat_widget.append_message)
-        chat_service.message_sent.connect(chat_widget.append_message)
-        chat_service.status_changed.connect(chat_widget.set_status)
-        if unified is not None:
-            chat_service.unread_changed.connect(unified.set_chat_badge)
-        chat_widget.chat_selected.connect(chat_service.load_messages)
-        chat_widget.send_requested.connect(chat_service.send)
-        chat_widget.open_site_requested.connect(
-            lambda: chat_mod.open_chat_site())
-
-        def _chat_notify(record):
-            if notifier is None:
-                return False
-            payload = (record.get("payload")
-                       if isinstance(record.get("payload"), dict) else {})
-            return notifier.notify(
-                record.get("kind", "chat"), record.get("title", ""),
-                record.get("text", ""),
-                subject=payload.get("chat_id", ""),
-                action="chat", payload=payload)
-
-        chat_service.notify_fn = _chat_notify
-        chat_service.start()
-
     # ── статус: сигналы → чип; старт после входа/с токеном ─────────────
     if status_service is not None:
         if unified is not None:
@@ -9913,42 +9859,6 @@ def run_gui(cfg):
             log("Маркет: окно недоступно (нет market_browser.py).")
             return
         browser.toggle()
-
-    def _chat_toast(text):
-        """t184: тост перевода (центр уведомлений), иначе — статус чата."""
-        if center_mod is None:
-            return False
-        try:
-            center_mod.dispatch_toast_only(
-                {"kind": "chat", "title": "Перевод", "text": str(text)},
-                cfg=cfg, toast_stack=toast_stack,
-                login_check=login_in_progress, force=True)
-            return True
-        except Exception as exc:
-            log(f"Перевод: тост не показан ({type(exc).__name__}: {exc})")
-            return False
-
-    if chat_widget is not None:
-        chat_widget.toast = _chat_toast
-
-    def translate_chat():
-        """Alt+T: перевод сообщения под курсором (только отображение)."""
-        if login_in_progress():
-            return
-        if chat_widget is None:
-            log("Перевод: вкладка «Чат» недоступна")
-            return
-        try:
-            visible = bool(chat_widget.isVisible())
-        except Exception:
-            visible = False
-        if not visible:
-            _chat_toast("перевод: откройте вкладку «Чат»")
-            return
-        try:
-            chat_widget.translate_under_cursor()
-        except Exception as exc:
-            log(f"Перевод: ошибка UI ({type(exc).__name__}: {exc})")
 
     def _show_pick_toast(result, duplicate=False):
         """Эфемерный тост «Добавлено/Уже в дропах» — без центра/бейджа."""
@@ -10112,7 +10022,47 @@ def run_gui(cfg):
             log(f"Alt+D: не открыт ({type(exc).__name__}: {exc})")
 
     ui.region_request.connect(region_action)
-    ui.translate_request.connect(translate_chat)
+
+    # t200: Alt+R — перевод выделенной области (шторка та же, что в Alt+D)
+    translate_ctl = None
+    translate_widget = None
+
+    def _region_translate_toast(text):
+        try:
+            if center_mod is not None:
+                center_mod.dispatch_toast_only(
+                    {"kind": "system", "title": "Перевод", "text": str(text)},
+                    cfg=cfg, toast_stack=toast_stack, force=True)
+        except Exception:
+            pass
+
+    def _refresh_translate_tab(_record=None):
+        if translate_widget is not None:
+            try:
+                translate_widget.refresh()
+            except Exception:
+                pass
+
+    def translate_region_action():
+        nonlocal translate_ctl
+        if login_in_progress():
+            return
+        try:
+            import region_translate
+            if translate_ctl is None:
+                translate_ctl = region_translate.RegionTranslate(
+                    cfg, log=log,
+                    ocr_getter=lambda: getattr(scanner, "ocr", None),
+                    on_saved=_refresh_translate_tab,
+                    toast=_region_translate_toast)
+            translate_ctl.cfg = dict(cfg)
+            translate_ctl.history = region_translate.history_mod.TranslateHistory(
+                cfg, logger=log)
+            translate_ctl.open()
+        except Exception as exc:
+            log(f"Alt+R: не открыт ({type(exc).__name__}: {exc})")
+
+    ui.translate_region_request.connect(translate_region_action)
 
     # старые хоткеи — ровно как раньше, но в обеих раскладках
     if unified is None:
@@ -10122,8 +10072,8 @@ def run_gui(cfg):
                     ui.scan.emit)
     register_hotkey(keyboard, cfg.get("hotkey_region", "alt+d"),
                     ui.region_request.emit)
-    register_hotkey(keyboard, cfg.get("hotkey_translate", "alt+t"),
-                    ui.translate_request.emit)
+    register_hotkey(keyboard, cfg.get("hotkey_translate_region", "alt+r"),
+                    ui.translate_region_request.emit)
     register_hotkey(keyboard, cfg.get("hotkey_hide", "f9"),
                     ui.hide_all.emit)
     if unified is not None:
@@ -10704,11 +10654,6 @@ def run_gui(cfg):
         if toast_stack is not None:
             try:
                 toast_stack.hide_all()
-            except Exception:
-                pass
-        if chat_service is not None:
-            try:
-                chat_service.stop()
             except Exception:
                 pass
         if status_service is not None:
