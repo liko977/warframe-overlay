@@ -17,6 +17,7 @@
 в ``config.json.bak``.
 """
 
+import ui_url
 import json
 import os
 import re
@@ -95,6 +96,7 @@ DEFAULT_VALUES = {
     "plate_boxes": {},
     "region_card_ttl": 5.0,
     "overlay_ttl": 5.0,
+    "price_cache_ttl_min": 10,
     "auto_detect": True,
     "font_scale": 1.0,
     "overlay_opacity": 1.0,
@@ -116,6 +118,14 @@ DEFAULT_VALUES = {
     "update_disabled": False,
     "config_version": 2,
     "update_check_interval_min": 180,
+    # t184: перевод чата (Alt+T) — Yandex Cloud Translate или бесплатный
+    "translate_api_key": "",
+    "translate_folder_id": "",
+    "translate_provider": "auto",
+    # t188: история переписки по нику
+    "chat_history_enabled": True,
+    "chat_history_limit": 100,
+    "chat_translate_ttl": 6.0,
 }
 
 DEFAULT_UPDATE_URL = ("https://raw.githubusercontent.com/liko977/"
@@ -335,7 +345,6 @@ def validate_hotkey(value):
     if not norm:
         return False, "пустая комбинация"
     parts = norm.split("+")
-    mods = [part for part in parts if part in MODIFIERS]
     keys = [part for part in parts if part not in MODIFIERS]
     if not keys:
         return False, "только модификатор — нужна ещё клавиша"
@@ -532,7 +541,7 @@ class HotkeyBinder:
             return {"ok": True, "keys": dict(self._keys),
                     "registered": registered,
                     "skipped": list(self.skipped)}
-        except Exception as exc:
+        except Exception:
             # убрать частично поставленные новые
             for action in list(self._handles):
                 self._remove(action)
@@ -702,8 +711,9 @@ def build_settings_dialog():
     from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog,
                                  QDoubleSpinBox, QFileDialog, QFormLayout,
-                                 QHBoxLayout, QLabel, QLineEdit, QProgressBar,
-                                 QPushButton, QScrollArea, QSpinBox, QTabWidget,
+                                 QFrame, QHBoxLayout, QLabel, QLineEdit,
+                                 QProgressBar, QPushButton, QRadioButton,
+                                 QScrollArea, QSpinBox, QTabWidget,
                                  QVBoxLayout, QWidget)
 
     def color(name, default="#e6edf6"):
@@ -722,16 +732,78 @@ def build_settings_dialog():
         return theme.button_qss(**kwargs) if theme is not None else ""
 
     def tab_qss():
-        base = f"""
+        """t193: шапка вкладок капсом 9 px mono muted, активная — линия 2 px."""
+        return f"""
             QTabWidget::pane {{ border:1px solid {color('border')};
                                 background:{color('panel')}; }}
-            QTabBar::tab {{ background:{color('card')}; color:{color('text')};
-                            padding:6px 14px; border:1px solid {color('border')};
-                            border-bottom:none; }}
-            QTabBar::tab:selected {{ background:{color('panel')};
-                                     color:{color('accent')}; }}
+            QTabBar {{ background: transparent; }}
+            QTabBar::tab {{ background: transparent; color:{color('muted')};
+                            font-family:'Consolas', monospace; font-size:9px;
+                            letter-spacing:1px; padding:7px 14px;
+                            border:none; border-bottom:2px solid transparent; }}
+            QTabBar::tab:hover {{ color:{color('text')}; }}
+            QTabBar::tab:selected {{ color:{color('text')};
+                                     border-bottom:2px solid {color('accent')}; }}
         """
-        return base
+
+    def group_header(text):
+        """t193: заголовок группы — капс 9 px mono muted, отступ 8 px + линия."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 8, 0, 2)
+        lay.setSpacing(4)
+        label = QLabel(str(text).upper())
+        label.setObjectName("settingsGroup")
+        label.setFont(font(9))
+        if theme is not None:
+            label.setStyleSheet(theme.caps_header_qss())
+        label.setContentsMargins(8, 0, 0, 0)
+        line = QFrame()
+        line.setObjectName("settingsDivider")
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background-color:{color('border')}; border:none;")
+        lay.addWidget(label)
+        lay.addWidget(line)
+        box.label = label
+        return box
+
+    def e_button(text, primary=False, danger=False):
+        """t193: кнопка панели — 24 px, radius 2, Consolas 9 капсом."""
+        button = QPushButton(str(text))
+        button_font = QFont("Consolas")
+        button_font.setPixelSize(9)
+        button_font.setCapitalization(QFont.AllUppercase)
+        button.setFont(button_font)
+        button.setStyleSheet(button_qss(primary=primary, danger=danger)
+                             + " border-radius:2px; padding:0px 10px;"
+                             " font-family:'Consolas', monospace;"
+                             " font-size:9px;")
+        button.setFixedHeight(24)
+        button.setCursor(Qt.PointingHandCursor)
+        return button
+
+    def num_field(spin, unit=""):
+        """t193: поле Consolas 11 px, 70 px вправо + единица 9 px muted."""
+        spin_font = QFont("Consolas")
+        spin_font.setPixelSize(11)
+        spin.setFont(spin_font)
+        spin.setFixedWidth(70)
+        spin.setAlignment(Qt.AlignRight)
+        spin.setSuffix("")
+        host = QWidget()
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        lay.addWidget(spin, 0)
+        if unit:
+            label = QLabel(str(unit))
+            label.setFont(font(9))
+            if theme is not None:
+                label.setStyleSheet(theme.muted_qss(9))
+            lay.addWidget(label, 0)
+        lay.addStretch(1)
+        host.spin = spin
+        return host
 
     def muted(text):
         label = QLabel(str(text))
@@ -870,17 +942,14 @@ def build_settings_dialog():
         return make_hotkey(modifiers, name)
 
     from PyQt5.QtCore import QTimer, pyqtSignal
-    from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                                 QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                                 QProgressBar, QPushButton, QTabWidget,
-                                 QVBoxLayout, QWidget, QDoubleSpinBox,
-                                 QSpinBox)
+    from PyQt5.QtWidgets import (QPushButton)
 
     class SettingsDialog(QDialog):
         """Окно настроек: клавиши + уведомления + оверлей + обновления."""
 
         update_checked = pyqtSignal(dict)
         update_applied = pyqtSignal(dict)
+        translate_checked = pyqtSignal(dict)     # t184: «Проверить ключ»
 
         def __init__(self, cfg=None, apply_fn=None, on_open_data_dir=None,
                      on_test_notification=None, check_update_fn=None,
@@ -912,6 +981,8 @@ def build_settings_dialog():
             self.on_scan_calibrate = on_scan_calibrate
             self._icons_busy = False
             self.last_icons_result = {}
+            self._translate_busy = False
+            self.translate_info = {}
             self.data_dir = data_dir
             self.version = version
             self.last_result = {}
@@ -921,9 +992,11 @@ def build_settings_dialog():
             self.setWindowTitle("Настройки")
             self.setModal(True)
             self.setMinimumSize(760, 640)
+            self.setObjectName("settingsDialog")
             self.setStyleSheet(
                 qss() + " QLineEdit, QSpinBox, QDoubleSpinBox {"
-                " font-family:'Consolas', monospace; }")
+                " font-family:'Consolas', monospace; }"
+                + self._panel_qss())
             try:
                 import login_mode
                 login_mode.register_dialog(self)      # B2: F9 закроет окно
@@ -948,11 +1021,16 @@ def build_settings_dialog():
 
             self.tabs = QTabWidget()
             self.tabs.setStyleSheet(tab_qss())
-            self.tabs.addTab(self._build_hotkeys_tab(), "Клавиши")
-            self.tabs.addTab(self._build_notify_tab(), "Уведомления")
-            self.tabs.addTab(self._build_overlay_tab(), "Оверлей")
-            self.tabs.addTab(self._build_updates_tab(), "Обновления")
-            self.tabs.addTab(self._build_other_tab(), "Прочее")
+            self.tabs.addTab(self._scroll_page(self._build_hotkeys_tab()),
+                             "Клавиши")
+            self.tabs.addTab(self._scroll_page(self._build_notify_tab()),
+                             "Уведомления")
+            self.tabs.addTab(self._scroll_page(self._build_overlay_tab()),
+                             "Оверлей")
+            self.tabs.addTab(self._scroll_page(self._build_updates_tab()),
+                             "Обновления")
+            self.tabs.addTab(self._scroll_page(self._build_other_tab()),
+                             "Прочее")
             layout.addWidget(self.tabs, 1)
             # 1.0.0: два места для «Показывать иконки» — держим в синхроне
             try:
@@ -965,6 +1043,7 @@ def build_settings_dialog():
 
             self.update_checked.connect(self._on_update_checked)
             self.update_applied.connect(self._on_update_applied)
+            self.translate_checked.connect(self._on_translate_checked)
 
             self.lbl_status = QLabel("")
             self.lbl_status.setFont(font(10))
@@ -975,18 +1054,12 @@ def build_settings_dialog():
 
             buttons = QHBoxLayout()
             buttons.setSpacing(8)
-            self.btn_defaults = QPushButton("Сбросить к умолчанию")
-            self.btn_defaults.setStyleSheet(button_qss())
-            self.btn_defaults.setCursor(Qt.PointingHandCursor)
+            self.btn_defaults = e_button("Сбросить к умолчанию")
             self.btn_defaults.clicked.connect(self.reset_defaults)
-            self.btn_save = QPushButton("Сохранить")
-            self.btn_save.setStyleSheet(button_qss(primary=True))
-            self.btn_save.setCursor(Qt.PointingHandCursor)
+            self.btn_save = e_button("Сохранить", primary=True)
             self.btn_save.setDefault(True)
             self.btn_save.clicked.connect(self.save)
-            self.btn_close = QPushButton("Закрыть")
-            self.btn_close.setStyleSheet(button_qss())
-            self.btn_close.setCursor(Qt.PointingHandCursor)
+            self.btn_close = e_button("Закрыть")
             self.btn_close.clicked.connect(self.reject)
             buttons.addWidget(self.btn_defaults)
             buttons.addStretch(1)
@@ -995,9 +1068,283 @@ def build_settings_dialog():
             layout.addLayout(buttons)
 
             self.load_values(self.cfg)
+            self._apply_e_rows()
             self.finished.connect(self._unregister)
             if auto_check:
                 QTimer.singleShot(0, self.check_updates)
+
+        #: сравнение способов перевода — блок сверху справки (t196)
+        TRANSLATE_COMPARE_TEXT = (
+            "Чем отличаются способы перевода\n\n"
+            "Яндекс (по ключу)      Бесплатный (без ключа)\n"
+            "качество: лучшее       ниже\n"
+            "ключ: нужен            не нужен\n"
+            "цена: ≈500 ₽/1 млн     бесплатно до ~5 000 симв./день\n"
+            "лимит приложения: 10/мин  тот же\n"
+            "скорость: быстро       обычно медленнее\n"
+            "при сбое: редко        под нагрузкой бывает недоступен\n\n"
+        )
+        #: подробная инструкция «где взять ключ перевода» (t195)
+        TRANSLATE_HELP_TEXT = (
+            "Ключ Yandex Translate — пошагово\n"
+            "────────────────────────────────────────────────\n"
+            "0. Что понадобится\n"
+            "   • аккаунт Яндекса;\n"
+            "   • карта (для активации платёжного аккаунта; снимается 1 ₽ и "
+            "возвращается);\n"
+            "   • 5–10 минут.\n\n"
+            "1. Войдите в Yandex Cloud\n"
+            "   Откройте https://console.yandex.cloud — войдите тем же "
+            "аккаунтом Яндекса.\n"
+            "   При первом входе примите условия.\n\n"
+            "2. Создайте платёжный аккаунт\n"
+            "   • Вверху справа: «Создать платёжный аккаунт» (или "
+            "«Активировать»).\n"
+            "   • Заполните данные, привяжите карту.\n"
+            "   • Без платёжного аккаунта Translate вернёт ошибку 403.\n"
+            "   • Новым аккаунтам обычно дают пробный грант на 60 дней — "
+            "перевода в него хватает надолго.\n\n"
+            "3. Создайте каталог (folder) — это ваш Folder ID\n"
+            "   • В верхней панели слева от имени аккаунта: «Каталог по "
+            "умолчанию» / «Создать каталог».\n"
+            "   • Имя: например, voidframe.\n"
+            "   • После создания каталог открыт; его ID — строка вида "
+            "b1gxxxxxxxxxx:\n"
+            "       – в адресной строке: console.yandex.cloud/folders/b1g…,\n"
+            "       – либо на плитке каталога «ID».\n"
+            "   • Скопируйте этот ID — он понадобится в приложении.\n\n"
+            "4. Создайте сервисный аккаунт\n"
+            "   • В каталоге: меню «Сервисные аккаунты» → «Создать сервисный "
+            "аккаунт».\n"
+            "   • Имя: translator.\n"
+            "   • На шаге «Назначение ролей» добавьте роль ai.translate.user "
+            "(на каталог — достаточно).\n"
+            "   • «Создать».\n\n"
+            "5. Создайте API-ключ\n"
+            "   • Откройте созданный сервисный аккаунт → блок «Ключи».\n"
+            "   • «Создать новый ключ» → «Создать API-ключ».\n"
+            "   • Описание: voidframe translate → «Создать».\n"
+            "   • Появится ключ вида AQVN… — скопируйте сразу: позже он не "
+            "показывается.\n"
+            "     (Если потеряли — удалите и создайте новый.)\n\n"
+            "6. Область действия ключа (важно!)\n"
+            "   В окне «Новый ключ» → «Область действия» выберите\n"
+            "   yc.ai.translate.execute — это разрешение на перевод текста.\n"
+            "   Если такого пункта нет, оставьте yc.ai.foundationModels.execute:\n"
+            "   он тоже покрывает Yandex Translate, но даёт больше прав.\n"
+            "   «Срок действия» можно оставить пустым (ключ бессрочный).\n"
+            "   И помните: ключу нужна роль ai.translate.user (шаг 4), иначе "
+            "будет 403.\n\n"
+            "7. Вставьте в приложение\n"
+            "   • Настройки → Прочее → «ПЕРЕВОД ЧАТА (ALT+T)».\n"
+            "   • «Ключ API перевода» → AQVN…\n"
+            "   • «Folder ID» → b1g… (из шага 3)\n"
+            "   • Нажмите «Проверить ключ» → ожидается «ключ работает».\n\n"
+            "8. Сколько стоит\n"
+            "   • Тариф ≈ 500 ₽ за 1 млн символов перевода.\n"
+            "   • Одно сообщение чата (~40 символов) — доли копейки.\n"
+            "   • Приложение шлёт не чаще 10 запросов в минуту и кэширует "
+            "переводы.\n"
+            "   • Если ключ не работает — проверьте: платёжный аккаунт "
+            "активен, роль ai.translate.user\n"
+            "     выдана, Folder ID совпадает с каталогом, где создан ключ.\n\n"
+            "Ссылки: console.yandex.cloud · cloud.yandex.ru/docs/translate/"
+        )
+        TRANSLATE_HELP_URL = "https://console.yandex.cloud"
+        TRANSLATE_DOCS_URL = "https://cloud.yandex.ru/docs/translate/"
+
+        def show_translate_help(self):
+            """t195: «Как получить ключ?» — тёмный диалог с прокруткой."""
+            dialog = QDialog(self)
+            dialog.setObjectName("settingsHelp")
+            dialog.setWindowTitle("Ключ Yandex Translate")
+            dialog.setMinimumSize(640, 560)
+            dialog.setStyleSheet(
+                qss() + self._panel_qss()
+                + f" QDialog#settingsHelp {{ background-color:{color('panel')}; }}")
+            lay = QVBoxLayout(dialog)
+            lay.setContentsMargins(16, 14, 16, 12)
+            lay.setSpacing(10)
+            title = QLabel("КЛЮЧ YANDEX TRANSLATE")
+            title.setFont(font(9))
+            title.setStyleSheet(theme.caps_header_qss() if theme is not None
+                                else f"color:{color('muted')};")
+            lay.addWidget(title)
+            steps = QLabel(self.TRANSLATE_COMPARE_TEXT + self.TRANSLATE_HELP_TEXT)
+            steps.setObjectName("settingsHelpSteps")
+            steps.setWordWrap(True)
+            steps.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            steps.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            steps.setFont(font(11))
+            steps.setStyleSheet(f"color:{color('text')};"
+                                " background:transparent;"
+                                " font-family:'Consolas', monospace;")
+            scroll = QScrollArea()
+            scroll.setObjectName("settingsHelpScroll")
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setWidget(steps)
+            lay.addWidget(scroll, 1)
+            footer = muted(
+                "Тариф ≈ 500 ₽ за 1 млн символов · новым аккаунтам Yandex "
+                "Cloud обычно дают пробный грант на 60 дней · приложение "
+                "шлёт не чаще 10 запросов в минуту")
+            footer.setObjectName("settingsHelpFooter")
+            lay.addWidget(footer)
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            self.btn_help_copy = e_button("Скопировать адрес")
+            self.btn_help_copy.clicked.connect(
+                lambda: self._copy_help_url(self.TRANSLATE_HELP_URL))
+            self.btn_help_docs = e_button("Документация")
+            self.btn_help_docs.clicked.connect(self._open_translate_docs)
+            self.btn_help_close = e_button("Закрыть")
+            self.btn_help_close.clicked.connect(dialog.accept)
+            for button in (self.btn_help_copy, self.btn_help_docs,
+                           self.btn_help_close):
+                row.addWidget(button)
+            row.addStretch(1)
+            lay.addLayout(row)
+            self.help_dialog = dialog
+            self.help_scroll = scroll
+            self.help_text = steps
+            dialog.show()
+            return dialog
+
+        def _open_translate_docs(self):
+            """t195: «Документация» — открыть справку Yandex Cloud."""
+            import webbrowser
+            try:
+                ui_url.open_url(self.TRANSLATE_DOCS_URL)
+                return True
+            except Exception:
+                return False
+
+        def clear_chat_history(self):
+            """t188: «Очистить историю чата» — удалить записи всех ников."""
+            import chat_history as history_mod
+            question = "Удалить историю переписки всех ников?"
+            answer = False
+            if callable(getattr(self, "confirm_fn", None)):
+                answer = bool(self.confirm_fn(question))
+            else:
+                try:
+                    import warframe as wf_module
+                    answer = bool(wf_module.themed_confirm(
+                        self, question, title="История чата",
+                        confirm_text="Очистить", danger=True))
+                except Exception:
+                    answer = False
+            if not answer:
+                return False
+            cfg = dict(self.cfg or {})
+            cfg.setdefault("data_dir", self.data_dir)
+            history_mod.ChatHistory(cfg).clear(None)
+            self._set_status("история чата очищена")
+            return True
+
+        def _provider_value(self):
+            """t196: выбранный способ перевода (``auto``/``yandex``/``free``)."""
+            for key, button in self.provider_buttons.items():
+                if button.isChecked():
+                    return key
+            return "auto"
+
+        def _update_provider_state(self, *_args):
+            """t196: при «Бесплатном» поля ключа/Folder ID приглушены."""
+            free = self.radio_provider_free.isChecked()
+            hint = "понадобится, если вернётесь на Яндекс"
+            tips = (("edit_translate_key",
+                     "Ключ Yandex Cloud Translate (маскируется, как токен)"),
+                    ("edit_translate_folder", "folderId каталога Yandex Cloud"),
+                    ("btn_translate_check",
+                     "Запрос translate(\"hello\") к Yandex — тратит 1 запрос "
+                     "из лимита 10/мин"))
+            for name, default_tip in tips:
+                widget = getattr(self, name, None)
+                if widget is None:
+                    continue
+                widget.setEnabled(not free)
+                widget.setToolTip(hint if free else default_tip)
+
+        def _copy_help_url(self, url):
+            """Скопировать адрес в буфер обмена (для инструкции)."""
+            try:
+                from PyQt5.QtWidgets import QApplication
+                QApplication.clipboard().setText(str(url))
+                return True
+            except Exception:
+                return False
+
+        def _scroll_page(self, page):
+            """t196: вкладка в прокрутке — длинные страницы не сжимают строки."""
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QFrame.NoFrame)
+            area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            area.setWidget(page)
+            if theme is not None:
+                area.setStyleSheet(theme.scroll_qss())
+            return area
+
+        def _apply_e_rows(self):
+            """t193: строки настроек 28 px — подпись слева 11 px, контрол справа."""
+            wide = (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox)
+            for form in self.findChildren(QFormLayout):
+                form.setVerticalSpacing(0)
+                form.setHorizontalSpacing(8)
+                for row in range(form.rowCount()):
+                    # одиночный виджет в строке — на всю ширину, иначе он
+                    # попадает в узкую колонку подписей и текст обрезается
+                    label_item = form.itemAt(row, QFormLayout.LabelRole)
+                    field_item = form.itemAt(row, QFormLayout.FieldRole)
+                    if label_item is None and field_item is not None:
+                        widget = field_item.widget()
+                        if widget is not None:
+                            try:
+                                form.setWidget(row, QFormLayout.SpanningRole,
+                                               widget)
+                            except Exception:
+                                pass
+                    for role in (QFormLayout.LabelRole, QFormLayout.FieldRole):
+                        item = form.itemAt(row, role)
+                        widget = item.widget() if item is not None else None
+                        if widget is None:
+                            continue
+                        if isinstance(widget, QPushButton) and widget.height() == 24:
+                            continue          # кнопки 24 px (t193) не растягиваем
+                        widget.setFixedHeight(28)
+                        if isinstance(widget, QLabel):
+                            widget.setWordWrap(False)
+                            widget.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                        elif isinstance(widget, wide):
+                            widget.setMaximumWidth(300)
+
+        def _panel_qss(self):
+            """t193: тёмный фон диалога, тёмные поля/спины, скроллбар."""
+            panel = color("panel")
+            border = color("border")
+            text = color("text")
+            card = color("card")
+            scroll = theme.scroll_qss() if theme is not None else ""
+            return (f"QDialog#settingsDialog {{ background-color:{panel}; }}"
+                    f" QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{"
+                    f" background-color:{card}; color:{text};"
+                    f" border:1px solid {border}; border-radius:0px;"
+                    " padding:0px 6px; font-family:'Consolas', monospace;"
+                    " font-size:11px; }"
+                    f" QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus,"
+                    f" QComboBox:focus {{ border-color:{color('accent')}; }}"
+                    f" QComboBox QAbstractItemView {{ background:{panel};"
+                    f" color:{text}; border:1px solid {border}; }}"
+                    f" QTabWidget::pane {{ background:{panel}; }}"
+                    f" QScrollArea {{ background:transparent; border:none; }}"
+                    f" QScrollArea > QWidget > QWidget {{ background:transparent; }}"
+                    f" QLabel#settingsGroup {{ background:transparent;"
+                    f" border:none; letter-spacing:1px; }}"
+                    f" QFrame#settingsDivider {{ background:{border}; }}"
+                    " " + scroll)
 
         def _unregister(self, _result=0):
             try:
@@ -1016,6 +1363,7 @@ def build_settings_dialog():
                 "Клик по полю — нажмите комбинацию (Ctrl/Alt/Shift + клавиша). "
                 "Esc отменяет захват, Backspace/Delete очищает. "
                 "Пустые поля и дубликаты не сохраняются."))
+            outer.addWidget(group_header("Горячие клавиши"))
             form = QFormLayout()
             form.setSpacing(8)
             for action, label, default in HOTKEY_ACTIONS:
@@ -1034,6 +1382,7 @@ def build_settings_dialog():
             outer = QVBoxLayout(page)
             outer.setContentsMargins(12, 10, 12, 10)
             outer.setSpacing(8)
+            outer.addWidget(group_header("Уведомления"))
             self.chk_notify_enabled = QCheckBox("Показывать уведомления")
             self.chk_notify_sound = QCheckBox("Звук уведомлений")
             self.chk_notify_sound.setToolTip(
@@ -1049,12 +1398,18 @@ def build_settings_dialog():
             outer.addWidget(muted(
                 "Звук уведомлений — мастер: выключено = полная тишина "
                 "(тосты, чат, лут, трей)."))
-            outer.addWidget(muted("Типы событий:"))
+            outer.addWidget(group_header("Типы событий"))
             for kind, label in NOTIFY_EVENT_OPTIONS:
                 box = QCheckBox(label)
                 box.setFont(font(11))
                 self.event_boxes[kind] = box
                 outer.addWidget(box)
+            # t191: «OCR готов» — переключателя нет, звук отключить нельзя
+            self.lbl_ocr_ready_note = muted(
+                "OCR готов (после прогрева) — звук нельзя отключить: "
+                "уведомление и сигнал показываются один раз за запуск.")
+            outer.addWidget(self.lbl_ocr_ready_note)
+            outer.addWidget(group_header("Тосты и цвета"))
             form = QFormLayout()
             form.setSpacing(8)
             self.spin_price_pct = QSpinBox()
@@ -1157,6 +1512,7 @@ def build_settings_dialog():
             outer = QVBoxLayout(page)
             outer.setContentsMargins(12, 10, 12, 10)
             outer.setSpacing(8)
+            outer.addWidget(group_header("Отображение"))
             form = QFormLayout()
             form.setSpacing(8)
             self.cmb_layout = QComboBox()
@@ -1167,9 +1523,9 @@ def build_settings_dialog():
             self.chk_plates_click = QCheckBox(
                 "Плашки не мешают мыши (click-through)")
             self.chk_plates_click.setFont(font(11))
-            form.addRow(QLabel(""), self.chk_plates_click)
-            self.btn_reset_boxes = QPushButton("Сбросить расположение")
-            self.btn_reset_boxes.setStyleSheet(button_qss())
+            form.addRow(self.chk_plates_click)
+            self.btn_reset_boxes = e_button("Сбросить расположение")
+            self.btn_reset_boxes.setFixedWidth(200)
             self.btn_reset_boxes.clicked.connect(self.reset_plate_boxes)
             form.addRow(QLabel(""), self.btn_reset_boxes)
             self.spin_region_ttl = QDoubleSpinBox()
@@ -1179,7 +1535,7 @@ def build_settings_dialog():
             self.spin_region_ttl.setSuffix(" с")
             self.spin_region_ttl.setSpecialValueText("не скрывать")
             form.addRow(QLabel("Карточка Alt+D: скрывать через"),
-                        self.spin_region_ttl)
+                        num_field(self.spin_region_ttl, "с"))
             self.spin_overlay_ttl = QDoubleSpinBox()
             self.spin_overlay_ttl.setRange(0.0, 30.0)
             self.spin_overlay_ttl.setSingleStep(1.0)
@@ -1188,19 +1544,28 @@ def build_settings_dialog():
             self.spin_overlay_ttl.setSpecialValueText("не скрывать")
             self.spin_overlay_ttl.setToolTip("0 — не скрывать")
             form.addRow(QLabel("Плашки наград: скрывать через"),
-                        self.spin_overlay_ttl)
+                        num_field(self.spin_overlay_ttl, "с"))
+            # t199: дисковый кэш цен — сколько минут считать цену свежей
+            self.spin_price_cache_ttl = QSpinBox()
+            self.spin_price_cache_ttl.setRange(1, 60)
+            self.spin_price_cache_ttl.setToolTip(
+                "Цены показываются с пометкой «~» из кэша, пока им меньше "
+                "этого времени")
+            form.addRow(QLabel("Кэш цен (свежесть)"),
+                        num_field(self.spin_price_cache_ttl, "мин"))
             self.chk_auto_detect = QCheckBox(
                 "Автоматически показывать цены при открытии реликвии")
             self.chk_auto_detect.setToolTip(
                 "Alt+Q всегда пересканирует вручную")
             self.chk_auto_detect.setFont(font(11))
-            form.addRow(QLabel(""), self.chk_auto_detect)
+            form.addRow(self.chk_auto_detect)
             self.spin_font_scale = QDoubleSpinBox()
             self.spin_font_scale.setRange(0.8, 1.6)
             self.spin_font_scale.setSingleStep(0.05)
             self.spin_font_scale.setDecimals(2)
             self.spin_font_scale.setFont(font(11))
-            form.addRow(QLabel("Масштаб шрифта"), self.spin_font_scale)
+            form.addRow(QLabel("Масштаб шрифта"),
+                        num_field(self.spin_font_scale, "×"))
             self.spin_opacity = QDoubleSpinBox()
             self.spin_opacity.setRange(0.4, 1.0)
             self.spin_opacity.setSingleStep(0.05)
@@ -1209,24 +1574,24 @@ def build_settings_dialog():
             form.addRow(QLabel("Прозрачность фона"), self.spin_opacity)
             self.chk_show_summary = QCheckBox("Показывать блок «Итого»")
             self.chk_show_summary.setFont(font(11))
-            form.addRow(QLabel(""), self.chk_show_summary)
+            form.addRow(self.chk_show_summary)
             self.chk_show_item_icons = QCheckBox("Иконки предметов")
             self.chk_show_item_icons.setFont(font(11))
             self.chk_show_item_icons.setToolTip(
                 "Иконки WFCD в плашках, «Дропе» и «Маркете»; загрузка в фоне")
-            form.addRow(QLabel(""), self.chk_show_item_icons)
+            form.addRow(self.chk_show_item_icons)
             self.chk_show_set_price = QCheckBox("Показывать цену комплекта")
             self.chk_show_set_price.setFont(font(11))
             self.chk_show_set_price.setToolTip(
                 "На плашках частей — мелкая строка «компл. N p»")
-            form.addRow(QLabel(""), self.chk_show_set_price)
+            form.addRow(self.chk_show_set_price)
             # 1.0.0: цены картинками платины/дукатов вместо «p»/«дк»
             self.chk_currency_icons = QCheckBox("Показывать иконки валют")
             self.chk_currency_icons.setFont(font(11))
             self.chk_currency_icons.setToolTip(
                 "Платина и дукаты — картинкой в плашках, «Дропе» и "
                 "«Маркете». Выключено — старые «p» / «дк»")
-            form.addRow(QLabel(""), self.chk_currency_icons)
+            form.addRow(self.chk_currency_icons)
 
             def currency_combo(current, choices):
                 combo = QComboBox()
@@ -1339,6 +1704,7 @@ def build_settings_dialog():
             outer = QVBoxLayout(page)
             outer.setContentsMargins(12, 10, 12, 10)
             outer.setSpacing(8)
+            outer.addWidget(group_header("Обновления"))
             self.lbl_update_current = QLabel(
                 f"Текущая версия: {self.version or wf_version_fallback()}")
             self.lbl_update_current.setFont(font(11, True))
@@ -1425,11 +1791,8 @@ def build_settings_dialog():
             outer.setContentsMargins(12, 10, 12, 10)
             outer.setSpacing(8)
             # ── 1.0.0: пакет иконок предметов ──────────────────────────
-            icons_title = QLabel("<b>Иконки предметов</b>")
-            icons_title.setFont(font(12, True))
-            icons_title.setStyleSheet(
-                f"color:{color('text')}; background:transparent;")
-            outer.addWidget(icons_title)
+            self.icons_group = group_header("Иконки предметов")
+            outer.addWidget(self.icons_group)
             self.lbl_icons_state = QLabel("состояние: —")
             self.lbl_icons_state.setFont(font(10))
             self.lbl_icons_state.setStyleSheet(
@@ -1503,6 +1866,119 @@ def build_settings_dialog():
                 "сети. Отмена не теряет скачанное: загрузка продолжится при "
                 "следующем запуске. Устаревшие файлы удаляются автоматически."))
             self.refresh_icons_status()
+            # ── t184: перевод чата (Alt+T) ─────────────────────────────
+            self.translate_group = group_header("Перевод чата (Alt+T)")
+            outer.addWidget(self.translate_group)
+            # t196: способ перевода — радиогруппа с пояснениями
+            self.lbl_translate_method = muted("Способ перевода")
+            outer.addWidget(self.lbl_translate_method)
+            self.radio_provider_yandex = QRadioButton("Яндекс (по ключу)")
+            self.radio_provider_free = QRadioButton("Бесплатный (без ключа)")
+            self.radio_provider_auto = QRadioButton(
+                "Автоматически: Яндекс, если ключ указан, иначе — бесплатный")
+            self.provider_buttons = {
+                "yandex": self.radio_provider_yandex,
+                "free": self.radio_provider_free,
+                "auto": self.radio_provider_auto,
+            }
+            provider_hints = {
+                "yandex": ("Лучшее качество. Нужен ключ и Folder ID. Тариф "
+                           "≈ 500 ₽ за 1 млн символов, новым аккаунтам дают "
+                           "пробный грант на 60 дней."),
+                "free": ("Работает сразу, регистрация не нужна. До ~5 000 "
+                         "символов в день на IP, качество ниже, иногда "
+                         "медленнее или недоступен под нагрузкой."),
+                "auto": ("Тот же выбор, но без ручного переключения: ключ "
+                         "есть — Яндекс, нет — бесплатный."),
+            }
+            for key in ("yandex", "free", "auto"):
+                button = self.provider_buttons[key]
+                button.setFont(font(11))
+                button.setStyleSheet(
+                    f"QRadioButton {{ color:{color('text')}; padding-left:18px;"
+                    " spacing:6px; }"
+                    f" QRadioButton::indicator {{ width:12px; height:12px;"
+                    f" border-radius:6px; border:1px solid {color('border')};"
+                    f" background:{color('panel')}; }}"
+                    f" QRadioButton::indicator:checked {{"
+                    f" background:{color('accent')};"
+                    f" border-color:{color('accent')}; }}")
+                outer.addWidget(button)
+                outer.addWidget(muted(provider_hints[key]))
+                button.toggled.connect(self._update_provider_state)
+            self.lbl_provider_note = muted(
+                "текст уходит в выбранный сервис перевода")
+            outer.addWidget(self.lbl_provider_note)
+            translate_form = QFormLayout()
+            translate_form.setSpacing(8)
+            self.edit_translate_key = QLineEdit()
+            self.edit_translate_key.setEchoMode(QLineEdit.Password)
+            self.edit_translate_key.setFont(font(11))
+            self.edit_translate_key.setPlaceholderText("Api-Key сервисного аккаунта")
+            self.edit_translate_key.setToolTip(
+                "Ключ Yandex Cloud Translate (маскируется, как токен)")
+            translate_form.addRow(QLabel("Ключ API перевода"),
+                                  self.edit_translate_key)
+            self.edit_translate_folder = QLineEdit()
+            self.edit_translate_folder.setFont(font(11))
+            self.edit_translate_folder.setPlaceholderText("folderId каталога Yandex Cloud")
+            translate_form.addRow(QLabel("Folder ID"),
+                                  self.edit_translate_folder)
+            outer.addLayout(translate_form)
+            translate_row = QHBoxLayout()
+            translate_row.setSpacing(8)
+            self.btn_translate_check = QPushButton("Проверить ключ")
+            self.btn_translate_check.setStyleSheet(button_qss(small=True)
+                                                   + " border-radius:2px;")
+            self.btn_translate_check.setFixedHeight(24)
+            self.btn_translate_check.setCursor(Qt.PointingHandCursor)
+            self.btn_translate_help = e_button("Как получить ключ?")
+            self.btn_translate_help.setToolTip(
+                "Пошаговая инструкция: где взять API-ключ и Folder ID")
+            self.btn_translate_help.clicked.connect(self.show_translate_help)
+            self.btn_translate_check.setToolTip(
+                "Запрос translate(\"hello\") к Yandex — тратит 1 запрос "
+                "из лимита 10/мин")
+            self.btn_translate_check.clicked.connect(self.check_translate)
+            translate_row.addWidget(self.btn_translate_check)
+            translate_row.addWidget(self.btn_translate_help)
+            self.lbl_translate_status = QLabel("")
+            self.lbl_translate_status.setFont(font(10))
+            self.lbl_translate_status.setStyleSheet(
+                f"color:{color('muted')}; background:transparent;")
+            self.lbl_translate_status.setWordWrap(True)
+            translate_row.addWidget(self.lbl_translate_status, 1)
+            outer.addLayout(translate_row)
+            outer.addWidget(muted(
+                "Alt+T в чате переводит сообщение на русский (Yandex Cloud "
+                "Translate): кэш до 500 переводов, не больше 10 запросов в "
+                "минуту, без ключа перевод не выполняется. Авто-перевода нет."))
+            # ── t188: история переписки по нику ────────────────────────
+            self.history_group = group_header("История чата")
+            outer.addWidget(self.history_group)
+            self.chk_chat_history = QCheckBox(
+                "Хранить историю переписки по нику (клик по нику в чате)")
+            self.chk_chat_history.setFont(font(11))
+            outer.addWidget(self.chk_chat_history)
+            history_form = QFormLayout()
+            history_form.setSpacing(8)
+            self.spin_chat_history_limit = QSpinBox()
+            self.spin_chat_history_limit.setRange(20, 200)
+            self.spin_chat_history_limit.setSingleStep(10)
+            history_form.addRow(QLabel("Сообщений на ник"),
+                                num_field(self.spin_chat_history_limit, "шт"))
+            self.spin_chat_ttl = QDoubleSpinBox()
+            self.spin_chat_ttl.setRange(0.0, 30.0)
+            self.spin_chat_ttl.setSingleStep(1.0)
+            self.spin_chat_ttl.setDecimals(1)
+            history_form.addRow(QLabel("Перевод исчезает через"),
+                                num_field(self.spin_chat_ttl, "с"))
+            outer.addLayout(history_form)
+            outer.addWidget(muted(
+                "0 — перевод не скрывать. Всего хранится до 50 ников; файл "
+                "chat_history.json лежит в папке данных."))
+            self.data_group = group_header("Данные")
+            outer.addWidget(self.data_group)
             self.btn_open_data = QPushButton("Открыть папку данных")
             self.btn_open_data.setStyleSheet(button_qss())
             self.btn_open_data.setCursor(Qt.PointingHandCursor)
@@ -1519,6 +1995,11 @@ def build_settings_dialog():
             self.btn_open_diag.setCursor(Qt.PointingHandCursor)
             self.btn_open_diag.clicked.connect(self.open_diagnostics)
             row.addWidget(self.btn_open_diag)
+            self.btn_chat_clear = e_button("Очистить историю чата")
+            self.btn_chat_clear.setToolTip(
+                "Удалить chat_history.json (историю переписки по никам)")
+            self.btn_chat_clear.clicked.connect(self.clear_chat_history)
+            row.addWidget(self.btn_chat_clear)
             row.addStretch(1)
             outer.addLayout(row)
             self.lbl_data_dir = QLabel(str(self.data_dir or "—"))
@@ -1594,6 +2075,8 @@ def build_settings_dialog():
                 float(values.get("region_card_ttl", 5.0) or 0))
             self.spin_overlay_ttl.setValue(
                 float(values.get("overlay_ttl", 5.0) or 0))
+            self.spin_price_cache_ttl.setValue(
+                int(values.get("price_cache_ttl_min", 10) or 10))
             self.chk_auto_detect.setChecked(
                 bool(values.get("auto_detect", True)))
             layout_value = str(values.get("overlay_layout") or "bottom")
@@ -1631,6 +2114,26 @@ def build_settings_dialog():
                 self.refresh_icons_status()
             except Exception:
                 pass
+            # t184/t196: перевод чата и способ перевода
+            self.edit_translate_key.setText(
+                str(values.get("translate_api_key") or ""))
+            self.edit_translate_folder.setText(
+                str(values.get("translate_folder_id") or ""))
+            provider = str(values.get("translate_provider") or "auto").lower()
+            button = self.provider_buttons.get(provider,
+                                               self.radio_provider_auto)
+            button.setChecked(True)
+            self._update_provider_state()
+            # t188: история переписки
+            self.chk_chat_history.setChecked(
+                bool(values.get("chat_history_enabled", True)))
+            self.spin_chat_history_limit.setValue(
+                int(values.get("chat_history_limit", 100) or 100))
+            try:
+                self.spin_chat_ttl.setValue(
+                    float(values.get("chat_translate_ttl", 6.0) or 0))
+            except (TypeError, ValueError):
+                self.spin_chat_ttl.setValue(6.0)
             for combo, key in (
                     (self.cmb_currency_platinum, "currency_platinum_color"),
                     (self.cmb_currency_ducats, "currency_ducats_color")):
@@ -1694,6 +2197,7 @@ def build_settings_dialog():
                     self.spin_region_ttl.value()), 1),
                 "overlay_ttl": round(float(
                     self.spin_overlay_ttl.value()), 1),
+                "price_cache_ttl_min": int(self.spin_price_cache_ttl.value()),
                 "auto_detect": bool(self.chk_auto_detect.isChecked()),
                 "font_scale": round(float(self.spin_font_scale.value()), 2),
                 "overlay_opacity": round(float(self.spin_opacity.value()), 2),
@@ -1704,6 +2208,12 @@ def build_settings_dialog():
                 "show_summary": self.chk_show_summary.isChecked(),
                 "show_item_icons": self.chk_show_item_icons.isChecked(),
                 "icons_update_days": int(self.spin_icons_update_days.value()),
+                "translate_api_key": self.edit_translate_key.text().strip(),
+                "translate_folder_id": self.edit_translate_folder.text().strip(),
+                "translate_provider": self._provider_value(),
+                "chat_history_enabled": self.chk_chat_history.isChecked(),
+                "chat_history_limit": int(self.spin_chat_history_limit.value()),
+                "chat_translate_ttl": float(self.spin_chat_ttl.value()),
                 "game_theme": str(self.cmb_game_theme.currentData() or "auto"),
                 "overlay_show_set_price": self.chk_show_set_price.isChecked(),
                 "currency_icons": self.chk_currency_icons.isChecked(),
@@ -1831,6 +2341,58 @@ def build_settings_dialog():
                 self._set_status("Перезапуск недоступен в этой сборке.",
                                  warn=True)
             return False
+
+        def check_translate(self):
+            """«Проверить ключ»: перевод «hello» в фоне → статус в «Прочем»."""
+            cfg = dict(self.cfg)
+            cfg["translate_api_key"] = self.edit_translate_key.text().strip()
+            cfg["translate_folder_id"] = self.edit_translate_folder.text().strip()
+            cfg["translate_provider"] = self._provider_value()
+            if not cfg["translate_api_key"]:
+                self._set_translate_status("вставьте ключ API", warn=True)
+                return False
+            if self._translate_busy:
+                return False
+            self._translate_busy = True
+            self.btn_translate_check.setEnabled(False)
+            self._set_translate_status("проверяю ключ…")
+
+            def worker():
+                result = {"error": "переводчик недоступен"}
+                try:
+                    import translator
+                    text, info = translator.translate("hello", cfg=cfg)
+                    result = dict(info or {})
+                    result["text"] = text
+                except Exception as exc:
+                    result = {"error": str(exc)}
+                try:
+                    self.translate_checked.emit(dict(result))
+                except RuntimeError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True,
+                             name="wf-settings-translate").start()
+            return True
+
+        def _set_translate_status(self, text, warn=False):
+            self.lbl_translate_status.setText(str(text))
+            self.lbl_translate_status.setStyleSheet(
+                f"color:{color('warning' if warn else 'success')};"
+                " background:transparent;")
+
+        def _on_translate_checked(self, result):
+            self._translate_busy = False
+            self.btn_translate_check.setEnabled(True)
+            self.translate_info = dict(result or {})
+            info = self.translate_info
+            if info.get("error"):
+                self._set_translate_status(f"ошибка: {info['error']}", warn=True)
+                self._set_status(f"Перевод: ошибка {info['error']}", warn=True)
+                return
+            self._set_translate_status(
+                f"ключ работает · «hello» → {info.get('text') or '—'}")
+            self._set_status("Перевод: ключ работает")
 
         def check_updates(self):
             """«Проверить обновление»: фоновая проверка, окно не блокируется."""
@@ -1982,7 +2544,7 @@ def build_settings_dialog():
             if callable(self.restart_fn):
                 try:
                     self.restart_fn()
-                except Exception as exc:
+                except Exception:
                     self.lbl_update_status.setText(
                         "Обновление установлено, но перезапуск не удался — "
                         "запустите приложение вручную "
