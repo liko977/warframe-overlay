@@ -1,14 +1,14 @@
 {
-  "version": "1.2.2",
-  "notes": "Alt+R принимает совсем маленькие области: одно слово или одна строка чата. Мелкие выделения автоматически увеличиваются перед распознаванием — текст читается точнее.",
-  "updated_at": "2026-11-27T20:03:43Z",
+  "version": "1.2.3",
+  "notes": "Alt+F вместо Alt+R — перевод выделенной области. После простоя OCR загружается заново по первому нажатию: Alt+D и Alt+F больше не зависают на «OCR готовится». Выделение не теряется: приложение само дожидается OCR и распознаёт выбранную область. Иконки предметов обновляются без перезапуска после перекачки пака.",
+  "updated_at": "2026-11-27T21:54:52Z",
   "min_launcher": "0.4.0",
   "files": [
     {
       "path": "branding.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/branding.py",
-      "sha256": "e375efbcd2272bbc1f9a2afc7a46902e9575e4e6ef36b548cfe7ee9613c8bd57",
-      "size": 2946
+      "sha256": "bc3b261b0a1082c61000326754ecaf065c95be078a650e1dcf0f9abb2632d0ec",
+      "size": 2871
     },
     {
       "path": "card_text.py",
@@ -19,8 +19,8 @@
     {
       "path": "changelog.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/changelog.py",
-      "sha256": "8edfd4b9f18978a845437358e5134a22203a3b206f906f04015c5b7fead5ac06",
-      "size": 20973
+      "sha256": "f62dc702e19e0f2e749c896f54af21c02fc211e0cb21825159f6b3cb334189f2",
+      "size": 21126
     },
     {
       "path": "currency_icons.py",
@@ -73,8 +73,8 @@
     {
       "path": "item_icons.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/item_icons.py",
-      "sha256": "faf8706f5e3e5f1f61b3bb8b32f849be66a1212127a6af83135430bc3f38e1c0",
-      "size": 49171
+      "sha256": "26876856592e6a7077529066834c1de92e1900fefce4dc86fda7f938385e41d4",
+      "size": 49532
     },
     {
       "path": "log_parser.py",
@@ -137,6 +137,12 @@
       "size": 8466
     },
     {
+      "path": "ocr_wait.py",
+      "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/ocr_wait.py",
+      "sha256": "1b0cf64d8687ee3f82bf02e35e5e7ada0d0229fe19cf9c4093ad95f2fdbb666c",
+      "size": 2986
+    },
+    {
       "path": "overlay_window.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/overlay_window.py",
       "sha256": "c17a98524b99ba2a41454c165fce747b7d7a5eba557910deaab341425c24d227",
@@ -151,14 +157,14 @@
     {
       "path": "region_price.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/region_price.py",
-      "sha256": "a2c2a11bbdcebac19b1ee598c10cb9c7f2a94defa7d1e6a81dce8c0c03c88597",
-      "size": 20699
+      "sha256": "beec1358a7683035dcf103986106c1efe9a802a0a08e45b7bb0bbc094c7ccb97",
+      "size": 22777
     },
     {
       "path": "region_translate.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/region_translate.py",
-      "sha256": "c1a9bdcebe0f2ba8a574b6324bf38e3d910eebd43d1745b574e06e0414be8aa4",
-      "size": 10851
+      "sha256": "c1cc82a1cc30b636a4175918e5db5e71e07661269b7c4ac0a751c18bff5ae73e",
+      "size": 13293
     },
     {
       "path": "relic_pool.py",
@@ -211,8 +217,8 @@
     {
       "path": "settings_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/settings_ui.py",
-      "sha256": "d552056c11efe4ab3c23045f83565d3d02654a0da7e2a599f0c00980ff17cbfb",
-      "size": 149448
+      "sha256": "e93182a29a784577be24bd382ee457cc567e3e271a717ed01fa61b902f637416",
+      "size": 150511
     },
     {
       "path": "single_instance.py",
@@ -223,19 +229,19 @@
     {
       "path": "translate_history.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/translate_history.py",
-      "sha256": "133eda68f2ab29c565291660589067679004839d8a22e0602babd44968150370",
+      "sha256": "95ce117c8f8f06644a7d063e016638c698720163b03773e93d0d3bf79be12870",
       "size": 3811
     },
     {
       "path": "translate_ui.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/translate_ui.py",
-      "sha256": "38039e74b292bb507a09df8224607b52a6cf06698cdbdcda067a0a37874efe4b",
+      "sha256": "a6f2d74db67f5d96d43b6a4a5516b8b72ce3b319671a6321a085135a1b07fb2f",
       "size": 12948
     },
     {
       "path": "translator.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/translator.py",
-      "sha256": "322a56176f281be4de0ce037387e808b71b5014ca24c988d1a13776d1542c57a",
+      "sha256": "363a9051f348ca4ca32b62e6fd57bfb57f23f992fe9b33086d85b6d3a55793e9",
       "size": 10229
     },
     {
@@ -271,8 +277,8 @@
     {
       "path": "warframe.py",
       "url": "https://raw.githubusercontent.com/liko977/warframe-overlay/main/ru/code/warframe.py",
-      "sha256": "281f1d87b7b69e39c1509fa9db7b7819cc9b75e750049ee70b38eb8ce4aa0966",
-      "size": 497610
+      "sha256": "7ecea2df585852e0976a728f0eab740956d0d020b02415011921b3f25fe34bad",
+      "size": 499536
     }
   ]
 }
