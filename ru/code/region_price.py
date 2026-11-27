@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """Alt+D: цена по выделенной области + перетаскиваемая карточка (t158)."""
 import os
-import time
 
 from PyQt5.QtCore import Qt, QPoint, QRect, QSize, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QPainter, QPen
+from PyQt5.QtGui import QColor, QPainter, QPen
 from PyQt5.QtWidgets import (QApplication, QCheckBox, QFrame, QHBoxLayout,
                              QLabel, QPushButton, QSpinBox, QVBoxLayout,
                              QWidget)
