@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Переводчик текста (Alt+R): Yandex Cloud Translate v2 / MyMemory + кэш.
+"""Переводчик текста (Alt+F): Yandex Cloud Translate v2 / MyMemory + кэш.
 
 Только перевод сообщений чата по запросу — никакого авто-перевода и никаких
 переводов интерфейса. HTTP — тот же ``requests``, что и в ``market_client``.
