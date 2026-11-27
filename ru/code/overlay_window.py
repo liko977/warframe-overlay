@@ -41,7 +41,6 @@
 извне (см. ``build_overlay_window``), поэтому его легко тестировать.
 """
 
-import time
 
 try:                      # модуль всегда лежит рядом, в сборке — hiddenimports
     import login_mode
@@ -107,8 +106,7 @@ TOKEN_CHIP_TOOLTIP = {
 def build_overlay_window():
     """Фабрика класса единого окна (PyQt5 импортируется лениво)."""
     from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
-    from PyQt5.QtGui import (QColor, QFont, QGuiApplication, QKeySequence,
-                             QPainter)
+    from PyQt5.QtGui import (QColor, QFont, QGuiApplication, QKeySequence)
     from PyQt5.QtWidgets import (QAbstractButton, QAbstractSlider,
                                  QAbstractSpinBox, QButtonGroup, QComboBox,
                                  QDialog, QFrame, QHBoxLayout, QLabel,
@@ -286,7 +284,7 @@ def build_overlay_window():
                      status_providers=None, refresh_actions=None,
                      token_factory=None, save_values=None,
                      market_client=None, on_open=None, on_close=None,
-                     hotkey_aliases=True, auth_factory=None,
+                     hotkey_aliases=True,
                      drops_widget=None, on_settings=None,
                      notifications_widget=None, chat_widget=None,
                      on_status_set=None, on_status_auto=None,
@@ -315,9 +313,7 @@ def build_overlay_window():
 
             self.market_client = market_client
             self.token_factory = token_factory
-            # auth_factory(parent) -> QDialog — окно входа через браузер
             # (market_auth.build_auth_dialog); None — прежняя ручная вставка.
-            self.auth_factory = auth_factory
             self.save_values = save_values or (lambda mapping: True)
             self.on_open = on_open
             self.on_close = on_close
@@ -350,13 +346,6 @@ def build_overlay_window():
             self._grip = None
             self._geometry_restored = False
             # ── режим входа на warframe.market (браузер не перекрываем) ──
-            self._login_mode = False
-            self._login_snapshot = None
-            self._login_was_visible = False
-            self._login_tab = 0
-            self._login_geometry = None
-            self._login_topmost = True
-            #: открытое окно входа (браузерный вход не использует exec_)
             self._login_dialog = None
             # ── чип токена: реальная проверка GET /v2/me (BUG-2) ────────
             self._token_state = TOKEN_STATE_NONE
@@ -1116,7 +1105,6 @@ def build_overlay_window():
             mapping = mapping if isinstance(mapping, dict) else {}
             hide_key = str(mapping.get("hide") or "").upper()
             window_key = str(mapping.get("window") or "").upper()
-            scan_key = str(mapping.get("scan") or "").upper()
             if hide_key:
                 self.btn_close.setToolTip(
                     f"Закрыть и вернуть фокус игре ({hide_key})")
@@ -1163,115 +1151,6 @@ def build_overlay_window():
                     self.on_open()
                 except Exception:
                     pass
-
-        # ── режим входа на warframe.market ────────────────────────────
-        def enter_login_mode(self, keep=()):
-            """Спрятать окно (и все окна приложения) на время входа.
-
-            Пользователь входит на сайт в настоящем браузере, поэтому **ни
-            одно** окно оверлея не должно его перекрывать. Прячем все окна
-            приложения (включая диалог входа, плашки, «Итого», старые окна) и
-            снимаем с них ``WindowStaysOnTopHint``; порядок для каждого окна:
-            ``hide()`` → флаг → (при возврате) флаг → ``show()``.
-
-            Диалог входа и пилюля «Отменить» передаются в ``keep`` — их
-            трогать нельзя: диалог прячет себя сам, а пилюля остаётся
-            единственным видимым элементом приложения (она topmost намеренно,
-            чтобы «Отменить» была доступна даже в полноэкранном браузере).
-
-            :return: ``True`` — режим включён (повторный вызов безопасен).
-            """
-            if self._login_mode:
-                return False
-            self._login_was_visible = bool(self.isVisible())
-            self._login_tab = int(self._active_tab)
-            self._login_topmost = _has_topmost(self)
-            self._login_mode = True
-            try:
-                self._status_timer.stop()
-            except Exception:
-                pass
-            if self._mode != "normal":
-                # из max/fullscreen возвращаемся в normal, иначе после входа
-                # окно вернулось бы развёрнутым «поверх всего»
-                try:
-                    self._leave_special_mode()
-                except Exception:
-                    pass
-            try:
-                self._login_geometry = QRect(self._normal_geometry())
-            except Exception:
-                self._login_geometry = None
-            snapshot = []
-            if login_mode is not None:
-                try:
-                    snapshot = login_mode.hide_app_windows(
-                        keep=(self,) + tuple(w for w in (keep or ())
-                                             if w is not None))
-                except Exception:
-                    snapshot = []
-            self._login_snapshot = snapshot
-            # страховка: своё окно точно скрыто и без topmost
-            try:
-                self.hide()
-                if _has_topmost(self):
-                    self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
-            except Exception:
-                pass
-            return True
-
-        def exit_login_mode(self, restore=True):
-            """Вернуть окно после входа (успех/ошибка/отмена/таймаут).
-
-            Возвращает topmost, видимость, геометрию и активную вкладку.
-            ``on_open``/``focus_editor`` НЕ вызываются и окно не активируется —
-            иначе после входа приложение отобрало бы мышь у игры.
-            """
-            was_login = self._login_mode
-            self._login_mode = False
-            snapshot, self._login_snapshot = self._login_snapshot, None
-            if login_mode is not None:
-                try:
-                    login_mode.restore_app_windows(snapshot)
-                except Exception:
-                    pass
-            try:
-                if self._login_topmost and not _has_topmost(self):
-                    self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-            except Exception:
-                pass
-            if restore and self._login_was_visible:
-                if self._login_geometry is not None:
-                    try:
-                        self.setGeometry(self._login_geometry)
-                    except Exception:
-                        pass
-                try:
-                    # show() без активации: браузер/игра остаются на переднем
-                    # плане, окно возвращается видимым и снова topmost
-                    self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-                    try:
-                        self.show_window(focus=False)
-                    finally:
-                        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
-                except Exception:
-                    pass
-                try:
-                    self.select_tab(self._login_tab, save=False)
-                except Exception:
-                    pass
-            else:
-                try:
-                    self._status_timer.start()
-                except Exception:
-                    pass
-            # BUG-1: после любого исхода входа окно обязано принимать клики
-            self.ensure_interactive(activate=True)
-            return was_login
-
-        def is_login_mode(self):
-            """Идёт ли вход в браузере (окно спрятано)?"""
-            return bool(self._login_mode)
 
         def hide_window(self, save=True):
             # B2: скрытие оверлея не должно оставлять на экране ни одного окна
@@ -1549,43 +1428,21 @@ def build_overlay_window():
             return False
 
         def open_token(self):
-            """Чип «🔑»: окно входа (браузер) или прежняя ручная вставка.
+            """Чип «🔑»: ручной ввод токена + встроенная инструкция (t194).
 
-            Окно входа само перехватывает cookie JWT, проверяет токен через
-            GET /v2/me и сохраняет его в config.json; при недоступном
-            PyQtWebEngine оно честно объясняет это и предлагает ручную
-            вставку. Закрытие окна не роняет приложение.
-
-            Окно входа с режимом «вход в браузере» показывается **без**
-            ``exec_()``: на время входа оно прячется (``hide()``), а
-            ``QDialog`` при скрытии завершает свой модальный цикл — окно
-            осталось бы без обработчика и оверлей не вернулся бы. Старые
-            окна (ручная вставка токена) работают как раньше — через
-            ``exec_()``.
+            Диалог просит JWT (F12 → Cookies → JWT), проверяет его через
+            GET /v2/me и сохраняет в config.json. Закрытие окна не роняет
+            приложение.
             """
-            if self.auth_factory is None and self.token_factory is None:
+            if self.token_factory is None:
                 return
             # BUG-2: по клику на чип обновляем статус токена (GET /v2/me)
             self.refresh_token_status(force=True)
-            if self._login_dialog is not None:
-                # окно входа уже открыто — второе не создаём
-                try:
-                    self._login_dialog.show()
-                    self._login_dialog.raise_()
-                except Exception:
-                    pass
-                return
             try:
-                dialog = None
-                if self.auth_factory is not None:
-                    dialog = self.auth_factory(self)
-                else:
-                    _sell_cls, token_cls, save_fn = self.token_factory()
-                    dialog = token_cls(self.cfg, self.market_client, self,
-                                       save_fn=save_fn)
+                _sell_cls, token_cls, save_fn = self.token_factory()
+                dialog = token_cls(self.cfg, self.market_client, self,
+                                   save_fn=save_fn)
                 if dialog is None:
-                    return
-                if self._show_login_dialog(dialog):
                     return
                 dialog.exec_()
             except Exception as exc:
@@ -1594,65 +1451,6 @@ def build_overlay_window():
                     "подробности в app.log"))
                 return
             self._after_login_dialog()
-
-        def _show_login_dialog(self, dialog):
-            """Показать окно входа неблокирующе (без ``exec_()``).
-
-            Возвращает ``True``, если окно показано так. Так делается для
-            окон с ``finished`` (браузерный вход): их прячут на время входа.
-            Окна без ``finished``/``show`` (ручная вставка) — ``False``,
-            вызывающий код использует ``exec_()``.
-            """
-            if not (callable(getattr(dialog, "show", None))
-                    and hasattr(dialog, "finished")):
-                return False
-            self._login_dialog = dialog
-            try:
-                dialog.finished.connect(self._on_login_dialog_finished)
-            except Exception:
-                pass
-            try:
-                # t30: токен из личного профиля браузера — зелёный чип сразу,
-                # не дожидаясь закрытия окна входа.
-                signal = getattr(dialog, "auth_changed", None)
-                if signal is not None:
-                    signal.connect(self._on_auth_changed_live)
-            except Exception:
-                pass
-            try:
-                dialog.show()
-                dialog.raise_()
-                dialog.activateWindow()
-            except Exception:
-                self._login_dialog = None
-                try:
-                    dialog.deleteLater()
-                except Exception:
-                    pass
-                return False
-            return True
-
-        def _on_login_dialog_finished(self, _result=0):
-            """Окно входа закрыто: чип токена, «Мои ордера»/маркет."""
-            dialog, self._login_dialog = self._login_dialog, None
-            if dialog is not None:
-                try:
-                    dialog.deleteLater()
-                except Exception:
-                    pass
-            self._after_login_dialog()
-
-        def _on_auth_changed_live(self):
-            """Токен изменился, окно входа ещё открыто: обновить чип/ордера."""
-            try:
-                self.refresh_token_status(force=True)
-            except Exception:
-                pass
-            if self._has_token():
-                try:
-                    self._reload_orders()
-                except Exception:
-                    pass
 
         def _after_login_dialog(self):
             """Обновляет чип токена и данные после закрытия окна входа."""
