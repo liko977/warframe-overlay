@@ -465,7 +465,6 @@ def notifications_qss():
     (``#121a25`` и т.п.), поэтому строки всегда валидны и белого фона нет.
     """
     bg = safe_palette_color("panel", "#121a25")
-    window = safe_palette_color("window", "#0d131c")
     card = safe_palette_color("card", "#17212e")
     border = safe_palette_color("border", "#24344a")
     text = safe_palette_color("text", "#e6edf6")
