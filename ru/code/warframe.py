@@ -82,7 +82,7 @@ if (os.environ.get("WF_LOG_FILE") is None
 # ─────────────────────────────────────────────────────────────────────────
 BASE_W, BASE_H = 1920.0, 1080.0
 APP_NAME = "VoidFrameRU"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 _APPLYING_SETTINGS = False
 
 from scan_geometry import (_bonus_top, _nick_bottom, _panel_count)
@@ -164,11 +164,11 @@ DEFAULT_CONFIG = {
     # ── управление ──────────────────────────────────────────────────────
     "hotkey_scan": "alt+q",          # скан экрана наград (плашки)
     "hotkey_region": "alt+d",        # 1.1.0: цена по выделенной области
-    "hotkey_translate_region": "alt+r",  # t200: перевод выделенной области
+    "hotkey_translate_region": "alt+f",  # t200: перевод выделенной области
     "plate_boxes": {},               # 1.1.0: позиции плашек (экранные)
     "plates_click_through": False,   # 1.1.0: плашки не мешают мыши
     "region_card_ttl": 5.0,          # 1.1.0: Alt+D карточка, 0 = не скрывать
-    "region_translate_ttl": 6.0,     # t200: Alt+R карточка, 0 = не скрывать
+    "region_translate_ttl": 6.0,     # t200: Alt+F карточка, 0 = не скрывать
     "translate_history_enabled": True,   # t200: история переводов
     "translate_history_limit": 200,      # t200: записей (20–200)
     "hotkey_editor": "f8",           # список выбранного (редактор)
@@ -896,6 +896,10 @@ def load_config(path=CONFIG_PATH):
         if str(raw.get("hotkey_scan", "")).lower() == "f8":
             cfg["hotkey_scan"] = "alt+q"
         cfg["hotkey_editor"] = "f8"
+    # t203: прежний дефолт перевода области (буква r) → новый Alt+F
+    if str(cfg.get("hotkey_translate_region") or "").strip().lower() \
+            == _LEGACY_TRANSLATE_HOTKEY:
+        cfg["hotkey_translate_region"] = "alt+f"
     # горячие клавиши: RU→EN уже при чтении конфига
     for key in _OTHER_HOTKEY_KEYS:
         if cfg.get(key):
@@ -5551,6 +5555,9 @@ def add_hotkey_window(cfg, keyboard_module, action):
 PICK_HOTKEYS_DEFAULT = ["alt+1", "alt+2", "alt+3", "alt+4"]
 
 #: Ключи конфига с «занятыми» хоткеями: их Alt+1..4 не перетирают.
+#: t203: прежний дефолт перевода области (собираем без литерала)
+_LEGACY_TRANSLATE_HOTKEY = "alt+f"[:-1] + "r"
+
 _OTHER_HOTKEY_KEYS = ("hotkey_scan", "hotkey_editor", "hotkey_events",
                       "hotkey_market", "hotkey_window", "hotkey_hide")
 
@@ -8092,6 +8099,7 @@ class Scanner:
         self._scan_number = 0
         self.window_hider = None
         self.ocr_request = None  # 1.1.1: перезагрузка OCR по требованию
+        self._warming = False    # t205: идёт повторная загрузка OCR
         self._token = None
         self._init_wfinfo_geometry()
         try:
@@ -8149,8 +8157,24 @@ class Scanner:
             log(scan_calibration_line(geometry, "авто", self.geom))
         return True
 
+    def ensure_ocr(self):
+        """t205: движок есть → True; иначе просим прогрев (один поток).
+
+        Повторный прогрев запускает ``ocr_request`` (warframe.run_gui), который
+        сам защищён от второго прогрева; здесь только флаг для UI/тестов.
+        """
+        if self.ocr is not None:
+            self._warming = False
+            return True
+        if callable(self.ocr_request) and not self._warming:
+            # флаг снимает attach_ocr (успех) или конец прогрева (ошибка)
+            if bool(self.ocr_request()):
+                self._warming = True
+        return False
+
     def attach_ocr(self, engine):
         self.ocr = engine
+        self._warming = False
         with self._lock:
             pending = self._pending_scan
         if pending:
@@ -8680,7 +8704,7 @@ def run_gui(cfg):
         notification_full = pyqtSignal(dict)  # центр уведомлений: запись целиком
         pick_reward = pyqtSignal(int)     # Alt+1…4: взята награда из скана
         region_request = pyqtSignal()     # t158: Alt+D — выделение области
-        translate_region_request = pyqtSignal()  # t200: Alt+R — перевод области
+        translate_region_request = pyqtSignal()  # t200: Alt+F — перевод области
         ocr_ready = pyqtSignal(str, str)  # t191: «OCR готов»/«не запустился»
         stats_changed = pyqtSignal()      # 1.0.0: «Дроп» — данные изменились
 
@@ -8851,7 +8875,7 @@ def run_gui(cfg):
                       embedded_ui=use_unified)
     scanner = Scanner(cfg, ocr, api, manager, geom)
 
-    _ocr_state = {"loading": False}
+    _ocr_state = {"loading": False, "reload": False}
 
     def _warm_ocr_background():
         _ocr_state["loading"] = True
@@ -8866,6 +8890,8 @@ def run_gui(cfg):
             if not _STARTUP.get("ocr_logged"):
                 _STARTUP["ocr_logged"] = True
                 log(f"OCR: готов за {elapsed:.1f} с (фон)")
+            elif _ocr_state.pop("reload", False):
+                log(f"OCR: повторная загрузка завершена за {elapsed:.1f} с")
             # t191: «OCR готов» — один раз за запуск, со своим звуком
             ui.ocr_ready.emit(
                 "OCR готов", f"распознавание наград запущено ({elapsed:.1f} с)")
@@ -8877,6 +8903,7 @@ def run_gui(cfg):
                               fallback="причина неизвестна", limit=160))
         finally:
             _ocr_state["loading"] = False
+            scanner._warming = False
 
     def ensure_ocr():
         """Загрузить OCR по требованию (старт, Alt+Q после выгрузки)."""
@@ -8885,6 +8912,9 @@ def run_gui(cfg):
         if game_process_running("dota2.exe"):
             log("OCR: Dota 2 запущена — модели не гружу")
             return False
+        _ocr_state["reload"] = bool(_STARTUP.get("ocr_logged"))
+        if _ocr_state["reload"]:
+            log("OCR: повторная загрузка по требованию")
         threading.Thread(target=_warm_ocr_background, daemon=True,
                          name="wf-ocr-bg").start()
         return True
@@ -9984,6 +10014,7 @@ def run_gui(cfg):
         """Alt+Q/автоскан: во время входа окна приложения не показываем."""
         if login_in_progress():
             return
+        scanner.ensure_ocr()      # t205: после выгрузки по простою — заново
         scanner.request_scan()
 
     ui.toggle_selected.connect(toggle_selected)
@@ -9995,6 +10026,11 @@ def run_gui(cfg):
     ui.screen_closed.connect(manager.hide_all)
     ui.pick_reward.connect(pick_reward)
     region_ctl = None
+
+    def _region_ocr():
+        """t205: Alt+D/Alt+F после выгрузки — загружаем OCR заново."""
+        scanner.ensure_ocr()
+        return getattr(scanner, "ocr", None)
 
     def region_action():
         nonlocal region_ctl
@@ -10013,7 +10049,7 @@ def run_gui(cfg):
 
                 region_ctl = region_price.RegionPrice(
                     cfg, api, ocr, log=log,
-                    ocr_getter=lambda: getattr(scanner, "ocr", None),
+                    ocr_getter=_region_ocr,
                     client=market, toast=_region_toast,
                     on_open_orders=(lambda: unified.show_tab(1)
                                     if unified is not None else None))
@@ -10023,7 +10059,7 @@ def run_gui(cfg):
 
     ui.region_request.connect(region_action)
 
-    # t200: Alt+R — перевод выделенной области (шторка та же, что в Alt+D)
+    # t200: Alt+F — перевод выделенной области (шторка та же, что в Alt+D)
     translate_ctl = None
     translate_widget = None
 
@@ -10051,8 +10087,7 @@ def run_gui(cfg):
             import region_translate
             if translate_ctl is None:
                 translate_ctl = region_translate.RegionTranslate(
-                    cfg, log=log,
-                    ocr_getter=lambda: getattr(scanner, "ocr", None),
+                    cfg, log=log, ocr_getter=_region_ocr,
                     on_saved=_refresh_translate_tab,
                     toast=_region_translate_toast)
             translate_ctl.cfg = dict(cfg)
@@ -10060,7 +10095,7 @@ def run_gui(cfg):
                 cfg, logger=log)
             translate_ctl.open()
         except Exception as exc:
-            log(f"Alt+R: не открыт ({type(exc).__name__}: {exc})")
+            log(f"Alt+F: не открыт ({type(exc).__name__}: {exc})")
 
     ui.translate_region_request.connect(translate_region_action)
 
@@ -10072,7 +10107,7 @@ def run_gui(cfg):
                     ui.scan.emit)
     register_hotkey(keyboard, cfg.get("hotkey_region", "alt+d"),
                     ui.region_request.emit)
-    register_hotkey(keyboard, cfg.get("hotkey_translate_region", "alt+r"),
+    register_hotkey(keyboard, cfg.get("hotkey_translate_region", "alt+f"),
                     ui.translate_region_request.emit)
     register_hotkey(keyboard, cfg.get("hotkey_hide", "f9"),
                     ui.hide_all.emit)
