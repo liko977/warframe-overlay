@@ -459,7 +459,6 @@ def detect_geometry(frame, expected=0, base_w=BASE_W, base_h=BASE_H,
     0 — определять по кадру. Если найдено не ``expected`` — возвращаем None
     (работаем по конфигу).
     """
-    np = _np()
     if frame is None:
         return None
     try:
